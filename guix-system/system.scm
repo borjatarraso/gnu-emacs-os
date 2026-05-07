@@ -319,11 +319,11 @@
            (type "ext4"))
          %base-file-systems))
 
-  (users (cons (user-account
-                 (name "root")
-                 (group "root")
-                 (home-directory "/root"))
-               %base-user-accounts))
+  ;; %base-user-accounts already includes root and the system service
+  ;; users (daemon, nobody, etc.). adding our own root-account record
+  ;; on top of that triggers `accounts appear more than once: root'
+  ;; from guix system, so we just inherit the base set verbatim.
+  (users %base-user-accounts)
 
   ;; emacs is required, base packages are kept for the install-time
   ;; coreutils and bash (bash provides /bin/sh until phase 3 ships the
