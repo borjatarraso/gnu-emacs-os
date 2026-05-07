@@ -1,0 +1,28 @@
+# Build artifacts
+*.o
+*.so
+*.a
+*.elc
+pid1/emacs-init
+shstub/sh
+
+# Local editor / OS junk
+*~
+\#*\#
+.DS_Store
+
+# QEMU images and serial logs
+/tmp/gnu-emacs-os.qcow2
+*.qcow2
+*.iso
+*.img
+boot-*.log
+
+# Lynx Factory local state
+/.lynx/
+
+# Local planning doc, not part of the shipped repo
+/plan.txt
+
+# ship in the OS image. Excluded from the public branch by default; keep
+# them in a private dev branch if you want them tracked.

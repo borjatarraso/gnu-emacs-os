@@ -1,0 +1,32 @@
+;; channels.scm, the pinned channel set the ISO is built against.
+;;
+;; this is a verbatim copy of the channel pin in
+;; ../guix-system/channels.scm, kept here so the iso-build directory
+;; is a self-contained reproducibility unit. someone with just this
+;; directory and a guix daemon can run:
+;;
+;;   guix time-machine -C channels.scm -- \
+;;       system image -L .. build.scm
+;;
+;; and get a byte-identical (modulo the kernel's build-id) ISO.
+;;
+;; bumping this pin: do it in lockstep with guix-system/channels.scm.
+;; the two files MUST agree, otherwise the ISO drifts away from the
+;; qcow2 dev image and "works on my qcow" stops implying "works on
+;; the ISO". both files carry %guix-pin so a grep -R %guix-pin
+;; surfaces any drift. last bumped: 2026-05-06, captured via
+;; `guix describe -f channels' on the build host.
+
+(define %guix-pin
+    "230aa373f315f247852ee07dff34146e9b480aec")
+
+(list (channel
+        (name 'guix)
+        (url "https://git.savannah.gnu.org/git/guix.git")
+        (branch "master")
+        (commit %guix-pin)
+        (introduction
+         (make-channel-introduction
+          "9edb3f66fd807b096b48283debdcddccfea34bad"
+          (openpgp-fingerprint
+           "BBB0 2DDF 2CEA F6A8 0D1D  E643 A2A0 6DF2 A33A 54FA")))))
