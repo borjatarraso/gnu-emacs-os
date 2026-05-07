@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="img/logo.png" alt="GNU/Emacs OS — editor on silicon" width="217" height="256">
+</p>
+
 # GNU/Emacs OS
 
 An operating system where Emacs is the userland and Emacs is PID 1.
