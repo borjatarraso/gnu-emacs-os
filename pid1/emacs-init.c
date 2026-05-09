@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* emacs-init.c, PID 1 for GNU/Emacs OS.
  *
  * I do the minimum a kernel needs from PID 1, then I fork-and-exec
@@ -34,6 +35,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -1193,6 +1195,50 @@ Fpid1_bring_up_lo(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
+/* sync + reboot(2) wrapper shared by both directions. CMD is one of
+ * RB_POWER_OFF or RB_AUTOBOOT. on success the kernel kills every
+ * process including the caller, so a successful return is
+ * unreachable; we set errno and return -1 only when reboot itself
+ * fails (typically EPERM if CAP_SYS_BOOT was dropped). sync() flushes
+ * dirty pages first; cheap, and cheap insurance against losing
+ * /var writes on the image path. */
+static int
+raw_reboot(int cmd)
+{
+    sync();
+    return reboot(cmd);
+}
+
+/* (pid1-poweroff) -> never returns on success, signals pid1-error
+ * on EPERM/ENOSYS. ACPI in QEMU translates RB_POWER_OFF into a
+ * machine-shutdown event and qemu exits. on bare metal the firmware
+ * actually cuts power. either way, the VM/host stops. */
+static emacs_value
+Fpid1_poweroff(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+               void *data)
+{
+    (void)nargs; (void)args; (void)data;
+    if (raw_reboot(RB_POWER_OFF) < 0) {
+        pid1_signal_errno(env, "pid1: poweroff", errno);
+    }
+    return env->intern(env, "nil");
+}
+
+/* (pid1-reboot) -> never returns on success. RB_AUTOBOOT triggers
+ * the kernel's restart path; under qemu that drops the guest and
+ * the launcher loop terminates. for an in-place restart of just
+ * emacs use a different command, this is the global one. */
+static emacs_value
+Fpid1_reboot(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+             void *data)
+{
+    (void)nargs; (void)args; (void)data;
+    if (raw_reboot(RB_AUTOBOOT) < 0) {
+        pid1_signal_errno(env, "pid1: reboot", errno);
+    }
+    return env->intern(env, "nil");
+}
+
 /* binds NAME to FUNC at top level via (defalias NAME FUNC). assumes
  * env is non-null and not in non-local-exit state. named with a pid1_
  * prefix because the bare name `bind` collides with libc's bind(2)
@@ -1240,6 +1286,16 @@ emacs_module_init(struct emacs_runtime *ert)
         "Bring up the loopback interface. Return t.",
         NULL);
     pid1_defalias(env, "pid1-bring-up-lo", lo);
+
+    emacs_value off = env->make_function(env, 0, 0, Fpid1_poweroff,
+        "Sync, then reboot(RB_POWER_OFF). Does not return on success.",
+        NULL);
+    pid1_defalias(env, "pid1-poweroff", off);
+
+    emacs_value rb = env->make_function(env, 0, 0, Fpid1_reboot,
+        "Sync, then reboot(RB_AUTOBOOT). Does not return on success.",
+        NULL);
+    pid1_defalias(env, "pid1-reboot", rb);
 
     /* provide the feature so (require 'pid1-module) works after
      * (module-load ...) without a separate elisp wrapper. */

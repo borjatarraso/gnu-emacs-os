@@ -1,3 +1,4 @@
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; system.scm, the operating-system record for GNU/Emacs OS.
 ;;
 ;; this is the smallest record I could get the kernel to boot with:
@@ -69,6 +70,12 @@
     ;; panic.el, must load before any userland/*.el.
     (local-file "../emacs-init/core/use-package-shim.el"
                 "use-package-shim.el"))
+
+(define power-el
+    ;; thin elisp wrapper around pid1-module's pid1-poweroff and
+    ;; pid1-reboot bindings. exposes M-x geos-poweroff / geos-reboot.
+    ;; depends on panic.el for panic-handle, must load after it.
+    (local-file "../emacs-init/core/power.el" "power.el"))
 
 (define network-el
     ;; phase-4 core. /proc/net/dev and /proc/net/route parsers, plus
@@ -221,7 +228,17 @@
                                 ":"
                                 #$(file-append xkbcomp "/bin")
                                 ":"
+                                ;; modulepath: Xorg accepts comma-separated
+                                ;; paths. xorg-server holds the core plus
+                                ;; modesetting/fb; xf86-input-evdev ships
+                                ;; the evdev_drv.so out of tree, so we
+                                ;; have to splice its module dir in or
+                                ;; Xorg fails with "No input driver
+                                ;; matching `evdev'".
                                 #$(file-append xorg-server "/lib/xorg/modules")
+                                ","
+                                #$(file-append xf86-input-evdev
+                                               "/lib/xorg/modules")
                                 ":"
                                 "/run/current-system/profile/share/fonts"
                                 ":"
@@ -241,6 +258,7 @@
                                ;; replace that crutch with use-package.
                                "-l" #$early-init-el
                                "-l" #$panic-el
+                               "-l" #$power-el
                                "-l" #$use-package-shim-el
                                "-l" #$network-el
                                "-l" #$network-buffer-el
