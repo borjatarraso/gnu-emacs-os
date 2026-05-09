@@ -83,6 +83,13 @@
     ;; pid1-bring-up-lo. requires panic, must load after panic.el.
     (local-file "../emacs-init/core/network.el" "network.el"))
 
+(define hostname-el
+    ;; reads /etc/hostname and feeds it to pid1-set-hostname.  without
+    ;; this, /proc/sys/kernel/hostname stays at the kernel default
+    ;; "(none)" because we shipped no Shepherd service to call
+    ;; sethostname(2).  must load after panic.el.
+    (local-file "../emacs-init/core/hostname.el" "hostname.el"))
+
 (define network-buffer-el
     ;; phase-4 buffer. *network* live view, 2s refresh timer, RET for
     ;; iface details. requires both panic and network, must load last
@@ -267,6 +274,7 @@
                                "-l" #$power-el
                                "-l" #$use-package-shim-el
                                "-l" #$network-el
+                               "-l" #$hostname-el
                                "-l" #$network-buffer-el
                                ;; phase 5c modules -l'd BEFORE
                                ;; exwm-config so the (require 'multimon)
@@ -309,7 +317,7 @@
                                "-l" #$packages-buffer-el))))
 
 (operating-system
-  (host-name "emacs-os")
+  (host-name "lambda")
   (timezone "Europe/Madrid")
   (locale "en_US.utf8")
 
