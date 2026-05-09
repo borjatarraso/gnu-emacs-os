@@ -23,8 +23,3 @@ boot-*.log
 
 # Local planning doc, not part of the shipped repo
 /plan.txt
-
-# ship in the OS image. Excluded from the public branch by default; keep
-# them in a private dev branch if you want them tracked.
-
-# shipped repo; kept locally only.

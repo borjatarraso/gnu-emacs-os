@@ -146,7 +146,23 @@ or nil when there was nothing to load."
       (exwm-workspace-switch-create 3)
     (error (panic-handle err '(exwm-workspace-switch . 3)))))
 
+;; before exwm-enable runs, pin the initial and default frame to fullboth
+;; so the first emacs frame spans the entire root window (fullscreen on
+;; both axes). without this, the initial frame respects whatever pixel
+;; geometry emacs computed from font metrics at startup, which leaves a
+;; black border between the emacs frame and the X root. this matters
+;; visually only on first boot or after a (delete-frame); EXWM's later
+;; reflow will resize subsequent frames to fit.
+;;
+;; safe under no-DISPLAY: setting frame parameters in alists here is
+;; just a setq on a list, with no I/O. the values are only consulted
+;; when emacs creates a graphical frame.
 (when exwm-config--should-enable
+  ;; alist semantics: first matching key wins on lookup. consing the
+  ;; new entry to the head shadows any earlier one without needing
+  ;; cl-remove, which would drag cl-lib into a load-time require.
+  (dolist (alist '(initial-frame-alist default-frame-alist))
+    (set alist (cons '(fullscreen . fullboth) (symbol-value alist))))
   (exwm-config--push-system-site-lisp)
   ;; use-package isn't bootstrapped by phase 5a (no package.el on the
   ;; image yet), but the project rule says "every package via

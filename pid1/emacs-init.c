@@ -223,6 +223,64 @@ read_gnu_system_path(char *out, size_t out_len)
     return 0;
 }
 
+/* parse /proc/cmdline for the geos.mode= token. recognized values are
+ * "ui" (default; spawn Xorg and run emacs as an X client) and "console"
+ * (skip Xorg, run emacs on /dev/console with TERM=linux). returns 1 for
+ * UI mode, 0 for console mode. anything else, including a missing token
+ * or an unreadable cmdline, defaults to UI: that matches the historical
+ * v0.1/v0.2 behaviour and means an unmodified GRUB entry keeps the
+ * pretty boot. invariant: pure read, never blocks longer than the
+ * /proc read takes. logs the chosen mode to /dev/console so the
+ * operator sees the decision in the boot trace. */
+#define GEOS_MODE_UI      1
+#define GEOS_MODE_CONSOLE 0
+
+static int
+read_geos_mode(void)
+{
+    int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        console("pid1: /proc/cmdline unreadable, defaulting to ui mode");
+        return GEOS_MODE_UI;
+    }
+    char buf[4096];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    (void)close(fd);
+    if (n <= 0) return GEOS_MODE_UI;
+    buf[n] = '\0';
+    const char *key = "geos.mode=";
+    char *p = strstr(buf, key);
+    if (!p) return GEOS_MODE_UI;
+    p += strlen(key);
+    /* extract the token bound by whitespace/newline; we only care about
+     * a small, fixed set of values so a 32-byte stack copy is plenty. */
+    char val[32];
+    size_t i = 0;
+    while (i < sizeof val - 1
+           && p[i] != '\0' && p[i] != ' ' && p[i] != '\t' && p[i] != '\n') {
+        val[i] = p[i];
+        i++;
+    }
+    val[i] = '\0';
+    if (strcmp(val, "console") == 0) {
+        console("pid1: geos.mode=console, skipping Xorg, emacs on /dev/console");
+        return GEOS_MODE_CONSOLE;
+    }
+    if (strcmp(val, "ui") == 0) {
+        console("pid1: geos.mode=ui, will spawn Xorg + EXWM");
+        return GEOS_MODE_UI;
+    }
+    /* unknown value: log and default. better than booting into a mode
+     * the operator did not ask for. */
+    {
+        char msg[128];
+        (void)snprintf(msg, sizeof msg,
+                       "pid1: unknown geos.mode=%s, defaulting to ui", val);
+        console(msg);
+    }
+    return GEOS_MODE_UI;
+}
+
 /* lays down /run/current-system as a symlink to the gnu.system= path.
  * guix's activation service normally does this, but we replace the boot
  * script before activation runs, so nothing under /run/current-system
@@ -892,6 +950,20 @@ main(int argc, char **argv)
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGCHLD, &sa, NULL) < 0) {
         console("pid1: sigaction(SIGCHLD) failed, orphans will pile up");
+    }
+
+    /* boot mode toggle: /proc/cmdline geos.mode=console forces a
+     * pure-text boot (no Xorg, emacs talks to /dev/console). default
+     * (no token, or geos.mode=ui) keeps the v0.2 behaviour. clearing
+     * xorg_path here also disables xorg_bring_up's respawn path so a
+     * console-mode boot never tries to start an X server. display_env
+     * stays NULL so spawn_emacs's envp does not advertise a DISPLAY
+     * the user did not ask for. */
+    int boot_mode = read_geos_mode();
+    if (boot_mode == GEOS_MODE_CONSOLE) {
+        xorg_path = NULL;
+        xorg_disabled = 1;
+        display_env = NULL;
     }
 
     /* phase 5a: start Xorg if argv[3] gave us a spec. critical that

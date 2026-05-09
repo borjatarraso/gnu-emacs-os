@@ -102,6 +102,46 @@ Boot takes about eleven seconds from `qemu` invocation to the EXWM
 splash. The first thing you see on the kernel framebuffer is the boot
 log. The second thing is Emacs.
 
+## boot modes: UI vs console
+
+GEOS supports two boot modes. The mode is picked at GRUB time via the
+`geos.mode=` kernel cmdline token, which PID 1 reads from
+`/proc/cmdline` before it spawns Xorg.
+
+  - `geos.mode=ui` (the default, also what you get if the token is
+    absent). PID 1 spawns Xorg with the modesetting driver against
+    `/dev/dri/card0`, then spawns Emacs with `DISPLAY=:0` so Emacs
+    comes up as an X client and EXWM grabs the root window. This is
+    the v0.2 default: Emacs is a graphical session, EXWM is the WM,
+    `s-&` launches X clients, you get a real fullscreen frame.
+  - `geos.mode=console`. PID 1 skips Xorg entirely and spawns Emacs on
+    `/dev/console` with `TERM=linux`. No X server, no EXWM, no GUI.
+    The session is the kernel framebuffer console with Emacs filling
+    it. `M-x eshell` for the shell, all the system buffers
+    (`*processes*`, `*network*`, `*journal*`, `*services*`,
+    `*disks*`, `*packages*`) work the same way they do in UI mode.
+    This is the right mode for a serial-console headless box, or for
+    an SSH-equivalent session where you boot to a single TTY and stay
+    there.
+
+To pick the mode at boot, hit `e` at the GRUB menu, find the line that
+starts with `linux /gnu/store/...`, and append `geos.mode=console` (or
+`geos.mode=ui`) to the end of that line. Press `Ctrl-x` (or `F10`) to
+boot. The choice persists for that boot only; the next reboot reverts
+to whatever the GRUB entry has baked in. To make the choice permanent,
+append the token to `kernel-arguments` in `guix-system/system.scm` and
+`guix system reconfigure` (v0.3) or rebuild the image.
+
+The boot log echoes the chosen mode as one of:
+
+```
+pid1: geos.mode=console, skipping Xorg, emacs on /dev/console
+pid1: geos.mode=ui, will spawn Xorg + EXWM
+```
+
+A missing or unrecognized value defaults to UI. An unknown value also
+logs a warning so you can see what the operator typed.
+
 ## fast iteration with the qcow2 image
 
 For development I build a qcow2 instead of an ISO. The qcow2 boots

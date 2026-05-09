@@ -35,9 +35,15 @@ on Guix, so it is the safest pick that doesn't add a new system
 package. Override at the top of this file if a future profile
 swaps in something nicer.")
 
-(defvar fonts-default-size 12
+(defvar fonts-default-size 14
   "Base point size for the default face before HiDPI scaling.
-Integer. Scaled by `fonts--hidpi-scale' on display init.")
+Integer. Scaled by `fonts--hidpi-scale' on display init. Bumped from
+12 to 14 because at 1920x1080 inside a qemu gtk window 12pt rendered
+too small to read at typical eye distance, and the kernel-virtio_gpu
+DPI report does not trip the HiDPI threshold so we never scaled up.
+14 is a sane base that reads well on both qemu and a 1080p laptop
+screen; HiDPI panels >144dpi still scale on top via
+`fonts--hidpi-scale'.")
 
 (defvar fonts-emoji-family "Noto Color Emoji"
   "Preferred emoji font family. Falls back to Symbola if missing.

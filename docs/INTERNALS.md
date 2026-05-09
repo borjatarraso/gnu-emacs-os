@@ -1,0 +1,371 @@
+# GEOS internals
+
+A contributor-oriented walkthrough of how GNU/Emacs Operating System
+(GEOS) actually boots, runs, and shuts down. If you are reading this,
+you probably want to fix something or add something. This document is
+the map.
+
+Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+## reading order
+
+The OS is small. About 1300 lines of C, about 2000 lines of Elisp,
+about 500 lines of Scheme. You can read all of it in an evening and
+you should. This document is a guided tour. The truth is in the
+source.
+
+The lifecycle below is one continuous chain from kernel handoff to
+power off. Read top to bottom on the first pass.
+
+## stage 0: from POST to the kernel
+
+Outside our scope. The firmware loads GRUB, GRUB loads the Linux
+kernel and the initrd. The relevant Linux command line tokens are
+listed in `guix-system/system.scm` under `kernel-arguments`:
+
+```
+console=tty1 console=ttyS0,115200 gnu.system=/gnu/store/...-system
+geos.mode=ui          ; or geos.mode=console
+```
+
+`gnu.system=` is the Guix initrd's pointer to this system's
+profile. PID 1 reads it later to symlink `/run/current-system`.
+`geos.mode=` is the GEOS-specific token (described in
+`docs/INSTALL.md`) that picks UI vs console boot.
+
+Linux mounts the initrd, runs the Guix initrd's tiny shell-equivalent
+to set up the root filesystem, and then `execve`s the per-system boot
+script under `/gnu/store/...-system/boot`. That script is a Guile gexp
+produced by `compute-boot-script` in Guix's
+`(gnu services)`. Critically, our service
+`emacs-init-boot-service` extends `boot-service-type` with a gexp
+that runs BEFORE the Shepherd-spawning gexp. See the comment at the
+top of `guix-system/system.scm` for the gexp ordering trick that
+makes this work.
+
+When the boot script reaches our gexp, it `execl`s the PID 1 binary,
+which replaces the process image. Shepherd never runs.
+
+## stage 1: PID 1 (`pid1/emacs-init.c`)
+
+The PID 1 binary does the bare minimum a kernel needs from PID 1:
+
+```
+1. argv parsing                       main() in emacs-init.c
+2. boot banner                        console("GNU/Emacs Operating System...")
+3. mount the pseudo filesystems       do_mount() x6
+4. lay down /run/current-system       link_current_system()
+5. bring up loopback                  raw_bring_up_lo()
+6. install SIGCHLD handler            sigaction(SIGCHLD, ...)
+7. parse /proc/cmdline for geos.mode= read_geos_mode()
+8. spawn Xorg (UI mode only)          xorg_bring_up() -> spawn_xorg()
+9. spawn emacs                        spawn_emacs()
+10. supervisor loop                   for(;;) waitpid(-1, ...)
+```
+
+### argv layout
+
+The boot gexp passes:
+
+```
+argv[1] = absolute path to the emacs binary
+argv[2] = absolute path to pid1-module.so (or "")
+argv[3] = colon-joined Xorg spec
+            "<Xorg-bin>:<xkb-bindir>:<modulepath>:<fontpath>:<conf>"
+          empty string disables X (raw smoke tests)
+argv[4..] = forwarded into emacs as its argv,
+            typically "-Q -l early-init.el -l panic.el -l ..."
+```
+
+Anything missing falls back to `/usr/bin/emacs` and no module, which
+matches a plain `emacs-init` smoke test outside QEMU.
+
+### the pseudo filesystem mounts
+
+`/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/dev/pts`. Each one is mounted
+with `MS_NOSUID|MS_NOEXEC|MS_NODEV` where applicable. EBUSY is treated
+as success: the modern Guix initrd already mounts a few of these
+before handing off, and re-mounting them is fine. See the long comment
+in `do_mount()` for the rationale.
+
+### `/run/current-system`
+
+The Guix indirection that every profile-aware path keys off of:
+
+```
+PATH=/run/current-system/profile/bin:/run/current-system/profile/sbin
+```
+
+Guix's activation service normally creates this symlink. We replace
+the boot script before activation runs, so `link_current_system()`
+parses `gnu.system=` from `/proc/cmdline` and stands up the symlink
+itself. Without this, `executable-find` inside Emacs returns `nil` for
+everything and the `s-&` launcher cannot find xterm.
+
+The path read from `/proc/cmdline` is validated: it must start with
+`/gnu/store/`, must not contain `..`, must fit in `PATH_MAX`. A
+hostile or malformed cmdline would otherwise let any path become the
+profile root. See the comment over `read_gnu_system_path()`.
+
+### boot mode toggle
+
+`read_geos_mode()` reads `/proc/cmdline` for `geos.mode=`. The
+recognized values are `ui` (default) and `console`. In console mode,
+PID 1 sets `xorg_path = NULL`, `xorg_disabled = 1`, and `display_env =
+NULL` so the X bring-up path is fully skipped and Emacs comes up on
+`/dev/console` with `TERM=linux`.
+
+### Xorg bring-up (UI mode only)
+
+`xorg_bring_up()` does:
+
+  1. `mkdir /tmp/.X11-unix` with mode 01777 (the standard X socket dir
+     permissions).
+  2. Unlink any stale `X0` socket from a previous boot.
+  3. `spawn_xorg()` to fork-exec the X server (Xorg with the
+     `modesetting` driver against `/dev/dri/card0`, configured by
+     `xorg-modesetting.conf` from the system profile).
+  4. `wait_for_x_socket()` polls for the X0 socket up to 10 seconds.
+
+`spawn_xorg()` redirects stderr to `/tmp/Xorg.0.log` so the boot trace
+on `/dev/console` stays clean. The Xorg argv list is composed inline
+from the spec we got in `argv[3]`. Input devices (kbd0 on event1,
+mouse0 on event4) are statically pinned in the conf file because we
+have no udevd; the `# device numbering verified...` comment in
+`xorg-modesetting.conf` documents how to re-pin them if the kernel
+ever shuffles event nodes.
+
+If Xorg dies post-boot, the supervisor loop notices the SIGCHLD and
+calls `xorg_note_respawn()`. That tracks restart attempts in a 60s
+sliding window and trips a hard limit of 5 respawns per window
+(`XORG_RESPAWN_CAP`). Once tripped, `xorg_disabled` is set and the
+session degrades to bare Emacs on `/dev/console` for the rest of this
+boot.
+
+### spawn Emacs
+
+`spawn_emacs()` forks, calls `setsid()`, opens `/dev/console`
+(falling back to `/dev/tty1`), `dup2`s it onto fds 0/1/2, and
+`execve`s the Emacs binary. The envp is fixed-size and includes:
+
+```
+TERM=linux
+HOME=/root
+USER=root
+PATH=/run/current-system/profile/bin:/run/current-system/profile/sbin
+PID1_MODULE_PATH=/gnu/store/...pid1-module.so   ; if module passed
+DISPLAY=:0                                       ; if Xorg up
+```
+
+The argv passed to Emacs is the boot gexp's `-l` chain (early-init,
+panic, power, use-package shim, network, hostname, network-buffer,
+the wm modules, exwm-config, the userland modules, the system-concept
+buffers).
+
+### supervisor loop
+
+`for (;;) { spawn_emacs(); waitpid(-1, ...); }` with two distinct
+death paths:
+
+  - Emacs died: log "emacs exited, respawning", fall through to outer
+    loop's `spawn_emacs()`. `sleep_at_least(1)` throttles crash loops.
+  - Xorg died (UI mode): SIGTERM emacs (because it is talking to a
+    dead `:0`), wait 5 seconds for clean exit, SIGKILL on timeout.
+    Then `xorg_note_respawn()` and try `xorg_bring_up()`. Then fall
+    through and respawn emacs against the new Xorg.
+
+The `waitpid(-1)` (any child) is deliberate: we have to react to Xorg
+death AND Emacs death AND reap orphans reparented to us by other dead
+processes. Tightly waiting on Emacs's pid only would let an Xorg crash
+go unnoticed until the user closed their X frame.
+
+## stage 2: Emacs becomes the OS userland
+
+When `execve(emacs ...)` returns successfully, Emacs starts up. The
+boot gexp's `-l` chain is processed in order. The interesting files,
+in load order:
+
+```
+emacs-init/early-init.el          register pid1-error, module-load .so
+emacs-init/core/panic.el          *panic* buffer + error trap
+emacs-init/core/power.el          M-x geos-poweroff / geos-reboot
+emacs-init/core/use-package-shim.el   bootstrap use-package + :comment kw
+emacs-init/core/network.el        bring up lo, /proc/net/* parsers
+emacs-init/core/hostname.el       read /etc/hostname, sethostname(2)
+emacs-init/buffers/network.el     *network* buffer + 2s refresh timer
+emacs-init/wm/multimon.el         xrandr-driven workspace placement
+emacs-init/wm/fonts.el            default face + emoji + CJK fontset
+emacs-init/wm/input.el            quail input methods
+emacs-init/wm/exwm-config.el      (exwm-enable), s-&, s-r, s-0..3
+emacs-init/userland/files.el      dired
+emacs-init/userland/shell.el      eshell
+emacs-init/userland/uname.el      eshell/uname rebrand to GEOS
+emacs-init/userland/git.el        magit
+emacs-init/userland/web.el        eww
+emacs-init/userland/mail.el       notmuch
+emacs-init/userland/chat.el       erc
+emacs-init/userland/notes.el      org
+emacs-init/userland/pdf.el        pdf-tools
+emacs-init/userland/init.el       verify all userland-* features loaded
+emacs-init/buffers/processes.el   *processes* buffer
+emacs-init/buffers/journal.el     *journal* (dd-on-/dev/kmsg)
+emacs-init/buffers/services.el    *services* (placeholder for v0.3 sup.)
+emacs-init/buffers/disks.el       *disks* (/proc/partitions)
+emacs-init/buffers/packages.el    *packages* (manifest readout)
+```
+
+### early-init.el
+
+Runs before the splash, before `package.el`, before any other Elisp.
+Three jobs:
+
+  1. Set `package-enable-at-startup nil` so `package.el` does not wake
+     up and fight with our manual loadpath wiring.
+  2. Determine if this Emacs is the OS userland by checking
+     `(getenv "PID1_MODULE_PATH")`. This is `pid1-as-emacs-p`. Plain
+     `emacs -Q` on a dev host returns `nil` here.
+  3. If we are PID 1's userland, `module-load` the dynamic module
+     from the env path, register `pid1-error` as a real condition,
+     and point `user-emacs-directory` at `/var/emacs/`.
+
+The module-load is wrapped in `condition-case` because `panic.el`
+has not loaded yet. An ABI mismatch or missing dep at this point
+would otherwise be an uncaught error, which on PID 1 is a kernel
+panic. Degraded mode (no supervision primitives in elisp) beats that.
+
+### panic.el
+
+Defines the `*panic*` buffer and installs a `command-error-function`
+that catches every Emacs-level error and routes it to `panic-handle`
+instead of `error`. Every other file in the userland calls
+`panic-handle` from its `condition-case` handlers. The single-thread
+reality of Emacs (a stuck regex stalls the OS) cannot be fully
+mitigated, but this gets us 90% of the way there.
+
+`panic.el` is also the file the `/freeze-test` skill exercises.
+
+### network.el
+
+Brings up loopback by calling `pid1-bring-up-lo` from the dynamic
+module. Also exposes `/proc/net/dev` and `/proc/net/route` parsers
+that the `*network*` buffer (in `buffers/network.el`) polls.
+
+### hostname.el
+
+Reads `/etc/hostname` (which Guix bakes from the
+`(host-name "lambda")` field in `system.scm`) and calls
+`pid1-set-hostname`. This bridges the Shepherd-shaped gap: Guix wrote
+the file, but no Shepherd hostname service exists to apply it. After
+`hostname-apply` runs, `uname -a` (and any program reading
+`/proc/sys/kernel/hostname`) sees `lambda` instead of the kernel
+default `(none)`.
+
+### exwm-config.el (UI mode only)
+
+`(exwm-enable)`. EXWM grabs the X root window. The first Emacs frame
+is now the WM's workspace. Bindings:
+
+```
+s-w               switch workspace by index
+s-0..s-3          jump to workspace N
+s-&               launch a program (no shell, just exec)
+s-r               reset EXWM input mode
+```
+
+After `exwm-enable`, the file requires multimon, fonts, input, in
+that order. Each is wrapped in `condition-case` so a regression in
+one does not undo the working `exwm-enable` above.
+
+### userland/init.el
+
+Walks `userland-modules` and confirms each one provided its feature.
+A missing feature is logged via `panic-handle` (degraded mode) but
+not raised. The boot success line is also written to `/dev/console`
+because the kernel framebuffer console (which the user is staring at
+in QEMU) does not see Emacs `message` output once EXWM is up.
+
+## stage 3: a session
+
+You see EXWM with one Emacs frame. The xterm canary started by
+`exwm-config.el`'s tail is on workspace 0.
+
+### `M-x eshell`
+
+Opens an eshell buffer. Type `uname -a`. The flow:
+
+  1. eshell reads "uname -a", looks up `eshell/uname` first.
+  2. `userland/uname.el` defines `eshell/uname` to inspect the args
+     and rebrand the `sysname` field. With `-a`, it formats:
+     `GEOS lambda <release> <version> <machine> GNU/Emacs (Linux)`.
+  3. The kernel `uname(2)` fields are still consulted via
+     `system-name`, `(uname-machine)`, etc., so kernel/hardware info
+     stays accurate. Only the `sysname` is overridden. The original
+     `Linux` shows in parens at the end so nothing is hidden.
+
+`/bin/sh` is the shstub from `shstub/sh.c`. It does not exec a real
+shell; it forwards `sh -c "<cmd>"` to `emacsclient` which evaluates
+the command in an eshell buffer. Anything in the system that
+shells-out (Guix package post-install, magit's `pre-receive` hook,
+etc.) goes through this.
+
+### the system-concept buffers
+
+```
+M-x processes      live ps-equivalent, /proc/[0-9]*/stat parser
+M-x network        ip-equivalent, /proc/net/* + ioctl
+M-x journal        dmesg-equivalent, dd if=/dev/kmsg follower
+M-x services       supervised-process registry (v0.3 has the real one)
+M-x disks          df+lsblk-equivalent, /proc/partitions + /proc/mounts
+M-x packages       manifest readout of the active Guix profile
+```
+
+Each buffer derives from `special-mode`, has a refresh timer, and
+documents its keys at the top of its file.
+
+## stage 4: shutdown
+
+Two paths:
+
+  - `M-x geos-poweroff` -> `(pid1-poweroff)` -> the C side calls
+    `sync()` then `reboot(RB_POWER_OFF)`. The kernel kills every
+    process and on QEMU the ACPI shutdown event closes the QEMU
+    window. On bare metal the firmware actually cuts power.
+  - `M-x geos-reboot` -> `(pid1-reboot)` -> `sync()` +
+    `reboot(RB_AUTOBOOT)`. Restart.
+
+These commands live in `emacs-init/core/power.el`. The dynamic module
+is the only thing in the system with `CAP_SYS_BOOT`; without the
+module, both calls fail with EPERM and the `*panic*` buffer gets the
+event. Without these, there is no way to shut down: there is no
+`/sbin/poweroff` because there is no Shepherd to know about it.
+
+## what to read next
+
+  - `pid1/emacs-init.c` end-to-end. The whole PID 1 path is one file.
+  - `emacs-init/core/panic.el`. The error-trap pattern is the most
+    important piece of project-wide style.
+  - `guix-system/system.scm`. The `simple-service ... boot-service-type`
+    block is the trick that lets us stand up an Emacs userland on top
+    of an unmodified Guix base. Read the comments carefully if you
+    want to extend it.
+  - `docs/ROADMAP.md` for what is unfinished and why.
+
+## what NOT to do
+
+  - Do not add a Shepherd service. Service supervision is Elisp.
+  - Do not add a shell. Eshell is the only shell.
+  - Do not call `error` from a hot path; use `panic-handle`.
+  - Do not add a feature without a `:comment` justification on its
+    `use-package` block.
+  - Do not bypass the panic trap "just for one quick debug". You will
+    forget. Then PID 1's userland will die. Then the supervisor will
+    respawn Emacs in a tight loop. Then I will be unhappy.
+
+## getting changes upstream
+
+Read `CONTRIBUTING.md` if it exists; if not, open an issue first and
+describe what you want to change. Patches that touch `pid1/` or
+`emacs-init/core/` get a skeptic review. `/freeze-test`,
+`/no-shell-check`, and `/attribution-scan` all pass before merge.
+
+Welcome.
