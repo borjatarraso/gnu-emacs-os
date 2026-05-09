@@ -15,10 +15,14 @@
 ;; the right path is to call the reboot(2) syscall directly. the pid1
 ;; dynamic module exposes pid1-poweroff and pid1-reboot which sync()
 ;; and then issue the syscall. this file just adds a confirmation
-;; prompt and a panic-handle wrapper around them so we get a sane
-;; *panic* trail if the syscall fails (typically EPERM if the kernel
-;; was compiled without CONFIG_KEXEC and we asked for a kexec; not
-;; our situation, but cheap insurance).
+;; prompt and a condition-case around them so we get a sane *panic*
+;; trail if the syscall fails (typically EPERM if CAP_SYS_BOOT was
+;; lost, or ENOSYS on a kernel built without reboot support).
+;;
+;; NOTE on panic-handle: it is a LOGGER, not an executor. the
+;; command-error-function in panic.el catches errors raised by
+;; interactive commands and routes them to panic-handle automatically.
+;; we just need to NOT suppress errors here.
 
 (require 'panic)
 
@@ -30,13 +34,17 @@ kernel terminates every process including this one and ACPI signals
 qemu to exit (or, on bare metal, the firmware cuts power)."
   (interactive)
   (when (yes-or-no-p "Power off the machine? ")
-    (panic-handle
-     (lambda ()
-       (message "geos-poweroff: syncing and powering off...")
-       (redisplay t)
-       (if (fboundp 'pid1-poweroff)
-           (pid1-poweroff)
-         (error "pid1-module not loaded; cannot poweroff from elisp"))))))
+    (unless (fboundp 'pid1-poweroff)
+      (error "pid1-module not loaded; cannot poweroff from elisp"))
+    (message "geos-poweroff: syncing and powering off...")
+    (redisplay t)
+    ;; pid1-poweroff does not return on success.  if it returns at all,
+    ;; the syscall failed; pid1-error has already been signalled inside
+    ;; the C wrapper and the command-error-function in panic.el will
+    ;; route it.  we add an explicit fallback message in case the
+    ;; signal got swallowed somewhere unexpected.
+    (pid1-poweroff)
+    (message "geos-poweroff: reboot(2) returned, see *panic*")))
 
 (defun geos-reboot ()
   "Reboot the machine.
@@ -45,13 +53,12 @@ pid1 dynamic module.  Under qemu this drops the guest; on bare metal
 it triggers a normal restart."
   (interactive)
   (when (yes-or-no-p "Reboot the machine? ")
-    (panic-handle
-     (lambda ()
-       (message "geos-reboot: syncing and rebooting...")
-       (redisplay t)
-       (if (fboundp 'pid1-reboot)
-           (pid1-reboot)
-         (error "pid1-module not loaded; cannot reboot from elisp"))))))
+    (unless (fboundp 'pid1-reboot)
+      (error "pid1-module not loaded; cannot reboot from elisp"))
+    (message "geos-reboot: syncing and rebooting...")
+    (redisplay t)
+    (pid1-reboot)
+    (message "geos-reboot: reboot(2) returned, see *panic*")))
 
 ;; both commands are M-x discoverable. no global keybinding by default
 ;; because C-x C-c (save-buffers-kill-emacs) and the exwm prefix space
