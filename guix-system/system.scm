@@ -149,11 +149,12 @@
     (local-file "../emacs-init/buffers/packages.el" "packages-buffer.el"))
 
 (define xorg-conf
-    ;; phase-5a xorg config. picks the fbdev driver against /dev/fb0 so
-    ;; we render into the kernel framebuffer that QEMU -vga std provides.
-    ;; modesetting + KMS would be nicer but linux-libre with no module
-    ;; auto-load (we have no udev) cannot reliably bring bochs-drm up.
-    (local-file "xorg.conf" "xorg.conf"))
+    ;; phase-5c xorg config. picks the modesetting driver against
+    ;; /dev/dri/card0 (virtio_gpu KMS device). qemu must be invoked
+    ;; with -vga virtio for this to work; emacs-os.sh does that.
+    ;; the old fbdev config is preserved at xorg.conf for reference,
+    ;; this file is the one wired into the boot gexp.
+    (local-file "xorg-modesetting.conf" "xorg.conf"))
 
 (define shstub-sh
     ;; phase-3 /bin/sh shim. on a normal POSIX-y system /bin/sh runs
@@ -209,18 +210,14 @@
                                #$(file-append emacs "/bin/emacs")
                                #$pid1-module-so
                                ;; argv[3]: X server spec, colon-joined.
-                               ;; phase 5a uses Xvfb because Xorg's
-                               ;; fbdev driver chokes on the kernel's
-                               ;; read-only EFI framebuffer in QEMU
-                               ;; (FBIOPUT_VSCREENINFO no-ops). real
-                               ;; KMS rendering via bochs-drm + the
-                               ;; modesetting driver is phase 5c.
-                               ;; xkb dir, modulepath, fontpath and
-                               ;; conf are unused by Xvfb but are
-                               ;; passed anyway so the spec format
-                               ;; stays stable for the Xorg flip.
+                               ;; phase 5c flips Xvfb -> Xorg with the
+                               ;; modesetting driver against virtio_gpu
+                               ;; (qemu -vga virtio). this gives real
+                               ;; KMS so pixels actually land in the
+                               ;; qemu sdl/gtk window instead of being
+                               ;; stuck in Xvfb's in-memory framebuffer.
                                (string-append
-                                #$(file-append xorg-server "/bin/Xvfb")
+                                #$(file-append xorg-server "/bin/Xorg")
                                 ":"
                                 #$(file-append xkbcomp "/bin")
                                 ":"
@@ -301,21 +298,24 @@
   ;; output over -serial mon:stdio. on real hardware we will flip
   ;; these so tty1 wins.
   ;;
-  ;; phase 5a additions:
-  ;;   nomodeset    keep the kernel from probing KMS drivers we have
-  ;;                not loaded (we run no udev), which would steal
-  ;;                /dev/fb0 from vesafb and leave Xorg's fbdev with
-  ;;                nothing to drive.
-  ;;   vga=0x317   vesafb 1024x768x16. matches the QEMU -vga std
-  ;;                framebuffer the GTK display renders. without this
-  ;;                some kernels skip vesafb when no console=tty1 is
-  ;;                set early.
+  ;; phase 5c update: nomodeset and vga=0x317 are gone. with virtio_gpu
+  ;; loaded from initrd-modules, we WANT KMS up so Xorg's modesetting
+  ;; driver has a /dev/dri/card0 to bind. vesafb is no longer the
+  ;; rendering surface; virtio-gpu's drm fbcon is.
   (kernel-arguments
    (cons* "console=tty1"
           "console=ttyS0,115200"
-          "nomodeset"
-          "vga=0x317"
           %default-kernel-arguments))
+
+  ;; phase 5c: load virtio_gpu in the initrd so /dev/dri/card0 exists
+  ;; before pid1 spawns Xorg. virtio_pci is needed because virtio_gpu
+  ;; rides PCI; drm is pulled in transitively but listing it explicitly
+  ;; documents intent. without these, modesetting would log
+  ;; "no devices detected" and Xorg would die at AddScreen.
+  (initrd-modules (cons* "virtio_pci"
+                         "virtio_gpu"
+                         "drm"
+                         %base-initrd-modules))
 
   (bootloader (bootloader-configuration
                 (bootloader grub-bootloader)
@@ -342,8 +342,13 @@
   ;;
   ;; phase 5a adds:
   ;;   xorg-server         the X server we fork in pid1 before emacs.
-  ;;   xf86-video-fbdev    the only driver we currently configure; see
-  ;;                       guix-system/xorg.conf for the wiring.
+  ;;                       phase 5c uses the modesetting driver (built
+  ;;                       into xorg-server) against virtio-gpu KMS, so
+  ;;                       no separate xf86-video-* package is needed.
+  ;;   xf86-input-libinput input driver. opens /dev/input/event* with
+  ;;                       libinput. needs AutoAddDevices=true in
+  ;;                       xorg.conf because we have no udev to push
+  ;;                       hotplug events.
   ;;   xkbcomp             Xorg shells out to this at startup to compile
   ;;                       the keymap. without it, Xorg dies during
   ;;                       initial keymap load with "Couldn't load XKB
@@ -378,7 +383,7 @@
   ;;                                one closure).
   (packages (cons* emacs
                    xorg-server
-                   xf86-video-fbdev
+                   xf86-input-libinput
                    xkbcomp
                    xkeyboard-config
                    xterm
