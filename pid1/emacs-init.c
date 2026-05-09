@@ -761,9 +761,9 @@ main(int argc, char **argv)
      *      giving a human enough time to read it before the verbose
      *      mount/X/emacs spew begins. two seconds is the sweet spot:
      *      longer is annoying on a reboot loop, shorter is unread. */
-    console("GNU/Emacs OS (Maintainer: <borja.tarraso@member.fsf.org>) booting...");
+    console("GNU/Emacs OS v0.1 (GEOS) booting...");
     console("--------------------------------------------------------");
-    console("Booting emacs-os v0.1. Maintainer <borja.tarraso@member.fsf.org>");
+    console("GNU/Emacs Operating System (GEOS). Maintainer <borja.tarraso@member.fsf.org>");
     console("--------------------------------------------------------");
     sleep(2);
 
