@@ -312,9 +312,20 @@
   ;; rides PCI; drm is pulled in transitively but listing it explicitly
   ;; documents intent. without these, modesetting would log
   ;; "no devices detected" and Xorg would die at AddScreen.
+  ;;
+  ;; psmouse + usbhid: the boot dump showed the kernel only enumerated
+  ;; the AT keyboard (channel 0 of i8042) and not the PS/2 mouse
+  ;; (channel 1). that is because psmouse is built as a module in the
+  ;; default linux-libre and we have no udev to modprobe it on demand.
+  ;; pulling it into the initrd forces the mouse to appear at
+  ;; /dev/input/eventN by the time pid1 spawns Xorg. usbhid covers the
+  ;; -device usb-tablet route from the qemu side, which is the more
+  ;; reliable VM mouse path long term.
   (initrd-modules (cons* "virtio_pci"
                          "virtio_gpu"
                          "drm"
+                         "psmouse"
+                         "usbhid"
                          %base-initrd-modules))
 
   (bootloader (bootloader-configuration
