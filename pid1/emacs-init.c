@@ -700,6 +700,43 @@ parse_xorg_spec(char *spec)
     return 0;
 }
 
+/* dump /proc/bus/input/devices to /dev/console, one line per text line
+ * in the file, prefixed with "input:". diagnostic only, called once
+ * after /proc and /dev are mounted but before Xorg spawns. invariant:
+ * never raises, swallows all I/O errors silently. used to verify the
+ * kernel created /dev/input/eventN nodes that xorg.conf references. */
+static void
+dump_input_devices(void)
+{
+    int fd = open("/proc/bus/input/devices", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        console("input: /proc/bus/input/devices not readable");
+        return;
+    }
+    char buf[8192];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    (void)close(fd);
+    if (n <= 0) {
+        console("input: device list empty");
+        return;
+    }
+    buf[n] = '\0';
+    char *line = buf;
+    while (line && *line) {
+        char *end = strchr(line, '\n');
+        if (end) *end = '\0';
+        if (*line) {
+            /* sized to match buf above so the compiler does not warn
+             * about a possible-truncation snprintf. real lines are
+             * under 200 bytes; the slack is purely shut-up-gcc. */
+            char msg[8200];
+            (void)snprintf(msg, sizeof msg, "input: %s", line);
+            console(msg);
+        }
+        line = end ? end + 1 : NULL;
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -819,6 +856,13 @@ main(int argc, char **argv)
      * is in xorg_bring_up() so the supervisor can re-call it on Xorg
      * death without duplicating the boot path. */
     if (xorg_path) {
+        /* one-shot diagnostic: dump the kernel's input device list so
+         * a "no keyboard" failure is debuggable from the serial log
+         * alone. xorg.conf references /dev/input/event0 (kbd) and
+         * event1 (mouse); if those nodes are absent or numbered
+         * differently here, the symptom is no input in the X session
+         * and the fix is to bump the InputDevice paths. */
+        dump_input_devices();
         if (xorg_bring_up() < 0) {
             console("pid1: continuing without DISPLAY");
         }

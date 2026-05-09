@@ -345,10 +345,10 @@
   ;;                       phase 5c uses the modesetting driver (built
   ;;                       into xorg-server) against virtio-gpu KMS, so
   ;;                       no separate xf86-video-* package is needed.
-  ;;   xf86-input-libinput input driver. opens /dev/input/event* with
-  ;;                       libinput. needs AutoAddDevices=true in
-  ;;                       xorg.conf because we have no udev to push
-  ;;                       hotplug events.
+  ;;   xf86-input-evdev    input driver. opens /dev/input/event* via
+  ;;                       raw ioctl, no udev required. xorg.conf
+  ;;                       lists explicit InputDevice sections with
+  ;;                       static device paths.
   ;;   xkbcomp             Xorg shells out to this at startup to compile
   ;;                       the keymap. without it, Xorg dies during
   ;;                       initial keymap load with "Couldn't load XKB
@@ -383,7 +383,7 @@
   ;;                                one closure).
   (packages (cons* emacs
                    xorg-server
-                   xf86-input-libinput
+                   xf86-input-evdev
                    xkbcomp
                    xkeyboard-config
                    xterm
