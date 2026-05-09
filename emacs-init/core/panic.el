@@ -1,4 +1,5 @@
 ;;; panic.el --- the buffer that catches errors so the OS keeps running -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; HARD RULE: `panic-handle' is the ONLY safe way to surface errors
 ;; from supervisory code. a bare `error' anywhere under core/ is a

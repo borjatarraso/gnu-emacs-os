@@ -1,3 +1,4 @@
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; build.scm, the iso9660 image entry point for GNU/Emacs OS.
 ;;
 ;; this file is the FILE argument to `guix system image'. it loads

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* sh.c, the /bin/sh stub for GNU/Emacs OS.
  *
  * legacy code paths still call /bin/sh -c "<cmd>" thousands of times

@@ -1,4 +1,5 @@
 ;;; git.el --- magit, because git on the command line is a war crime -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; magit is the version-control UI. it forks git via process-file with
 ;; an argv vector, never through a posix-shell wrapper, so it satisfies

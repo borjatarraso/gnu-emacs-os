@@ -1,4 +1,5 @@
 ;;; chat.el --- erc, the irc client -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; erc is in-tree. for now i wire it up with sane defaults and a
 ;; keybinding. server config is a per-user concern, lives in init.el

@@ -1,3 +1,4 @@
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; exceptions.scm, documented deviations from the hard rules in the
 ;; the project rules in this repo, kept in one file so I can grep for "exception:" and
 ;; see every shortcut still in flight. each entry has a phase that

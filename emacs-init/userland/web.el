@@ -1,4 +1,5 @@
 ;;; web.el --- eww, the only browser on this image -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; eww is in-tree. it renders HTML in a buffer, follows links, runs no
 ;; javascript, and has no third-party storage. for our purposes that

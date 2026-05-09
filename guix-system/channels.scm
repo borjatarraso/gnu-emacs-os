@@ -1,3 +1,4 @@
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; channels.scm, pinned channels for GNU/Emacs OS.
 ;;
 ;; reproducibility is a hard rule. %guix-pin below is the literal

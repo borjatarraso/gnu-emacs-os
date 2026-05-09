@@ -1,4 +1,5 @@
 ;;; network.el --- interface bring-up and /proc network state -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; HARD RULE: any failure-path error in this file goes through
 ;; `panic-handle'. no bare `error' for "i could not do my job".

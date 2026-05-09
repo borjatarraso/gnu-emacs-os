@@ -1,4 +1,5 @@
 ;;; multimon.el --- xrandr-driven workspace-to-monitor mapping -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; phase 5c. multi-head wiring for exwm. nothing here changes the
 ;; single-display QEMU smoke path: with one monitor every workspace

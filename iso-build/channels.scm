@@ -1,3 +1,4 @@
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; channels.scm, the pinned channel set the ISO is built against.
 ;;
 ;; this is a verbatim copy of the channel pin in

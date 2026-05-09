@@ -1,4 +1,5 @@
 ;;; shell.el --- eshell, the only shell on this OS -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; project hard rule #1: there is no shell other than eshell. /bin/sh
 ;; is a stub that forwards to emacsclient (see shstub/sh.c). this file

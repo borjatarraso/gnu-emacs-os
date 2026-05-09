@@ -1,4 +1,5 @@
 ;;; services.el --- *services* buffer, the live UI for systemctl / herd -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; what does it show: every supervised service in the elisp userland.
 ;; one row per service with name, status (running/dead/disabled), pid

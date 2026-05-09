@@ -1,4 +1,5 @@
 ;;; early-init.el --- first thing emacs reads when booting as PID 1 -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; this file runs before package.el, before the GUI, before anything.
 ;; if i mess it up, the system never reaches a usable state. keep it

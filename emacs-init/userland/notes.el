@@ -1,4 +1,5 @@
 ;;; notes.el --- org, the notes and agenda system -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; org is in-tree on emacs 29+ and recent enough for our needs. we keep
 ;; the config minimal: agenda key, capture key, and ~/org as the agenda

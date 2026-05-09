@@ -1,4 +1,5 @@
 ;;; network.el --- *network* buffer, the live UI for ip a / ip r -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; what does it show: the current set of network interfaces (from
 ;; /proc/net/dev) and the kernel routing table (from /proc/net/route),

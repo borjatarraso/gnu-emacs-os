@@ -1,4 +1,5 @@
 ;;; input.el --- input methods for the EXWM session -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; phase 5c. input methods. the spec says "enable IBus interop" with
 ;; an explicit fallback to emacs-native quail. I considered IBus and

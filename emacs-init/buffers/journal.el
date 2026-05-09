@@ -1,4 +1,5 @@
 ;;; journal.el --- *journal* buffer, the live system log stream -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; what does it show: a single chronological feed of system log
 ;; records from every source we have. today that means /dev/kmsg

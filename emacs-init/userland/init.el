@@ -1,4 +1,5 @@
 ;;; init.el --- userland package chain entry point -*- lexical-binding: t -*-
+;;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; loaded last in the boot -l chain, AFTER exwm-config.el and after
 ;; each of the per-package userland files (files.el, shell.el, git.el,
