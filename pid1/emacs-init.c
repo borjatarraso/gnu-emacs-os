@@ -700,24 +700,37 @@ parse_xorg_spec(char *spec)
     return 0;
 }
 
-/* dump /proc/bus/input/devices to /dev/console, one line per text line
- * in the file, prefixed with "input:". diagnostic only, called once
- * after /proc and /dev are mounted but before Xorg spawns. invariant:
- * never raises, swallows all I/O errors silently. used to verify the
- * kernel created /dev/input/eventN nodes that xorg.conf references. */
+/* dump_file_to_console: shared helper for the two diagnostic dumps
+ * below. reads PATH up to MAX bytes, splits on newline, and writes
+ * each non-empty line prefixed with TAG to /dev/console. invariant:
+ * never raises; bounded read, bounded line buffer. */
 static void
-dump_input_devices(void)
+dump_file_to_console(const char *path, const char *tag, size_t max)
 {
-    int fd = open("/proc/bus/input/devices", O_RDONLY | O_CLOEXEC);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        console("input: /proc/bus/input/devices not readable");
+        char miss[256];
+        (void)snprintf(miss, sizeof miss, "%s: %s not readable", tag, path);
+        console(miss);
         return;
     }
-    char buf[8192];
-    ssize_t n = read(fd, buf, sizeof buf - 1);
+    /* allocate on the stack: path-specific cap, never tiny, never
+     * unbounded. caller picks the size. */
+    char *buf = (char *)malloc(max + 1);
+    if (!buf) {
+        (void)close(fd);
+        char err[128];
+        (void)snprintf(err, sizeof err, "%s: oom", tag);
+        console(err);
+        return;
+    }
+    ssize_t n = read(fd, buf, max);
     (void)close(fd);
     if (n <= 0) {
-        console("input: device list empty");
+        free(buf);
+        char empty[128];
+        (void)snprintf(empty, sizeof empty, "%s: empty", tag);
+        console(empty);
         return;
     }
     buf[n] = '\0';
@@ -726,15 +739,47 @@ dump_input_devices(void)
         char *end = strchr(line, '\n');
         if (end) *end = '\0';
         if (*line) {
-            /* sized to match buf above so the compiler does not warn
-             * about a possible-truncation snprintf. real lines are
-             * under 200 bytes; the slack is purely shut-up-gcc. */
-            char msg[8200];
-            (void)snprintf(msg, sizeof msg, "input: %s", line);
-            console(msg);
+            /* +tag prefix overhead, generous slack so the compiler does
+             * not warn about possible truncation. real lines never
+             * exceed ~500 chars in either source. */
+            size_t outsize = max + 64;
+            char *msg = (char *)malloc(outsize);
+            if (msg) {
+                (void)snprintf(msg, outsize, "%s: %s", tag, line);
+                console(msg);
+                free(msg);
+            }
         }
         line = end ? end + 1 : NULL;
     }
+    free(buf);
+}
+
+/* dump /proc/bus/input/devices to /dev/console, prefixed "input:".
+ * called once before xorg_bring_up to verify the kernel created
+ * /dev/input/eventN nodes the xorg.conf references, and again after
+ * a short post-Xorg sleep to catch late-enumerating devices like
+ * usb-tablet. invariant: never raises, swallows I/O errors. */
+static void
+dump_input_devices(void)
+{
+    dump_file_to_console("/proc/bus/input/devices", "input", 8192);
+}
+
+/* dump /tmp/Xorg.0.log to /dev/console, prefixed "xorg:". called once
+ * after xorg_bring_up so the serial trace tells us what input devices
+ * Xorg actually opened, what driver matches it found, and what it
+ * complained about. log is bounded at 64 KiB which is far more than
+ * any normal Xorg startup ever produces. invariant: never raises. */
+static void
+dump_xorg_log(void)
+{
+    /* short sleep so Xorg has a chance to flush its initial probe
+     * lines. xorg_bring_up returns once the X socket appears, but the
+     * driver match + InitInput phase happens shortly after. without
+     * the sleep the log is still half-written when we read it. */
+    sleep(2);
+    dump_file_to_console("/tmp/Xorg.0.log", "xorg", 65536);
 }
 
 int
@@ -856,15 +901,17 @@ main(int argc, char **argv)
      * is in xorg_bring_up() so the supervisor can re-call it on Xorg
      * death without duplicating the boot path. */
     if (xorg_path) {
-        /* one-shot diagnostic: dump the kernel's input device list so
-         * a "no keyboard" failure is debuggable from the serial log
-         * alone. xorg.conf references /dev/input/event0 (kbd) and
-         * event1 (mouse); if those nodes are absent or numbered
-         * differently here, the symptom is no input in the X session
-         * and the fix is to bump the InputDevice paths. */
+        /* pre-Xorg diagnostic: kernel input device list. */
         dump_input_devices();
         if (xorg_bring_up() < 0) {
             console("pid1: continuing without DISPLAY");
+        } else {
+            /* post-Xorg diagnostics: re-dump input list (the usb-tablet
+             * and psmouse can take a beat to enumerate after the boot
+             * cmdline is processed) and dump Xorg.0.log so we see what
+             * driver-match + screen-init reported. */
+            dump_input_devices();
+            dump_xorg_log();
         }
     }
 
