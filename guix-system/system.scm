@@ -120,6 +120,12 @@
     (local-file "../emacs-init/userland/files.el" "userland-files.el"))
 (define userland-shell-el
     (local-file "../emacs-init/userland/shell.el" "userland-shell.el"))
+(define userland-uname-el
+    ;; eshell/uname override: rebrand sysname to GEOS, keep the real
+    ;; kernel visible in parens. depends on eshell being loaded so
+    ;; eshell/<name> dispatch is actually consulted; load AFTER
+    ;; userland-shell.el.
+    (local-file "../emacs-init/userland/uname.el" "userland-uname.el"))
 (define userland-git-el
     (local-file "../emacs-init/userland/git.el" "userland-git.el"))
 (define userland-web-el
@@ -283,6 +289,7 @@
                                ;; itself is cosmetic.
                                "-l" #$userland-files-el
                                "-l" #$userland-shell-el
+                               "-l" #$userland-uname-el
                                "-l" #$userland-git-el
                                "-l" #$userland-web-el
                                "-l" #$userland-mail-el

@@ -32,6 +32,7 @@ raise during boot."
 (defvar userland-modules
   '(userland-files
     userland-shell
+    userland-uname
     userland-git
     userland-web
     userland-mail
