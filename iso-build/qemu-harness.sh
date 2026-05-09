@@ -1,5 +1,9 @@
 #!/bin/sh
-# qemu-harness.sh, cold-boot a GNU/Emacs OS ISO under qemu.
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Author: Borja Tarraso <borja.tarraso@member.fsf.org>
+#
+# qemu-harness.sh, cold-boot a GNU/Emacs Operating System (GEOS) ISO
+# under qemu.
 #
 # usage: ./qemu-harness.sh /gnu/store/...-image.iso [extra qemu args...]
 #
@@ -9,10 +13,17 @@
 # project root applies to the OS image's userland, not to this
 # script. plain sh is fine and intentional.
 #
-# the invocation matches the qcow2 dev harness used in phases 1-6:
+# the invocation tracks v0.2's xorg pipeline:
 #   - 2GB RAM (less and emacs starts swapping during exwm-enable)
 #   - kvm acceleration (boot is unbearable without it)
-#   - vga=std + display=gtk (matches xorg.conf's fbdev wiring)
+#   - -vga virtio + -display gtk: matches xorg-modesetting.conf, which
+#     binds the modesetting driver against /dev/dri/card0 from
+#     virtio_gpu. -vga std gives a black screen because there is no
+#     DRM device for modesetting to attach to.
+#   - usb-tablet on an xhci bus: absolute pointer, no pointer-grab
+#     dance. lands on /dev/input/event4 where xorg-modesetting.conf
+#     is configured to find it. without this the X session has a
+#     keyboard but no mouse.
 #   - serial mon:stdio (so pid1's /dev/console writes hit the tty)
 #   - boot d (cdrom first), -cdrom path (the ISO)
 #
@@ -41,8 +52,10 @@ set -- \
     -m 2048 \
     -cpu host \
     -smp 2 \
-    -vga std \
+    -vga virtio \
     -display gtk \
+    -device qemu-xhci,id=xhci \
+    -device usb-tablet,bus=xhci.0 \
     -serial mon:stdio \
     -boot d \
     -cdrom "$ISO" \

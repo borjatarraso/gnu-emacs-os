@@ -1,8 +1,10 @@
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
-;; exceptions.scm, documented deviations from the hard rules in the
-;; the project rules in this repo, kept in one file so I can grep for "exception:" and
-;; see every shortcut still in flight. each entry has a phase that
-;; closes it. an exception that outlives its phase is a bug.
+;;; Author: Borja Tarraso <borja.tarraso@member.fsf.org>
+;; exceptions.scm, documented deviations from the GNU/Emacs Operating
+;; System (GEOS) hard rules, kept in one file so I can grep for
+;; "exception:" and see every shortcut still in flight.  each entry
+;; has a phase that closes it.  an exception that outlives its phase
+;; is a bug.
 
 ;; exception: bash-as-/bin/sh
 ;; rule violated: GEOS hard rule 1, "no shell other than eshell".

@@ -1,5 +1,7 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
-/* emacs-init.c, PID 1 for GNU/Emacs OS.
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Author: Borja Tarraso <borja.tarraso@member.fsf.org>
+ */
+/* emacs-init.c, PID 1 for GNU/Emacs Operating System (GEOS).
  *
  * I do the minimum a kernel needs from PID 1, then I fork-and-exec
  * /usr/bin/emacs on /dev/tty1 and babysit it. If emacs dies, I respawn
@@ -845,7 +847,7 @@ main(int argc, char **argv)
      *      giving a human enough time to read it before the verbose
      *      mount/X/emacs spew begins. two seconds is the sweet spot:
      *      longer is annoying on a reboot loop, shorter is unread. */
-    console("GNU/Emacs OS v0.2 (GEOS) booting...");
+    console("GNU/Emacs Operating System (GEOS) v0.2 booting...");
     console("--------------------------------------------------------");
     console("GNU/Emacs Operating System (GEOS). Maintainer <borja.tarraso@member.fsf.org>");
     console("--------------------------------------------------------");

@@ -1,7 +1,9 @@
-# installing GNU/Emacs OS v0.1
+# installing GNU/Emacs Operating System (GEOS) v0.2
 
-I have only tested v0.1 in QEMU. Real hardware boots are tracked for
-v0.2. If you put this on a laptop and it eats your filesystem I will
+Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+I have only tested GEOS in QEMU. Real hardware boots are tracked for
+v0.3. If you put this on a laptop and it eats your filesystem I will
 take the bug report but I will not be surprised.
 
 ## what you need
@@ -19,10 +21,10 @@ the build.
 
 ## the channel pin
 
-v0.1 is pinned to Guix commit
+v0.2 keeps the v0.1 pin: Guix commit
 `230aa373f315f247852ee07dff34146e9b480aec`. This is non-negotiable. The
 ISO is reproducible byte-for-byte (modulo kernel build-id) against
-that pin and only against that pin. Bumping it is a v0.2 concern.
+that pin and only against that pin. Bumping it is a v0.3 concern.
 
 The pin lives in two files that must agree:
 
@@ -75,20 +77,26 @@ qemu-system-x86_64 \
     -m 2048 \
     -cpu host \
     -smp 2 \
-    -vga std \
+    -vga virtio \
     -display gtk \
+    -device qemu-xhci,id=xhci \
+    -device usb-tablet,bus=xhci.0 \
     -serial mon:stdio \
     -boot d \
     -cdrom <ISO>
 ```
 
 A few notes on those flags. 2 GB of RAM is the floor. With less, Emacs
-starts swapping during `exwm-enable` and the boot looks hung. `-vga std`
-plus `-display gtk` matches the framebuffer wiring in the operating
-system record's xorg config; switch either flag and you get a black
-screen. `-serial mon:stdio` is how you see PID 1's writes to
-`/dev/console` in your terminal, which is the only debug surface
-during early boot.
+starts swapping during `exwm-enable` and the boot looks hung. `-vga
+virtio` is mandatory: the operating-system record's xorg config binds
+the modesetting driver against `/dev/dri/card0`, which only exists when
+the guest sees a virtio_gpu device. `-vga std` will boot but Xorg dies
+at AddScreen and you get a black window. The usb-tablet on a dedicated
+xhci bus gives an absolute pointer (no pointer-grab dance) and lands
+on `/dev/input/event4` where xorg-modesetting.conf is configured to
+find it. Without it the X session has a keyboard but no mouse.
+`-serial mon:stdio` is how you see PID 1's writes to `/dev/console` in
+your terminal, which is the only debug surface during early boot.
 
 Boot takes about eleven seconds from `qemu` invocation to the EXWM
 splash. The first thing you see on the kernel framebuffer is the boot
@@ -123,24 +131,36 @@ and an xterm started as a smoke-test canary on workspace 0. Useful
 keys:
 
 ```
-s-w           switch workspace by index
-s-0..s-3      jump to workspace N
-s-&           launch a program (no shell, just exec)
-s-r           reset EXWM input mode if an X11 app eats your keys
-M-x network   open the *network* buffer
-M-x processes open the *processes* buffer
+s-w               switch workspace by index
+s-0..s-3          jump to workspace N
+s-&               launch a program (no shell, just exec)
+s-r               reset EXWM input mode if an X11 app eats your keys
+M-x network       open the *network* buffer
+M-x processes     open the *processes* buffer
+M-x geos-poweroff sync, reboot(2) with RB_POWER_OFF, qemu exits
+M-x geos-reboot   sync, reboot(2) with RB_AUTOBOOT
 ```
 
 `M-x eshell` is the shell. There is no other shell. If you instinctively
 type `bash` and hit enter, the shstub will route it back into another
-eshell, which is funny once and annoying after that.
+eshell, which is funny once and annoying after that. From eshell,
+`uname -a` prints `GEOS lambda <release> <version> <machine> GNU/Emacs
+(Linux)`. The kernel's compile-time `Linux` string stays correct in the
+parens at the end; nothing in the profile calls `uname(2)` for
+user-visible output.
+
+Power off the VM with `M-x geos-poweroff`. There is no
+`/sbin/poweroff`, no `sudo`, no socket protocol. The supervisor IS
+Emacs, so the answer to "shut down" lives in this Emacs and goes
+straight to `reboot(2)`. The QEMU window closes when the syscall
+succeeds.
 
 ## verifying the build
 
 Two scripts run before any release:
 
   - `/attribution-scan` greps the repo for forbidden tokens. Empty
-    output means pass. v0.1 ships with a clean scan over `docs/`,
+    output means pass. v0.2 ships with a clean scan over `docs/`,
     `pid1/`, `shstub/`, `guix-system/`, `emacs-init/`, and `iso-build/`.
   - `/no-shell-check` greps for code paths that invoke a POSIX shell.
     Empty output means pass. The documented exceptions are listed in
@@ -152,12 +172,12 @@ panic buffer keeps the OS interactive.
 
 ## known broken things
 
-  - Real hardware. Not tested. v0.2.
+  - Real hardware. Not tested. v0.3.
   - Audio. The kernel modules are present but nothing in Elisp talks
-    to them yet. v0.2.
+    to them yet. v0.3.
   - Bluetooth. Same.
   - Wayland. Not in scope. EXWM is X11 by definition.
-  - Multi-user. The system has one user, named `me`. v0.2.
+  - Multi-user. The system has one user, named `me`. v0.3.
 
 ## reporting a bug
 

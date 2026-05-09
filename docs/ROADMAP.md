@@ -1,18 +1,28 @@
-# roadmap
+# GEOS roadmap
 
-What I want to fix in v0.2 and roughly in what order. This is not a
-schedule, it is a dependency graph: each phase unlocks the next, and
-none of them is interesting without the one before it.
+GNU/Emacs Operating System (GEOS) roadmap. What I want to fix and in
+roughly what order. Not a schedule, a dependency graph: each phase
+unlocks the next, and none of them is interesting without the one
+before it.
+
+Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ## v0.1 recap (done)
 
 Emacs is PID 1. /bin/sh is a 50-line C stub. The five system-concept
 buffers are live. The ISO builds reproducibly from a pinned channel
-and cold-boots in QEMU. v0.1 proves the thesis. v0.2 is about turning
-it into something I can run on hardware for a full day without
-flinching.
+and cold-boots in QEMU. v0.1 proved the thesis.
 
-## v0.2 in priority order
+## v0.2 recap (done)
+
+Real Xorg with the modesetting driver against virtio_gpu's KMS device.
+Working keyboard and mouse in QEMU. `M-x geos-poweroff` /
+`M-x geos-reboot` via `reboot(2)`. eshell `uname -a` rebranded to GEOS
+with the kernel name in parens. `/etc/hostname` actually applied at
+boot via `pid1-set-hostname`. Default host is `lambda`. GPLv3-or-later
+with SPDX headers everywhere.
+
+## v0.3 in priority order
 
 ### 1. core/supervise.el (the registry)
 
@@ -31,20 +41,19 @@ mirroring the C-side Xorg cap.
 This is a one-week task and it closes a paper-cut from v0.1. Do this
 first because everything below registers with it.
 
-### 2. real Xorg over KMS
+### 2. real Xorg over KMS on bare metal
 
-Xvfb was the right answer for a QEMU smoke test. It is the wrong
-answer for hardware. The path:
+Already done in QEMU as part of v0.2: virtio_gpu KMS device,
+modesetting driver, working input. Bare-metal hardware needs the same
+shape with `i915` / `amdgpu` instead of virtio_gpu, plus a way to pick
+the right driver dynamically. Plan:
 
-  - bring up `bochs-drm` (or `i915` / `amdgpu`) from the initrd via
-    explicit `kernel-loadable-modules` in the operating-system record
-  - ship a real `xorg.conf` (the dead one in guix-system/xorg.conf is
-    a placeholder waiting for this work) that uses the modesetting
-    driver against the KMS device
-  - flip pid1's `spawn_xorg` to launch Xorg with the real binary
-    instead of Xvfb, keep the supervisor wrapper unchanged
-  - re-run /boot-vm against `-vga virtio` and `-vga std` to confirm
-    the modesetting driver picks up either
+  - extend the initrd modules list to include `i915`, `amdgpu`,
+    `nouveau` so any of the common GPUs come up with KMS available
+  - have pid1 (or core/exwm-config.el) probe `/sys/class/drm` for the
+    first `card*` device and select the matching xorg.conf snippet
+  - keep the modesetting driver as the default; only fall back to
+    framebuffer (`fbdev`) if no DRM device shows up
 
 The supervisor side is already correct (5/60 respawn cap, sentinel,
 SIGTERM grace). This is purely a userspace + initrd question.
@@ -110,7 +119,7 @@ After this, the OS is self-hosting in the meaningful sense.
   - keyboard layout buffer (`*kbd*`) backed by `setxkbmap` driven via
     `process-file`, no shell
 
-## explicitly punted to v0.3 or later
+## explicitly punted to v0.4 or later
 
   - Hurd variant. Interesting but not on the daily-driver path.
   - Multi-user. The current model is "one human at the console". I
@@ -123,11 +132,11 @@ After this, the OS is self-hosting in the meaningful sense.
 
 ## the meta-task
 
-After v0.2 is functionally complete, I want to actually ship it. That
-means:
+After v0.3 is functionally complete, I want to actually ship GEOS as
+a daily driver. That means:
 
   - real install media that boots on a non-virtualized x86_64 laptop
   - a one-page "is this for you" landing page on the manifesto
-  - a `git tag v0.2` that I am willing to point friends at
+  - a `git tag v0.3` that I am willing to point friends at
 
 That is the actual goal. Everything above is the path to get there.

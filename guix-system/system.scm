@@ -1,5 +1,7 @@
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
-;; system.scm, the operating-system record for GNU/Emacs OS.
+;;; Author: Borja Tarraso <borja.tarraso@member.fsf.org>
+;; system.scm, the operating-system record for GNU/Emacs Operating
+;; System (GEOS).
 ;;
 ;; this is the smallest record I could get the kernel to boot with:
 ;; linux-libre, glibc, coreutils so install-time tooling works, and

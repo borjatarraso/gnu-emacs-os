@@ -30,7 +30,7 @@
 ;; once pid1-set-address exists C-side.
 
 (defgroup network nil
-  "Network interface configuration for the emacs OS userland."
+  "Network interface configuration for the GEOS userland."
   :group 'emacs
   :prefix "network-")
 

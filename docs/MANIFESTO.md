@@ -1,4 +1,6 @@
-# GNU/Emacs OS
+# GNU/Emacs Operating System (GEOS)
+
+Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
 
 I have been using Emacs since 2006. Most of what I do on a computer
 already happens inside it: code, mail, IRC, news, git, shell, PDFs,
@@ -8,7 +10,8 @@ with for the bits Emacs cannot reach". This project is me getting
 tired of that last clause.
 
 So I built an operating system where Emacs is the userland and Emacs
-is PID 1.
+is PID 1. Short name is GEOS, full name is GNU/Emacs Operating
+System; the rest of this document uses GEOS.
 
 ## the thesis
 
@@ -89,15 +92,21 @@ I lose maybe one session a week to a freeze I have to recover from in
 QEMU. I am fine with that ratio. You may not be. That is a real reason
 to not use this OS.
 
-## what is in v0.1
+## what is in GEOS today (v0.2)
 
   - PID 1 is a C binary that becomes Emacs and then loads itself back
-    in as an Emacs module so the reaper, the mount helper, and the
-    signal handlers live inside the Emacs process.
+    in as an Emacs module so the reaper, the mount helper, the
+    hostname call, the reboot syscall, and the signal handlers live
+    inside the Emacs process.
   - The panic buffer catches every uncaught Elisp error and refuses to
     let Emacs exit.
-  - eshell is the only shell. `/bin/sh` is the stub.
-  - EXWM is the window manager. X11 windows are buffers.
+  - eshell is the only shell. `/bin/sh` is the stub. `uname -a` reads
+    `GEOS lambda <release> ... GNU/Emacs (Linux)`.
+  - EXWM with the modesetting Xorg driver. Real keyboard and mouse in
+    QEMU. X11 windows are buffers.
+  - `M-x geos-poweroff` and `M-x geos-reboot` go through `reboot(2)`
+    via the pid1 module. There is no `/sbin/poweroff` to call; the
+    supervisor IS Emacs and the answer to "shut down" lives in elisp.
   - System concepts have buffers: `*processes*`, `*network*`,
     `*journal*`, `*services*`, `*disks*`, `*packages*`. Each has a
     major mode, sensible keybindings, and a refresh timer.
@@ -105,14 +114,16 @@ to not use this OS.
     The ISO is 1.57 GB. The qcow2 boots in about eleven seconds on
     KVM.
 
-## what is not in v0.1
+## what is not in GEOS yet
 
-The Hurd variant. Multi-user. Audio. Bluetooth. Anything Wayland.
+The Hurd variant. Real hardware. Multi-user. Audio. Bluetooth.
+Anything Wayland.
 
-These are real, they are tracked, and I will get to them. v0.1 is
-about proving that the core idea (Emacs as PID 1, no Shepherd, no
-shell) actually holds together under a normal day of work. It does.
-Once that is settled the rest is incremental.
+These are real, they are tracked, and I will get to them. GEOS v0.1
+proved that Emacs as PID 1, no Shepherd, no shell, actually holds
+together under a normal day of work. v0.2 added the things you cannot
+live without on a daily driver (input, poweroff, hostname). v0.3 is
+where networking, audio, and persistence land.
 
 ## relationship to GNU
 
@@ -137,6 +148,7 @@ you happy. I am using this.
 
 ## the name
 
-It is GNU/Emacs OS. The slash is mandatory. I am not making the joke
-you think I am making. I am making a different joke that happens to
-land in the same place.
+It is GNU/Emacs Operating System, GEOS for short. The slash in
+GNU/Emacs is mandatory. I am not making the joke you think I am
+making. I am making a different joke that happens to land in the
+same place.

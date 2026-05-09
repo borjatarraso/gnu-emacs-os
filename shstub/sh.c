@@ -1,5 +1,7 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
-/* sh.c, the /bin/sh stub for GNU/Emacs OS.
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Author: Borja Tarraso <borja.tarraso@member.fsf.org>
+ */
+/* sh.c, the /bin/sh stub for GNU/Emacs Operating System (GEOS).
  *
  * legacy code paths still call /bin/sh -c "<cmd>" thousands of times
  * per boot. there is no real shell on this system. what i do here is

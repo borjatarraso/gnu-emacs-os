@@ -26,3 +26,5 @@ boot-*.log
 
 # ship in the OS image. Excluded from the public branch by default; keep
 # them in a private dev branch if you want them tracked.
+
+# shipped repo; kept locally only.

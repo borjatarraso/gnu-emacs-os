@@ -1,5 +1,6 @@
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
-;; channels.scm, pinned channels for GNU/Emacs OS.
+;;; Author: Borja Tarraso <borja.tarraso@member.fsf.org>
+;; channels.scm, pinned channels for GNU/Emacs Operating System (GEOS).
 ;;
 ;; reproducibility is a hard rule. %guix-pin below is the literal
 ;; commit. workflow when bumping:
