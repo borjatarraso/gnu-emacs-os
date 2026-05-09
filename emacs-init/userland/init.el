@@ -94,13 +94,13 @@ boot landed clean."
       ;; started" and the user thinks we wedged.
       (cond
        (missing
-        (let ((line (format "Emacs-os v0.1 booted with degraded modules: %S"
+        (let ((line (format "Emacs-os v0.2 booted with degraded modules: %S"
                             missing)))
           (message "%s" line)
           (userland--console line)))
        (t
-        (message "Emacs-os v0.1 loaded successfully.")
-        (userland--console "Emacs-os v0.1 loaded successfully."))))
+        (message "Emacs-os v0.2 loaded successfully.")
+        (userland--console "Emacs-os v0.2 loaded successfully."))))
   (error
    (if (fboundp 'panic-handle)
        (panic-handle err 'userland-init-verify)
