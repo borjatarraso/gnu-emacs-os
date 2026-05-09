@@ -15,6 +15,19 @@
 
 (require 'panic)
 
+(defun userland--console (msg)
+  "Best-effort write of MSG to /dev/console.
+once exwm grabs the display, plain `message' lands in the Xvfb
+frame's minibuffer, which is invisible because Xvfb renders to
+memory only. /dev/console hits the kernel framebuffer console
+the user is actually looking at, so the boot-complete signal
+goes through here. swallow errors: tracing must never itself
+raise during boot."
+  (condition-case _
+      (write-region (format "userland: %s\n" msg)
+                    nil "/dev/console" 'append 'nomsg)
+    (error nil)))
+
 (defvar userland-modules
   '(userland-files
     userland-shell
@@ -69,7 +82,25 @@ boot landed clean."
       m)))
 
 (condition-case err
-    (userland-verify-all)
+    (let ((missing (userland-verify-all)))
+      ;; only declare success when every module on the manifest
+      ;; reported (provide ...). a missing feature already wrote a
+      ;; line via panic-handle above, so a degraded boot stays
+      ;; visible; we just refuse to lie about it here.
+      ;;
+      ;; mirror to /dev/console (not just *Messages*) so the kernel
+      ;; framebuffer the user is staring at sees the line. without
+      ;; the mirror the last visible boot trace is "xterm-canary
+      ;; started" and the user thinks we wedged.
+      (cond
+       (missing
+        (let ((line (format "Emacs-os v0.1 booted with degraded modules: %S"
+                            missing)))
+          (message "%s" line)
+          (userland--console line)))
+       (t
+        (message "Emacs-os v0.1 loaded successfully.")
+        (userland--console "Emacs-os v0.1 loaded successfully."))))
   (error
    (if (fboundp 'panic-handle)
        (panic-handle err 'userland-init-verify)

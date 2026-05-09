@@ -59,6 +59,20 @@ wiring. Plain `emacs -Q` invocations on a dev host see nil here.")
 (setq inhibit-startup-screen t)
 (setq initial-scratch-message nil)
 
+;; libgpm prints "zero screen dimension, assuming 80x25" the first
+;; time emacs's tty layer wakes it up on a kernel framebuffer console.
+;; the warning is harmless but it dirties the boot log. emacs's
+;; term/linux.el adds gpm-mouse-mode-startup to tty-setup-hook by
+;; default; pull it out before the hook fires. once exwm is up we
+;; route mouse events through X anyway, so gpm has nothing to do.
+(dolist (sym '(gpm-mouse-startup
+               gpm-mouse-mode-startup))
+  (when (boundp 'tty-setup-hook)
+    (remove-hook 'tty-setup-hook sym)))
+(when (and (fboundp 'gpm-mouse-mode)
+           (bound-and-true-p gpm-mouse-mode))
+  (gpm-mouse-mode -1))
+
 ;; phase 1 boot warned about ~/.emacs.d/. we own /var, point there.
 ;; non-pid1 invocations keep the default so my normal emacs config
 ;; isn't disturbed.

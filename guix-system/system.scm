@@ -62,6 +62,14 @@
     ;; killing the user-facing emacs.
     (local-file "../emacs-init/core/panic.el" "panic.el"))
 
+(define use-package-shim-el
+    ;; bootstraps use-package and registers the project's :comment
+    ;; keyword as a no-op so the userland files do not raise
+    ;; "Unrecognized keyword: :comment" at load time. depends on
+    ;; panic.el, must load before any userland/*.el.
+    (local-file "../emacs-init/core/use-package-shim.el"
+                "use-package-shim.el"))
+
 (define network-el
     ;; phase-4 core. /proc/net/dev and /proc/net/route parsers, plus
     ;; the declarative network-interface-config + bring-up hook into
@@ -236,6 +244,7 @@
                                ;; replace that crutch with use-package.
                                "-l" #$early-init-el
                                "-l" #$panic-el
+                               "-l" #$use-package-shim-el
                                "-l" #$network-el
                                "-l" #$network-buffer-el
                                ;; phase 5c modules -l'd BEFORE

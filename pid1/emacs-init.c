@@ -142,10 +142,23 @@ do_mount(const char *src, const char *tgt, const char *type,
     }
     if (raw_mount(src, tgt, type, flags, opts) < 0) {
         char buf[256];
-        snprintf(buf, sizeof buf,
-                 "pid1: mount %s -> %s (%s) failed: %s",
-                 src, tgt, type, strerror(errno));
-        console(buf);
+        if (errno == EBUSY) {
+            /* the modern guix initrd already mounts /sys, /dev (and
+             * sometimes /proc) before handing off to the boot script,
+             * so a second mount on the same target returns EBUSY.
+             * that is not a failure for us, the kernel did the work
+             * already. log it as informational so /boot-vm logs make
+             * the chain of custody obvious, then move on. */
+            snprintf(buf, sizeof buf,
+                     "pid1: %s already mounted on %s (inherited from initrd)",
+                     type, tgt);
+            console(buf);
+        } else {
+            snprintf(buf, sizeof buf,
+                     "pid1: mount %s -> %s (%s) failed: %s",
+                     src, tgt, type, strerror(errno));
+            console(buf);
+        }
     }
 }
 
@@ -737,8 +750,22 @@ main(int argc, char **argv)
      * mounted on the initial root, so this banner works before we
      * mount our own /dev. if it does not work, the boot is going to
      * fail silently and the user gets no breadcrumb, which is the
-     * unhappy path I have to live with. */
-    console("GNU/Emacs OS booting");
+     * unhappy path I have to live with.
+     *
+     * two-stage announcement:
+     *   1. one-liner that lands right after the initrd's "loading
+     *      '/gnu/store/...-system/boot'..." message, so the user sees
+     *      a recognizable hand-off line without having to read a wall
+     *      of dashes first.
+     *   2. the full banner with separator dashes and a 2-second pause,
+     *      giving a human enough time to read it before the verbose
+     *      mount/X/emacs spew begins. two seconds is the sweet spot:
+     *      longer is annoying on a reboot loop, shorter is unread. */
+    console("GNU/Emacs OS (Maintainer: <borja.tarraso@member.fsf.org>) booting...");
+    console("--------------------------------------------------------");
+    console("Booting emacs-os v0.1. Maintainer <borja.tarraso@member.fsf.org>");
+    console("--------------------------------------------------------");
+    sleep(2);
 
     /* set a sane umask; the kernel inherits whatever the caller had */
     umask(022);
