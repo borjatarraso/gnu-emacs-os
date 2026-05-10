@@ -1,10 +1,12 @@
-# installing GNU/Emacs Operating System (GEOS) v0.2
+# installing GNU/Emacs Operating System (GEOS)
 
 Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
 
-I have only tested GEOS in QEMU. Real hardware boots are tracked for
-v0.3. If you put this on a laptop and it eats your filesystem I will
-take the bug report but I will not be surprised.
+This document covers the v0.3.1 release plus the v0.4 in-flight tree.
+I have only tested GEOS in QEMU. Real hardware boots are part of the
+v0.4 meta-task, see `docs/ROADMAP.md`. If you put this on a laptop
+and it eats your filesystem I will take the bug report but I will not
+be surprised.
 
 ## what you need
 
@@ -21,10 +23,12 @@ the build.
 
 ## the channel pin
 
-v0.2 keeps the v0.1 pin: Guix commit
-`230aa373f315f247852ee07dff34146e9b480aec`. This is non-negotiable. The
-ISO is reproducible byte-for-byte (modulo kernel build-id) against
-that pin and only against that pin. Bumping it is a v0.3 concern.
+The current pin is Guix commit
+`230aa373f315f247852ee07dff34146e9b480aec`, carried forward unchanged
+from v0.1 through the v0.4 in-flight tree. This is non-negotiable
+inside a release. The ISO is reproducible byte-for-byte (modulo
+kernel build-id) against that pin and only against that pin. Bumping
+it is a release-cut concern, not a per-patch one.
 
 The pin lives in two files that must agree:
 
@@ -198,36 +202,37 @@ succeeds.
 
 ## verifying the build
 
-Two scripts run before any release:
+Two scripts run before any commit, three before any release:
 
   - `/attribution-scan` greps the repo for forbidden tokens. Empty
-    output means pass. v0.2 ships with a clean scan over `docs/`,
-    `pid1/`, `shstub/`, `guix-system/`, `emacs-init/`, and `iso-build/`.
+    output means pass.
   - `/no-shell-check` greps for code paths that invoke a POSIX shell.
     Empty output means pass. The documented exceptions are listed in
     `guix-system/exceptions.scm`.
 
 `/smoke-test` boots a qcow2 headlessly with the serial console wired
-to a tmpfile and greps for pid1 success/failure markers. It catches
-the class of regression that bricked v0.3 boot once already (an
-xorg.conf parse error -> Xorg respawn loop -> no DISPLAY -> EXWM never
-came up). Run it after any change to `pid1/`, `guix-system/`, or
-anything Xorg-adjacent. Implementation lives at
-`iso-build/smoke-test.sh`; exit codes are 0 pass, 1 fail (with the
-matched marker and the last 30 serial lines printed), 2 timeout.
+to a tmpfile and greps for pid1, userland, /var, state, and supervise
+success markers (plus a failure-marker fast-fail set). Catches the
+class of regression that wedged v0.3 boot once already (an xorg.conf
+parse error -> Xorg respawn loop -> no DISPLAY -> EXWM never came
+up). Run it after any change to `pid1/`, `guix-system/`, or anything
+Xorg-adjacent. Implementation lives at `iso-build/smoke-test.sh`;
+exit codes are 0 pass, 1 fail (with the matched marker and the last
+30 serial lines printed), 2 timeout.
 
 `/freeze-test` runs the abuse suite against a booted VM (runaway loops,
-catastrophic regex, a literal `(kill-emacs)` call) and confirms the
-panic buffer keeps the OS interactive.
+catastrophic regex, a literal `(kill-emacs)` call, a service that
+trips the supervise.el respawn cap) and confirms the panic buffer
+keeps the OS interactive.
 
 ## known broken things
 
-  - Real hardware. Not tested. v0.3.
+  - Real hardware. Not tested. Part of the v0.4 meta-task.
   - Audio. The kernel modules are present but nothing in Elisp talks
-    to them yet. v0.3.
-  - Bluetooth. Same.
+    to them yet. v0.4 item 8.
+  - Bluetooth. Punted to v0.5+.
   - Wayland. Not in scope. EXWM is X11 by definition.
-  - Multi-user. The system has one user, named `me`. v0.3.
+  - Multi-user. The system has one user, named `me`. v0.4 item 4.
 
 ## reporting a bug
 

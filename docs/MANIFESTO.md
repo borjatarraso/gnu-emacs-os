@@ -92,38 +92,50 @@ I lose maybe one session a week to a freeze I have to recover from in
 QEMU. I am fine with that ratio. You may not be. That is a real reason
 to not use this OS.
 
-## what is in GEOS today (v0.2)
+## what is in GEOS today (v0.3.1 shipped, v0.4 in flight)
 
   - PID 1 is a C binary that becomes Emacs and then loads itself back
     in as an Emacs module so the reaper, the mount helper, the
     hostname call, the reboot syscall, and the signal handlers live
     inside the Emacs process.
   - The panic buffer catches every uncaught Elisp error and refuses to
-    let Emacs exit.
+    let Emacs exit. The freeze-test suite abuses it on every release.
   - eshell is the only shell. `/bin/sh` is the stub. `uname -a` reads
     `GEOS lambda <release> ... GNU/Emacs (Linux)`.
   - EXWM with the modesetting Xorg driver. Real keyboard and mouse in
-    QEMU. X11 windows are buffers.
+    QEMU. X11 windows are buffers. Console mode (`geos.mode=console`)
+    is also supported for headless boxes.
   - `M-x geos-poweroff` and `M-x geos-reboot` go through `reboot(2)`
     via the pid1 module. There is no `/sbin/poweroff` to call; the
     supervisor IS Emacs and the answer to "shut down" lives in elisp.
+  - Persistent state under `/var/emacs/` (v0.4 item 1): atomic writes
+    via tmpfile + rename + `pid1-fsync-dir`, ext4 (`geos-var` label)
+    or tmpfs fallback. The contract is `docs/STATE_LAYOUT.md`.
+  - First-class service supervision in Elisp (v0.4 item 2):
+    `core/supervise.el` with the `defservice` macro, restart policies,
+    a rolling 60s respawn cap, and persisted restart counters. The
+    `*journal*` follower is the first consumer; the rest of the
+    long-running processes migrate as the userland gains them.
   - System concepts have buffers: `*processes*`, `*network*`,
     `*journal*`, `*services*`, `*disks*`, `*packages*`. Each has a
     major mode, sensible keybindings, and a refresh timer.
   - The whole thing builds reproducibly from a pinned Guix channel.
-    The ISO is 1.57 GB. The qcow2 boots in about eleven seconds on
-    KVM.
+    The qcow2 boots in about eleven seconds on KVM.
 
 ## what is not in GEOS yet
 
 The Hurd variant. Real hardware. Multi-user. Audio. Bluetooth.
 Anything Wayland.
 
-These are real, they are tracked, and I will get to them. GEOS v0.1
+These are real, they are tracked, and I will get to them. v0.1
 proved that Emacs as PID 1, no Shepherd, no shell, actually holds
 together under a normal day of work. v0.2 added the things you cannot
-live without on a daily driver (input, poweroff, hostname). v0.3 is
-where networking, audio, and persistence land.
+live without on a daily driver (input, poweroff, hostname). v0.3
+made the boot mode operator-toggleable and tightened the pid1 module
+ABI. v0.4 is the persistence and supervision pass: `/var/emacs/` and
+`defservice` have already landed; networking UI, package management,
+suspend/resume, multi-user, and an in-system reconfigure follow in
+the rest of the v0.4 plan (`docs/v04-plan.md`).
 
 ## relationship to GNU
 

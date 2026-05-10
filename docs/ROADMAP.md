@@ -50,16 +50,19 @@ The detailed plan lives in [v04-plan.md](v04-plan.md). Eleven items
 ordered into four phases, with dependency notes per item. The
 top-level shape:
 
-### Phase A (foundational, in progress)
+### Phase A (foundational, items 1+2 done)
 
 - **1. persistent state under `/var/emacs/`** (done): `state-read` /
   `state-write` / `state-delete` with rename(2) + `pid1-fsync-dir`,
   ext4 (`geos-var` label) or tmpfs fallback. See
   [STATE_LAYOUT.md](STATE_LAYOUT.md).
-- **2. first-class service definitions in Elisp**: `core/supervise.el`
-  with `defservice` macro, restart policy, rolling 60s respawn cap,
-  `state-write`-backed registry. Closes the `TODO(6)` markers in the
-  buffer files.
+- **2. first-class service definitions in Elisp** (done):
+  `core/supervise.el` with `defservice` macro, restart policy
+  (`on-crash`/`on-failure`/`always`/`never`), rolling 60s respawn cap
+  with `'held` terminal state, `state-write`-backed registry,
+  `:buffer`/`:filter`/`:autostart` passthrough. The `*journal*`
+  follower migrated first; rest of the long-running processes follow
+  as the userland gains them.
 - **10. kernel-cmdline boot menu in GRUB**: GRUB editor entries for
   `geos.mode=ui` and `geos.mode=console` so the operator picks at
   boot instead of having to rebuild.

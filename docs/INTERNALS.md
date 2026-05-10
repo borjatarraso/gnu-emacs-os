@@ -9,10 +9,13 @@ Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ## reading order
 
-The OS is small. About 1300 lines of C, about 2000 lines of Elisp,
-about 500 lines of Scheme. You can read all of it in an evening and
-you should. This document is a guided tour. The truth is in the
-source.
+The OS is still small enough to read in a long evening. As of v0.4
+in flight: roughly 2100 lines of C (pid1 binary + dynamic module +
+shstub), roughly 5900 lines of Elisp (core, wm, userland, buffers,
+services), roughly 840 lines of Scheme (the operating-system record
+and the iso-build wrappers). The numbers drift between releases;
+treat them as orders of magnitude, not contracts. This document is
+a guided tour. The truth is in the source.
 
 The lifecycle below is one continuous chain from kernel handoff to
 power off. Read top to bottom on the first pass.
@@ -188,10 +191,12 @@ in load order:
 ```
 emacs-init/early-init.el          register pid1-error, module-load .so
 emacs-init/core/panic.el          *panic* buffer + error trap
+emacs-init/core/state.el          /var/emacs/ layout + atomic state-write
 emacs-init/core/power.el          M-x geos-poweroff / geos-reboot
 emacs-init/core/use-package-shim.el   bootstrap use-package + :comment kw
 emacs-init/core/network.el        bring up lo, /proc/net/* parsers
 emacs-init/core/hostname.el       read /etc/hostname, sethostname(2)
+emacs-init/core/supervise.el      defservice macro, registry, restart policy
 emacs-init/buffers/network.el     *network* buffer + 2s refresh timer
 emacs-init/wm/multimon.el         xrandr-driven workspace placement
 emacs-init/wm/fonts.el            default face + emoji + CJK fontset
@@ -209,9 +214,12 @@ emacs-init/userland/pdf.el        pdf-tools
 emacs-init/userland/init.el       verify all userland-* features loaded
 emacs-init/buffers/processes.el   *processes* buffer
 emacs-init/buffers/journal.el     *journal* (dd-on-/dev/kmsg)
-emacs-init/buffers/services.el    *services* (placeholder for v0.3 sup.)
+emacs-init/buffers/services.el    *services* (live supervise.el registry)
 emacs-init/buffers/disks.el       *disks* (/proc/partitions)
 emacs-init/buffers/packages.el    *packages* (manifest readout)
+emacs-init/services/journal-tail.el   defservice for the kmsg follower
+emacs-init/core/boot-marker.el    last in chain; supervise-finalize +
+                                  /dev/console sentinels for smoke-test
 ```
 
 ### early-init.el
@@ -243,6 +251,31 @@ reality of Emacs (a stuck regex stalls the OS) cannot be fully
 mitigated, but this gets us 90% of the way there.
 
 `panic.el` is also the file the `/freeze-test` skill exercises.
+
+### state.el
+
+Lays down `/var/emacs/{journal,packages,network,users,services,dotfiles}`
+at boot, detects the mount as ext4 vs tmpfs (`state-mode`), and exposes
+`state-read` / `state-write` / `state-delete` for the rest of the
+userland. Writes go through a tmpfile + rename + `pid1-fsync-dir`
+cycle for crash-consistency on ext4. The contract between this file
+and pid1's `mount_var()` is documented in `docs/STATE_LAYOUT.md`.
+
+### supervise.el
+
+The Elisp service supervisor that replaces Shepherd. The
+`defservice` macro registers a long-running process with a command,
+restart policy (`on-crash`, `on-failure`, `always`, `never`), an
+optional `:buffer` and `:filter` for stream handling, and an
+optional `:autostart` flag. The supervisor runs the process via
+`make-process`, wires a sentinel that consults the policy and a
+rolling 60s respawn cap (default 5 attempts), and trips a service
+into `'held` state when the cap is exceeded. Restart counters are
+persisted via `state-write` so a reboot does not reset the cap on a
+service that is genuinely broken. `supervise-finalize` runs from
+`boot-marker.el` (the last file in the `-l` chain), restoring
+counters and autostarting any service registered earlier in the
+chain that did not opt out.
 
 ### network.el
 
@@ -314,7 +347,7 @@ etc.) goes through this.
 M-x processes      live ps-equivalent, /proc/[0-9]*/stat parser
 M-x network        ip-equivalent, /proc/net/* + ioctl
 M-x journal        dmesg-equivalent, dd if=/dev/kmsg follower
-M-x services       supervised-process registry (v0.3 has the real one)
+M-x services       supervised-process registry from core/supervise.el
 M-x disks          df+lsblk-equivalent, /proc/partitions + /proc/mounts
 M-x packages       manifest readout of the active Guix profile
 ```
@@ -344,6 +377,11 @@ event. Without these, there is no way to shut down: there is no
   - `pid1/emacs-init.c` end-to-end. The whole PID 1 path is one file.
   - `emacs-init/core/panic.el`. The error-trap pattern is the most
     important piece of project-wide style.
+  - `emacs-init/core/state.el` and `docs/STATE_LAYOUT.md`. The
+    persistence contract that every other concept buffer keys off of.
+  - `emacs-init/core/supervise.el`. The `defservice` macro and the
+    sentinel/restart loop that stand in for Shepherd. Read alongside
+    `emacs-init/services/journal-tail.el` for a working consumer.
   - `guix-system/system.scm`. The `simple-service ... boot-service-type`
     block is the trick that lets us stand up an Emacs userland on top
     of an unmodified Guix base. Read the comments carefully if you

@@ -41,8 +41,10 @@ populates `/dev/disk/by-label/` from the ext4 superblock.
                 without having to re-derive from /proc on each frame.
   users/        passwd / shadow file (item 4 of v0.4). still empty
                 until the user buffer ships.
-  services/     defservice records the supervisor restored on reboot.
-                also empty until the supervisor lands.
+  services/     defservice records the supervisor restored on reboot:
+                per-name restart counter and last-death timestamp,
+                written via state-write from core/supervise.el's
+                sentinel.
   dotfiles/     eshell aliases, M-x recent commands, anything the
                 user expects to outlive a poweroff but is not part
                 of system state proper.
