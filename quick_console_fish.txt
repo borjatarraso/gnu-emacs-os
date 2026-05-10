@@ -1,5 +1,7 @@
-git clone https://github.com/borjatarraso/gnu-emacs-os.git
-cd gnu-emacs-os
+set REPO /home/overdrive/projects/gnu-emacs-os
+$REPO/iso-build/cleanup.sh
+git clone https://github.com/borjatarraso/gnu-emacs-os.git $REPO
+cd $REPO
 make -C pid1 all
 make -C shstub
 set QCOW (guix time-machine -C guix-system/channels.scm -- system image -t qcow2 -L $PWD guix-system/system.scm | tail -n 1)
