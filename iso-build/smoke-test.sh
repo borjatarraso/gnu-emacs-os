@@ -104,13 +104,23 @@ qemu-system-x86_64 \
     -drive "file=$QCOW,format=qcow2,if=virtio" &
 echo $! > "$PIDFILE"
 
-# success markers (any one of these means the boot got far enough):
-#   "pid1: X server up on :0"     UI mode reached the supervisor
-#   "pid1: geos.mode=console"     console mode acknowledged the cmdline
-# both modes also print "pid1: entering supervisor loop" but we want
-# the mode-specific marker so a half-failed UI boot (where Xorg dies
-# but pid1 still loops on bare emacs) does not silently pass.
-SUCCESS_RE='pid1: X server up on :0|pid1: geos\.mode=console'
+# two-layer success gate:
+#   PID1 marker (mode-specific): supervisor reached its main loop with
+#     the right mode active. catches Xorg-died-and-pid1-fell-back
+#     half-failures (because we require the mode-specific line, not
+#     just "entering supervisor loop").
+#       UI mode:      "pid1: X server up on :0"
+#       console mode: "pid1: geos.mode=console"
+#   USERLAND marker: emacs got past the entire -l chain and ran
+#     boot-marker.el. proves init.el, panic.el, all userland modules,
+#     all buffers actually loaded.
+#       both modes:   "geos: emacs userland up"
+#
+# pass = (any PID1 marker) AND (userland marker). a build that brings
+# Xorg up but trips a load-time error in any -l file will fail the
+# userland half, which is the whole point of adding it.
+SUCCESS_PID1_RE='pid1: X server up on :0|pid1: geos\.mode=console'
+SUCCESS_USERLAND_RE='geos: emacs userland up'
 
 # failure markers (any one means hard fail, do not wait for timeout):
 #   xorg parse errors, screen-discovery failures
@@ -128,10 +138,14 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
         tail -n 30 "$LOG"
         exit 1
     fi
-    if [ -s "$LOG" ] && grep -Eq "$SUCCESS_RE" "$LOG"; then
+    if [ -s "$LOG" ] \
+       && grep -Eq "$SUCCESS_PID1_RE" "$LOG" \
+       && grep -Eq "$SUCCESS_USERLAND_RE" "$LOG"; then
         echo "smoke-test: PASS"
-        echo "--- matched success markers ---"
-        grep -En "$SUCCESS_RE" "$LOG" || true
+        echo "--- matched pid1 markers ---"
+        grep -En "$SUCCESS_PID1_RE" "$LOG" || true
+        echo "--- matched userland markers ---"
+        grep -En "$SUCCESS_USERLAND_RE" "$LOG" || true
         exit 0
     fi
     sleep 1

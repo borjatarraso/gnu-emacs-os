@@ -92,6 +92,15 @@
     ;; sethostname(2).  must load after panic.el.
     (local-file "../emacs-init/core/hostname.el" "hostname.el"))
 
+(define boot-marker-el
+    ;; smoke-test gate.  writes "geos: emacs userland up" to
+    ;; /dev/console at load time and arms an exwm-init-hook that
+    ;; writes "geos: exwm up" once the WM grabs root.  MUST be the
+    ;; very last -l in the boot gexp so its load proves every
+    ;; preceding -l ran.  /iso-build/smoke-test.sh greps the serial
+    ;; log for these.
+    (local-file "../emacs-init/core/boot-marker.el" "boot-marker.el"))
+
 (define network-buffer-el
     ;; phase-4 buffer. *network* live view, 2s refresh timer, RET for
     ;; iface details. requires both panic and network, must load last
@@ -316,7 +325,12 @@
                                "-l" #$journal-buffer-el
                                "-l" #$services-buffer-el
                                "-l" #$disks-buffer-el
-                               "-l" #$packages-buffer-el))))
+                               "-l" #$packages-buffer-el
+                               ;; LAST.  boot-marker writes the
+                               ;; userland-up sentinel at load time;
+                               ;; reaching this -l proves every
+                               ;; previous -l above also ran.
+                               "-l" #$boot-marker-el))))
 
 (operating-system
   (host-name "lambda")
