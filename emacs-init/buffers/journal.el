@@ -592,17 +592,33 @@ four-question contract."
   (journal-buffer--update-header)
   (add-hook 'kill-buffer-hook #'journal-buffer--kill-hook nil t))
 
+(defun journal-buffer--supervised-kmsg-p ()
+  "Return non-nil if core/supervise.el owns the kmsg follower for us.
+When services/journal-tail.el has registered `journal-kmsg' with the
+supervisor, the supervised dd writes into a hidden work buffer and a
+filter routes records into *journal*.  spawning a second dd from this
+file would double-feed every record.  the gate is conservative: if
+`supervise-status' is unbound (no supervisor on this host) or returns
+nil (registry knows nothing about our service), we fall back to the
+in-buffer lazy spawn so the dev-host path still works."
+  (and (fboundp 'supervise-status)
+       (supervise-status 'journal-kmsg)))
+
 ;;;###autoload
 (defun journal ()
   "Display the *journal* buffer, creating it on first call.
-Interactive entry point: `M-x journal'. Spawns the kmsg follower
-and starts the poll timer if they are not already running."
+Interactive entry point: `M-x journal'. Starts the panic/messages
+poll timer if it is not already running.  the kmsg follower itself
+is owned by services/journal-tail.el under the supervisor; on a
+dev host where the supervisor is absent, falls back to spawning
+an in-buffer dd."
   (interactive)
   (let ((buf (get-buffer-create journal-buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'journal-buffer-mode)
         (journal-buffer-mode))
-      (unless (process-live-p journal-buffer--proc)
+      (unless (or (process-live-p journal-buffer--proc)
+                  (journal-buffer--supervised-kmsg-p))
         (journal-buffer--start-kmsg buf))
       (unless (timerp journal-buffer--timer)
         (journal-buffer--start-timer buf))
@@ -612,29 +628,6 @@ and starts the poll timer if they are not already running."
       (journal-buffer--update-header))
     (display-buffer buf)
     buf))
-
-;; TODO(6): when core/supervise.el lands, register the kmsg follower
-;; here so it gets restarted if dd dies (kernel.dmesg_restrict flip,
-;; OOM kill, anything). draft:
-;;
-;;   (supervise-register
-;;    :name 'journal-kmsg
-;;    :kind 'process
-;;    :start (lambda ()
-;;             (let ((buf (get-buffer-create journal-buffer-name)))
-;;               (with-current-buffer buf
-;;                 (unless (derived-mode-p 'journal-buffer-mode)
-;;                   (journal-buffer-mode))
-;;                 (journal-buffer--start-kmsg buf))))
-;;    :stop  (lambda ()
-;;             (let ((buf (get-buffer journal-buffer-name)))
-;;               (when buf
-;;                 (with-current-buffer buf
-;;                   (when (process-live-p journal-buffer--proc)
-;;                     (delete-process journal-buffer--proc)))))))
-;;
-;; the poll timer is cheap enough to keep lazy. only the kmsg
-;; subprocess deserves supervision.
 
 (provide 'journal-buffer)
 ;;; journal.el ends here

@@ -85,6 +85,20 @@
     ;; tree before any consumer arrives.
     (local-file "../emacs-init/core/state.el" "state.el"))
 
+(define supervise-el
+    ;; v0.4 item 2: first-class service supervisor.  cl-defstruct +
+    ;; defservice macro + sentinel-driven restart policy + rolling 60s
+    ;; respawn throttle.  registry persists under
+    ;; /var/emacs/services/registry via state-write so crash counters
+    ;; survive an emacs restart.  loaded right after state-el because
+    ;; supervise depends on state for persistence; loaded BEFORE any
+    ;; -l file that contains a defservice (services/journal-tail.el
+    ;; etc) so the macro is fbound at top-level expansion time.
+    ;; supervise-finalize is invoked from boot-marker.el after every
+    ;; service file has loaded; that is what restores counters and
+    ;; autostarts non-held services.
+    (local-file "../emacs-init/core/supervise.el" "supervise.el"))
+
 (define power-el
     ;; thin elisp wrapper around pid1-module's pid1-poweroff and
     ;; pid1-reboot bindings. exposes M-x geos-poweroff / geos-reboot.
@@ -190,6 +204,15 @@
     (local-file "../emacs-init/buffers/disks.el" "disks-buffer.el"))
 (define packages-buffer-el
     (local-file "../emacs-init/buffers/packages.el" "packages-buffer.el"))
+
+;; v0.4 item 2 service definitions.  each one calls (defservice ...)
+;; at top level, which registers with supervise.el's hash-table.  load
+;; order: AFTER both supervise-el (the macro must be fbound) and the
+;; consumer buffer file (journal-tail requires journal-buffer for the
+;; record parser).  boot-marker.el's supervise-finalize call runs the
+;; autostart afterwards.
+(define journal-tail-service-el
+    (local-file "../emacs-init/services/journal-tail.el" "journal-tail.el"))
 
 (define xorg-conf
     ;; phase-5c xorg config. picks the modesetting driver against
@@ -419,6 +442,7 @@
                                "-l" #$early-init-el
                                "-l" #$panic-el
                                "-l" #$state-el
+                               "-l" #$supervise-el
                                "-l" #$power-el
                                "-l" #$use-package-shim-el
                                "-l" #$network-el
@@ -463,10 +487,22 @@
                                "-l" #$services-buffer-el
                                "-l" #$disks-buffer-el
                                "-l" #$packages-buffer-el
+                               ;; v0.4 item 2 services.  each defservice
+                               ;; form runs at load time and populates
+                               ;; supervise.el's registry.  loaded after
+                               ;; the buffers/ chain so journal-tail can
+                               ;; (require 'journal-buffer) for the
+                               ;; record parser, before boot-marker so
+                               ;; supervise-finalize sees a complete
+                               ;; registry.
+                               "-l" #$journal-tail-service-el
                                ;; LAST.  boot-marker writes the
                                ;; userland-up sentinel at load time;
                                ;; reaching this -l proves every
-                               ;; previous -l above also ran.
+                               ;; previous -l above also ran.  this
+                               ;; file ALSO calls supervise-finalize,
+                               ;; which restores persisted counters and
+                               ;; autostarts every non-held service.
                                "-l" #$boot-marker-el))
                           (lambda (key . args)
                             (console-write

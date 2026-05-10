@@ -152,7 +152,13 @@ QPID=$!
 #     persistent-state subsystem loaded and produced a writable layout.
 #       both modes:   "geos: state-mode="
 #
-# pass = (any pid1 marker) AND userland marker AND var marker AND state marker.
+#   SUPERVISE marker (v0.4 item 2): supervise.el's finalize ran AFTER
+#     every defservice form, so the registry has every entry the
+#     boot chain registered. number is informational; >=1 means at
+#     least journal-tail registered.
+#       both modes:   "supervise: registry loaded N entries"
+#
+# pass = (any pid1 marker) AND userland AND var AND state AND supervise.
 #
 # we do NOT gate on "geos: exwm up" headlessly. exwm-init-hook only
 # fires once EXWM processes its first real X event, which depends on
@@ -164,6 +170,7 @@ SUCCESS_PID1_CONSOLE_RE='pid1: geos\.mode=console'
 SUCCESS_USERLAND_RE='geos: emacs userland up'
 SUCCESS_VAR_RE='pid1: /var on (ext4|tmpfs)'
 SUCCESS_STATE_RE='geos: state-mode='
+SUCCESS_SUPERVISE_RE='supervise: registry loaded [0-9]+ entries'
 
 # failure markers (any one means hard fail, do not wait for timeout):
 #   xorg parse errors, screen-discovery failures
@@ -184,7 +191,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     if [ -s "$LOG" ] \
        && grep -Eq "$SUCCESS_USERLAND_RE" "$LOG" \
        && grep -Eq "$SUCCESS_VAR_RE" "$LOG" \
-       && grep -Eq "$SUCCESS_STATE_RE" "$LOG"; then
+       && grep -Eq "$SUCCESS_STATE_RE" "$LOG" \
+       && grep -Eq "$SUCCESS_SUPERVISE_RE" "$LOG"; then
         if grep -Eq "$SUCCESS_PID1_UI_RE" "$LOG"; then
             echo "smoke-test: PASS (ui)"
             echo "--- matched pid1 markers ---"
@@ -195,6 +203,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             grep -En "$SUCCESS_VAR_RE" "$LOG" || true
             echo "--- matched state markers ---"
             grep -En "$SUCCESS_STATE_RE" "$LOG" || true
+            echo "--- matched supervise markers ---"
+            grep -En "$SUCCESS_SUPERVISE_RE" "$LOG" || true
             exit 0
         elif grep -Eq "$SUCCESS_PID1_CONSOLE_RE" "$LOG"; then
             echo "smoke-test: PASS (console)"
@@ -206,6 +216,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             grep -En "$SUCCESS_VAR_RE" "$LOG" || true
             echo "--- matched state markers ---"
             grep -En "$SUCCESS_STATE_RE" "$LOG" || true
+            echo "--- matched supervise markers ---"
+            grep -En "$SUCCESS_SUPERVISE_RE" "$LOG" || true
             exit 0
         fi
     fi

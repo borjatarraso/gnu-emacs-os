@@ -265,6 +265,69 @@ failure modes worth catching:
     (freeze-test--record 'state-roundtrip result)))
 
 ;; --------------------------------------------------------------------
+;; test 7: supervise throttle (v0.4 item 2)
+;; --------------------------------------------------------------------
+
+(defun freeze-test-supervise-throttle ()
+  "Register a service that crashes immediately, prove the rolling
+respawn cap trips and the service ends up in 'held.
+
+Why this matters: the whole point of supervise.el shipping a
+crashloop guard is so a busted /etc/something or a typo in a
+defservice doesn't burn the supervisor down with infinite forks.
+mirrors the pid1/emacs-init.c Xorg crashloop guard; the parameters
+should match (60s window, cap of 5).
+
+  - command (\"/bin/false\") exits 1 immediately
+  - :restart on-crash so the sentinel's policy decides to respawn
+  - :autostart nil so we control the first start ourselves and
+    can poll deterministically without racing supervise-finalize
+
+After we drive enough exits past the cap, status must be 'held and
+no further respawns should happen.  the test waits up to 5 seconds
+for the cascade to complete; on a healthy system this resolves in
+well under a second."
+  (interactive)
+  (let ((result 'fail)
+        (sname 'freeze-test-bad)
+        (deadline (+ (float-time) 5)))
+    (condition-case err
+        (cond
+         ((not (fboundp 'supervise-register))
+          (setq result "supervise-register unbound, supervise.el not loaded"))
+         (t
+          (supervise-register :name sname
+                              :command '("/bin/false")
+                              :restart 'always
+                              :autostart nil)
+          (supervise-start sname)
+          ;; pump the main loop so the sentinel can fire and respawn.
+          ;; supervise.el's spawn -> exit -> sentinel -> spawn cycle
+          ;; lives entirely on the elisp side; sleep-for would block
+          ;; the very loop we need to spin.
+          (while (and (< (float-time) deadline)
+                      (not (eq (supervise-status sname) 'held)))
+            (accept-process-output nil 0.05))
+          (cond
+           ((eq (supervise-status sname) 'held)
+            (setq result 'pass))
+           (t
+            (setq result (format "status=%S after 5s, expected held"
+                                 (supervise-status sname)))))
+          ;; whether pass or fail, leave the registry clean: stop
+          ;; the service (no-op if already held) and resume so a
+          ;; rerun of the test starts from a clean slate.  do NOT
+          ;; remove the entry from the hash table; supervise.el has
+          ;; no public delete, and the test surviving a re-run is
+          ;; useful for bisection.
+          (when (fboundp 'supervise-resume)
+            (supervise-resume sname))))
+      (error
+       (panic-handle err 'freeze-test-supervise-throttle)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'supervise-throttle result)))
+
+;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
 
@@ -282,6 +345,7 @@ failure modes worth catching:
   (freeze-test-slow-network)
   (freeze-test-bad-tramp)
   (freeze-test-state-roundtrip)
+  (freeze-test-supervise-throttle)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

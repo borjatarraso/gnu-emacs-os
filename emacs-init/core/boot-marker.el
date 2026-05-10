@@ -90,6 +90,21 @@ this code runs during boot and must not derail it."
   "Emit the exwm-up sentinel."
   (boot-marker--write "geos: exwm up"))
 
+;; supervise.el's finalize step lives here on purpose.  every
+;; defservice form has registered itself by the time this -l fires
+;; (see system.scm boot chain), and we need restore-counters +
+;; autostart to run BEFORE the userland-up marker so a smoke test
+;; that gates on both markers gets the supervise line first.  the
+;; finalize call itself is gated on pid1-as-emacs-p inside
+;; supervise.el, so a dev-host load is a no-op.  fboundp guard so
+;; this file can be loaded standalone (without supervise.el) for
+;; tests of just the marker writer.
+(when (fboundp 'supervise-finalize)
+  (condition-case err (supervise-finalize)
+    (error
+     (when (fboundp 'panic-handle)
+       (panic-handle err 'boot-marker--supervise-finalize)))))
+
 ;; load-time emit.  by the time this file is being loaded every
 ;; previous -l in the boot gexp has run; if any of them errored,
 ;; panic.el either rerouted to *panic* and continued or escalated.
