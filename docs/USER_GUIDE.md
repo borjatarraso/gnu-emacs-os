@@ -1,0 +1,232 @@
+# GEOS user guide
+
+Day to day use of GNU/Emacs Operating System (GEOS). Assumes you have
+already booted the image (see `docs/INSTALL.md` for that). The point of
+this document is to answer "I am at the EXWM splash, now what".
+
+Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+## the model in two sentences
+
+The whole OS is one Emacs process. `M-x` is the universal verb; every
+system concept is a buffer.
+
+If you remember nothing else from this guide: when you would normally
+reach for a terminal command, instead think of which buffer would show
+the same data, and `M-x` your way there.
+
+## the very first things to learn
+
+```
+M-x eshell                open an eshell. there is no other shell.
+M-x processes             *processes* buffer (top-equivalent).
+M-x network               *network* buffer (ip-equivalent).
+M-x journal               *journal* buffer (dmesg follower).
+M-x services              *services* buffer (supervised processes).
+M-x disks                 *disks* buffer (df + lsblk equivalent).
+M-x packages              *packages* buffer (Guix manifest).
+M-x geos-poweroff         shut the box down. there is no /sbin/poweroff.
+M-x geos-reboot           restart the box.
+C-h k <key>               what does this key do.
+C-h f <fn>                show the source of a function.
+C-g                       interrupt anything that is wedging the OS.
+```
+
+## EXWM keys
+
+These are the only window-manager keys; everything else is regular
+Emacs.
+
+```
+s-w                       prompt for a workspace by index, jump there.
+s-0 .. s-3                jump to workspace N directly.
+s-&                       launch a program by exec. no shell.
+s-r                       reset EXWM input mode (for X11 apps that
+                          eat your keys, e.g. a web browser).
+```
+
+The frame is fullscreen by design; there is no floating window
+manager. If you want a side-by-side layout, use Emacs windows
+(`C-x 2`, `C-x 3`) and put X11 clients in them.
+
+## the shell question
+
+The shell is eshell. There is no bash, no dash, no zsh; `/bin/sh` is a
+50 line C stub that forwards `sh -c "<cmd>"` to an eshell evaluation
+via `emacsclient`. This is by design and it is not changing.
+
+What you can do in eshell that you cannot in bash:
+
+  - `(+ 1 2)`. eshell evaluates Lisp at the prompt.
+  - pipes that pass Lisp values, not just text bytes.
+  - `*foo*`-style buffer-redirection: `ls > #<buffer foo>`.
+  - `M-x` from the prompt: just type `find-file` and hit enter.
+
+What you cannot do that you might miss:
+
+  - heredocs. eshell does not have them.
+  - `$(())` arithmetic. use `(+ ...)`.
+  - process substitution (`<(cmd)`). use a temp buffer.
+
+If a Guix package post-install script depends on a real POSIX shell
+feature, the workaround lives in `guix-system/exceptions.scm`; the
+list is short.
+
+## the system-concept buffers
+
+Each one is a `special-mode` derivative, read-only by default,
+auto-refreshing on a short timer. Press `g` to refresh on demand,
+`q` to bury the buffer.
+
+### `*processes*`
+
+The kernel process table, parsed from `/proc/[0-9]+/stat`. Columns:
+PID, state, RSS, command. Kill with `k` (sends SIGTERM), force-kill
+with `K` (SIGKILL). `RET` on a row opens that PID's `/proc/<pid>/`
+directory in dired.
+
+### `*network*`
+
+Interfaces with addresses, link state, RX/TX counters, plus the
+routing table from `/proc/net/route`. v0.3 only knows how to bring up
+loopback automatically; for anything else use `pid1-set-address`
+directly from elisp until the DHCP work lands. The buffer refreshes
+every two seconds.
+
+### `*journal*`
+
+A live tail of `/dev/kmsg` (kernel ring buffer) via a `dd` subprocess
+supervised by core/supervise.el. `f` follows the tail, `F` stops
+following, `/` prompts for a substring filter.
+
+### `*services*`
+
+The supervised-process registry. Every long-running process the OS
+spawned (Xorg in UI mode, the journal follower, any DHCP client you
+brought up, etc.) shows up here with its kind, restart count, and
+last-death timestamp. `r` requests an immediate restart. `D`
+deregisters (the supervisor will not respawn it).
+
+### `*disks*`
+
+Block devices from `/proc/partitions` plus mounts from
+`/proc/mounts`. No shell-out to `df` or `lsblk`.
+
+### `*packages*`
+
+The active Guix profile, rendered from the on-disk manifest. Read-only;
+to actually change package state you reconfigure the system (the
+`*reconfigure*` buffer is on the v0.3 roadmap).
+
+## file management
+
+`M-x dired` for the current directory, `C-x C-f /path/` to open one.
+EXWM does not bundle a separate file manager because dired already
+covers everything a file manager would. `M-x dired-jump` (`C-x C-j`)
+opens dired on the current buffer's file.
+
+## mail, news, web, git
+
+```
+M-x notmuch               mail.
+M-x erc                   IRC.
+M-x eww                   web browser.
+M-x magit-status          git, in the current repo.
+```
+
+These are real packages with their own documentation; `C-h i d m
+<name> RET` for the manual.
+
+## the panic buffer
+
+When something raises an Elisp error, the message lands in `*panic*`
+instead of dying or popping a backtrace. To inspect:
+
+```
+M-x panic-show            jump to the *panic* buffer.
+g                         clear the buffer.
+```
+
+The buffer is also where boot-marker writes its sentinels; if a smoke
+test failed you can grep here for `geos:` lines.
+
+If `*panic*` is empty after a session you spent debugging something,
+that is not necessarily a clean session: an error caught by an
+explicit `condition-case` will only land here if the handler called
+`panic-handle`. Reach for `*Messages*` if you suspect a swallowed
+error.
+
+## the freeze you will eventually hit
+
+Emacs is single threaded. A stuck regex, a TRAMP call to a black hole,
+a runaway `(while t)` will wedge the entire OS until either:
+
+  - you hit `C-g` and the loop honors it, or
+  - the watchdog (anything wrapped in `with-timeout`) fires, or
+  - you reset the QEMU window from the host.
+
+There is no way around this short of writing a different OS. The
+panic buffer mitigates the case where elisp raises an error; it does
+not save you from a tight loop in C-level code. See `MANIFESTO.md`
+section "the failure mode I accept".
+
+When this happens to me on bare hardware (it has not yet), I will plug
+in a USB serial and reach in via the `*journal*` buffer over there. I
+do not have a better answer.
+
+## boot modes
+
+Two modes, picked at GRUB time:
+
+  - `geos.mode=ui`. The default. Xorg + EXWM. What you want on a
+    laptop or desktop with a screen.
+  - `geos.mode=console`. No Xorg. Emacs on the kernel framebuffer
+    console with `TERM=linux`. What you want on a serial-console
+    headless box.
+
+Edit the kernel cmdline at the GRUB menu (press `e`, find the line
+starting `linux /gnu/store/...`, change the token, `Ctrl-x` to boot)
+to switch for one boot. To make it permanent, edit `kernel-arguments`
+in `guix-system/system.scm` and rebuild the image.
+
+## shutting down
+
+```
+M-x geos-poweroff         sync, reboot(2) with RB_POWER_OFF.
+M-x geos-reboot           sync, reboot(2) with RB_AUTOBOOT.
+```
+
+Both go through the pid1 dynamic module, which holds `CAP_SYS_BOOT`.
+There is no `/sbin/poweroff` to call out to, no socket protocol, no
+`sudo`. The supervisor is Emacs; the answer to "shut down" lives in
+this Emacs.
+
+If `geos-poweroff` returns nil, the call did not reach the syscall;
+check `*panic*`. Most likely the dynamic module did not load
+(`PID1_MODULE_PATH` was empty in the env, which only happens if you
+ran emacs by hand outside the boot path).
+
+## customizing
+
+There is no `~/.emacs.d/init.el` for you. The userland is the boot
+gexp; to change it you edit a file in `emacs-init/` and rebuild the
+image. There is no in-system `M-x customize-system` yet (it is on the
+v0.3 roadmap, see `*reconfigure*`).
+
+For one-off tweaks during a session, `M-x eval-expression` (`M-:`) and
+write some Lisp. The change lasts until the next reboot.
+
+## getting help
+
+`C-h` is your friend. In particular:
+
+```
+C-h k <key>               describe a key chord.
+C-h f <function>          describe a function (with source).
+C-h v <variable>          describe a variable.
+C-h i                     the Info browser. emacs's manual is here.
+```
+
+For GEOS-specific things, the source under `emacs-init/` is the
+documentation. Every file starts with a one-line description and
+inline comments explain the why.

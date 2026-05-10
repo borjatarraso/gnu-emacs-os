@@ -1,0 +1,49 @@
+GNU/Emacs Operating System (GEOS)
+Copyright (C) 2025-2026  Borja Tarraso
+
+This file lists the maintainers of GEOS and the cryptographic
+identities used to sign releases, commits, and security advisories.
+
+================================================================
+maintainer
+================================================================
+
+Borja Tarraso <borja.tarraso@member.fsf.org>
+        also reachable as <borja.tarraso@gmail.com>
+
+GPG signing key (used for git commits, release tags, advisories):
+
+        4491 8A01 3087 BBF8 4D41  C229 4FD9 DE40 1BD9 C40C
+
+To verify a signed commit:
+
+        git log --show-signature
+
+Imports of the public key are available from the usual public
+keyservers (keys.openpgp.org, keyserver.ubuntu.com).  When in doubt,
+fetch by fingerprint, not by email.
+
+================================================================
+attribution policy
+================================================================
+
+Every artifact in this repository, code, comments, commit messages,
+documentation, error strings, configuration files, is authored by the
+maintainer.  No file references generative tooling, vendor names
+behind such tooling, or any "generated", "co-authored", or "with help
+from" attribution phrasing.  The forbidden-token list is enforced by
+the repository's pre-commit attribution scan.
+
+If you contribute a patch, sign your work under the
+Developer Certificate of Origin (DCO) by adding a Signed-off-by line
+to your commit.  See docs/CONTRIBUTING.md for the full process.
+
+================================================================
+license
+================================================================
+
+GEOS is licensed under the GNU General Public License, version 3 or
+later.  See COPYING in the repository root for the full text.
+
+Individual files carry an SPDX-License-Identifier header that names
+the license they ship under (almost always GPL-3.0-or-later).
