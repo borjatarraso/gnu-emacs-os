@@ -71,14 +71,18 @@ if [ "$BUILD" = 1 ]; then
     # binaries are absent and `guix system image` dies with
     # canonicalize-path: No such file or directory. make is idempotent;
     # if the binaries are up to date this is a no-op.
-    echo "dev-vm.sh: building host-side binaries (pid1, shstub)"
+    # diagnostics go to stderr because --build-only callers capture
+    # stdout: smoke-test.sh does `QCOW=$(dev-vm.sh --build-only)` and
+    # the path on the final stdout line is the contract.  any echo on
+    # stdout above that line poisons QCOW with multi-line garbage.
+    echo "dev-vm.sh: building host-side binaries (pid1, shstub)" >&2
     # `all` builds both emacs-init AND pid1-module.so. system.scm
     # references both as local-file inputs; the default `make` target
     # only produces emacs-init, which leaves the .so missing and the
     # build fails with canonicalize-path on pid1-module.so.
-    make -C pid1 all
-    make -C shstub
-    echo "dev-vm.sh: building qcow2 from $REPO_ROOT/guix-system/system.scm"
+    make -C pid1 all >&2
+    make -C shstub >&2
+    echo "dev-vm.sh: building qcow2 from $REPO_ROOT/guix-system/system.scm" >&2
     # filter for the /gnu/store/... line.  guix prints status messages
     # to stderr and the store path to stdout, but a deprecation warning
     # or substituter notice can land on stdout too; bare `tail -n 1`
@@ -92,7 +96,7 @@ if [ "$BUILD" = 1 ]; then
         echo "dev-vm.sh: got: '$QCOW'" >&2
         exit 1
     fi
-    echo "dev-vm.sh: built $QCOW"
+    echo "dev-vm.sh: built $QCOW" >&2
 else
     QCOW=$EXISTING_QCOW
     if [ ! -f "$QCOW" ]; then
