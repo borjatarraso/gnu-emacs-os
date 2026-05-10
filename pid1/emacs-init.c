@@ -439,6 +439,66 @@ link_current_system(void)
     console(ok);
 }
 
+/* mount /var so the elisp state directory has somewhere to live.
+ * probes /dev/disk/by-label/geos-var first (real persistence across
+ * reboots); falls back to tmpfs so a fresh image without that label
+ * still boots and works in degraded mode (state lost on reboot, but
+ * the rest of the system functions). logs the choice with a marker
+ * the smoke-test greps for ("pid1: /var on tmpfs" or "pid1: /var on
+ * ext4"). invariant: caller is root, called once at boot from main()
+ * after the do_mount block. never aborts boot: if even tmpfs fails we
+ * log loudly and let early-init.el degrade gracefully when it cannot
+ * write under /var/emacs. */
+static void
+mount_var(void)
+{
+    char buf[256];
+    /* /var may not exist on a fresh root; the guix system image populates
+     * it during activation, but we run BEFORE activation. mkdir is
+     * idempotent for our purposes (EEXIST is success). */
+    if (mkdir("/var", 0755) < 0 && errno != EEXIST) {
+        snprintf(buf, sizeof buf,
+                 "pid1: mkdir /var failed: %s", strerror(errno));
+        console(buf);
+        /* keep going: a pre-existing /var that is e.g. a symlink will
+         * still mount fine. */
+    }
+    /* probe for the labelled partition. udev (in the initrd) populates
+     * /dev/disk/by-label/ so the symlink is there iff a partition with
+     * the geos-var label was found at boot. access() is good enough; we
+     * do not need to stat the target. */
+    const char *label_path = "/dev/disk/by-label/geos-var";
+    if (access(label_path, F_OK) == 0) {
+        if (raw_mount(label_path, "/var", "ext4",
+                      MS_NOSUID, NULL) == 0) {
+            console("pid1: /var on ext4 (geos-var label)");
+            return;
+        }
+        if (errno == EBUSY) {
+            console("pid1: /var on ext4 (already mounted by initrd)");
+            return;
+        }
+        snprintf(buf, sizeof buf,
+                 "pid1: mount geos-var ext4 failed: %s, "
+                 "falling through to tmpfs", strerror(errno));
+        console(buf);
+    }
+    /* fallback. tmpfs is always available; the only way this fails is
+     * an OOM kernel, in which case we have bigger problems. */
+    if (raw_mount("tmpfs", "/var", "tmpfs", MS_NOSUID,
+                  "mode=0755") == 0) {
+        console("pid1: /var on tmpfs (no geos-var label)");
+        return;
+    }
+    if (errno == EBUSY) {
+        console("pid1: /var on tmpfs (already mounted by initrd)");
+        return;
+    }
+    snprintf(buf, sizeof buf,
+             "pid1: /var mount failed entirely: %s", strerror(errno));
+    console(buf);
+}
+
 static volatile sig_atomic_t got_sigchld = 0;
 
 /* sleeps for at least sec seconds, restarting on EINTR. plain sleep()
@@ -1164,6 +1224,12 @@ main(int argc, char **argv)
     do_mount("tmpfs",    "/tmp",     "tmpfs",    MS_NOSUID|MS_NODEV,            NULL);
     do_mount("devpts",   "/dev/pts", "devpts",   MS_NOSUID|MS_NOEXEC,           "gid=5,mode=0620");
 
+    /* /var hosts the elisp state directory (see core/state.el). do this
+     * before link_current_system so a future state.el call early in the
+     * boot has somewhere to land its first write. tmpfs fallback means
+     * a missing geos-var partition is degraded mode, not a boot failure. */
+    mount_var();
+
     /* /run/current-system is the canonical guix indirection that every
      * profile-aware path keys off of (PATH=/run/current-system/profile/
      * bin, fontconfig, locale archives, ...). guix's activation service
@@ -1613,6 +1679,37 @@ Fpid1_bring_up_lo(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
+/* (pid1-fsync-dir PATH) -> t or signal pid1-error.
+ * opens the directory at PATH, fsync()s it, closes. used by elisp
+ * state writers (see core/state.el) after rename(.tmp, final) to make
+ * the rename durable on ext4. on tmpfs the fsync is a near-no-op but
+ * still cheap, so we always call it; the elisp side does not need to
+ * know which fs is under /var. */
+static emacs_value
+Fpid1_fsync_dir(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 1)
+        return pid1_signal_errno(env, "pid1: pid1-fsync-dir needs 1 arg",
+                                 EINVAL);
+    char path[EXTRACT_BUF_MAX];
+    if (extract_cstring_into(env, args[0], path, sizeof path) < 0)
+        return Qnil;
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0)
+        return pid1_signal_errno(env, "pid1: open(O_DIRECTORY)", errno);
+    int rc = fsync(fd);
+    int err = errno;
+    int c = close(fd);
+    if (rc < 0)
+        return pid1_signal_errno(env, "pid1: fsync", err);
+    if (c < 0)
+        return pid1_signal_errno(env, "pid1: close after fsync", errno);
+    return env->intern(env, "t");
+}
+
 /* sync + reboot(2) wrapper shared by both directions. CMD is one of
  * RB_POWER_OFF or RB_AUTOBOOT. on success the kernel kills every
  * process including the caller, so a successful return is
@@ -1704,6 +1801,11 @@ emacs_module_init(struct emacs_runtime *ert)
         "Bring up the loopback interface. Return t.",
         NULL);
     pid1_defalias(env, "pid1-bring-up-lo", lo);
+
+    emacs_value fsd = env->make_function(env, 1, 1, Fpid1_fsync_dir,
+        "fsync the directory at PATH. Return t. Use after rename to commit durably.",
+        NULL);
+    pid1_defalias(env, "pid1-fsync-dir", fsd);
 
     emacs_value off = env->make_function(env, 0, 0, Fpid1_poweroff,
         "Sync, then reboot(RB_POWER_OFF). Does not return on success.",

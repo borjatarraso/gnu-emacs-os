@@ -73,6 +73,18 @@
     (local-file "../emacs-init/core/use-package-shim.el"
                 "use-package-shim.el"))
 
+(define state-el
+    ;; v0.4 item 1: persistent on-disk scratchpad under /var/emacs/.
+    ;; provides state-read / state-write / state-delete with crash-safe
+    ;; rename-then-fsync semantics and a state-mode probe that branches
+    ;; on whether pid1 mounted /var as ext4 (geos-var label) or fell
+    ;; back to tmpfs.  loaded right after panic.el so every later -l
+    ;; (network, hostname, buffers/, ...) can persist across reboots
+    ;; without re-deriving from /proc.  the file's bottom-of-load
+    ;; auto-init (gated on pid1-as-emacs-p) materialises the directory
+    ;; tree before any consumer arrives.
+    (local-file "../emacs-init/core/state.el" "state.el"))
+
 (define power-el
     ;; thin elisp wrapper around pid1-module's pid1-poweroff and
     ;; pid1-reboot bindings. exposes M-x geos-poweroff / geos-reboot.
@@ -406,6 +418,7 @@
                                ;; replace that crutch with use-package.
                                "-l" #$early-init-el
                                "-l" #$panic-el
+                               "-l" #$state-el
                                "-l" #$power-el
                                "-l" #$use-package-shim-el
                                "-l" #$network-el

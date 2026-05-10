@@ -226,6 +226,45 @@ Pass iff control returns and emacs is still alive."
     (freeze-test--record 'kill-emacs result)))
 
 ;; --------------------------------------------------------------------
+;; test 6: state round-trip (v0.4 item 1)
+;; --------------------------------------------------------------------
+
+(defun freeze-test-state-roundtrip ()
+  "Write a known sentinel under /var/emacs/, read it back, delete it.
+asserts that state-write -> rename(2) -> pid1-fsync-dir -> state-read
+forms a closed loop in the booted image.  the random integer prevents
+a stale value from a previous run silently passing the read.
+
+failure modes worth catching:
+  - state.el did not load (state-write unbound)
+  - /var/emacs/ does not exist (state--ensure-layout never ran)
+  - pid1-fsync-dir signalled and the rename was rolled back
+  - the parent dir is on a read-only fs (state-mode misdetected)"
+  (interactive)
+  (let ((result 'fail)
+        (key "freeze/roundtrip")
+        (sentinel (list 'geos 'freeze (random 1000000))))
+    (condition-case err
+        (cond
+         ((not (fboundp 'state-write))
+          (setq result "state-write unbound, state.el not loaded"))
+         ((not (state-write key sentinel))
+          (setq result "state-write returned nil"))
+         (t
+          (let ((readback (state-read key 'absent)))
+            (cond
+             ((equal readback sentinel)
+              (state-delete key)
+              (setq result 'pass))
+             (t
+              (setq result (format "readback mismatch: %S != %S"
+                                   readback sentinel)))))))
+      (error
+       (panic-handle err 'freeze-test-state-roundtrip)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'state-roundtrip result)))
+
+;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
 
@@ -242,6 +281,7 @@ Pass iff control returns and emacs is still alive."
     (error "freeze-test: emacs unresponsive after catastrophic-regex"))
   (freeze-test-slow-network)
   (freeze-test-bad-tramp)
+  (freeze-test-state-roundtrip)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

@@ -126,7 +126,7 @@ qemu-system-x86_64 \
     -drive "file=$QCOW,format=qcow2,if=virtio" &
 QPID=$!
 
-# two-layer success gate, mode-aware:
+# multi-layer success gate, mode-aware:
 #
 #   PID1 marker: supervisor reached its main loop with a known mode
 #     active. catches Xorg-died-and-pid1-fell-back half-failures
@@ -140,7 +140,19 @@ QPID=$!
 #     all buffers actually loaded.
 #       both modes:   "geos: emacs userland up"
 #
-# pass = (any pid1 marker) AND userland marker.
+#   VAR marker (v0.4 item 1): pid1 mounted /var either as ext4 (geos-var
+#     label found) or as tmpfs (fallback). missing this line means
+#     mount_var() either crashed or printed nothing, which would leave
+#     state.el's ensure-layout silently writing into rootfs.
+#       persistent:   "pid1: /var on ext4"
+#       tmpfs:        "pid1: /var on tmpfs"
+#
+#   STATE marker (v0.4 item 1): state.el's bottom-of-load auto-init
+#     ran and detected a state-mode. proves the elisp half of the
+#     persistent-state subsystem loaded and produced a writable layout.
+#       both modes:   "geos: state-mode="
+#
+# pass = (any pid1 marker) AND userland marker AND var marker AND state marker.
 #
 # we do NOT gate on "geos: exwm up" headlessly. exwm-init-hook only
 # fires once EXWM processes its first real X event, which depends on
@@ -150,6 +162,8 @@ QPID=$!
 SUCCESS_PID1_UI_RE='pid1: X server up on :0'
 SUCCESS_PID1_CONSOLE_RE='pid1: geos\.mode=console'
 SUCCESS_USERLAND_RE='geos: emacs userland up'
+SUCCESS_VAR_RE='pid1: /var on (ext4|tmpfs)'
+SUCCESS_STATE_RE='geos: state-mode='
 
 # failure markers (any one means hard fail, do not wait for timeout):
 #   xorg parse errors, screen-discovery failures
@@ -167,13 +181,20 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
         tail -n 30 "$LOG"
         exit 1
     fi
-    if [ -s "$LOG" ] && grep -Eq "$SUCCESS_USERLAND_RE" "$LOG"; then
+    if [ -s "$LOG" ] \
+       && grep -Eq "$SUCCESS_USERLAND_RE" "$LOG" \
+       && grep -Eq "$SUCCESS_VAR_RE" "$LOG" \
+       && grep -Eq "$SUCCESS_STATE_RE" "$LOG"; then
         if grep -Eq "$SUCCESS_PID1_UI_RE" "$LOG"; then
             echo "smoke-test: PASS (ui)"
             echo "--- matched pid1 markers ---"
             grep -En "$SUCCESS_PID1_UI_RE" "$LOG" || true
             echo "--- matched userland markers ---"
             grep -En "$SUCCESS_USERLAND_RE" "$LOG" || true
+            echo "--- matched /var markers ---"
+            grep -En "$SUCCESS_VAR_RE" "$LOG" || true
+            echo "--- matched state markers ---"
+            grep -En "$SUCCESS_STATE_RE" "$LOG" || true
             exit 0
         elif grep -Eq "$SUCCESS_PID1_CONSOLE_RE" "$LOG"; then
             echo "smoke-test: PASS (console)"
@@ -181,6 +202,10 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             grep -En "$SUCCESS_PID1_CONSOLE_RE" "$LOG" || true
             echo "--- matched userland markers ---"
             grep -En "$SUCCESS_USERLAND_RE" "$LOG" || true
+            echo "--- matched /var markers ---"
+            grep -En "$SUCCESS_VAR_RE" "$LOG" || true
+            echo "--- matched state markers ---"
+            grep -En "$SUCCESS_STATE_RE" "$LOG" || true
             exit 0
         fi
     fi
