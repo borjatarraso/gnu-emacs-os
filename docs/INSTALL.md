@@ -207,6 +207,15 @@ Two scripts run before any release:
     Empty output means pass. The documented exceptions are listed in
     `guix-system/exceptions.scm`.
 
+`/smoke-test` boots a qcow2 headlessly with the serial console wired
+to a tmpfile and greps for pid1 success/failure markers. It catches
+the class of regression that bricked v0.3 boot once already (an
+xorg.conf parse error -> Xorg respawn loop -> no DISPLAY -> EXWM never
+came up). Run it after any change to `pid1/`, `guix-system/`, or
+anything Xorg-adjacent. Implementation lives at
+`iso-build/smoke-test.sh`; exit codes are 0 pass, 1 fail (with the
+matched marker and the last 30 serial lines printed), 2 timeout.
+
 `/freeze-test` runs the abuse suite against a booted VM (runaway loops,
 catastrophic regex, a literal `(kill-emacs)` call) and confirms the
 panic buffer keeps the OS interactive.
