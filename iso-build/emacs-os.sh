@@ -67,6 +67,13 @@ done
 
 ISO=
 if [ "$BUILD" = 1 ]; then
+    # system.scm references ../pid1/emacs-init and ../shstub/sh as
+    # local-file inputs; build them first or `guix system image` dies
+    # with canonicalize-path: No such file or directory. make is
+    # idempotent.
+    echo "emacs-os.sh: building host-side binaries (pid1, shstub)"
+    make -C pid1
+    make -C shstub
     echo "emacs-os.sh: building ISO from $REPO_ROOT"
     echo "emacs-os.sh: ~30min cold cache, ~2min warm"
     # guix system image writes diagnostics to stderr and the final

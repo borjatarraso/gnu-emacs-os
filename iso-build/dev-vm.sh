@@ -66,6 +66,14 @@ done
 
 QCOW=
 if [ "$BUILD" = 1 ]; then
+    # system.scm references ../pid1/emacs-init and ../shstub/sh as
+    # local-file inputs. on a fresh clone (or after cleanup.sh) those
+    # binaries are absent and `guix system image` dies with
+    # canonicalize-path: No such file or directory. make is idempotent;
+    # if the binaries are up to date this is a no-op.
+    echo "dev-vm.sh: building host-side binaries (pid1, shstub)"
+    make -C pid1
+    make -C shstub
     echo "dev-vm.sh: building qcow2 from $REPO_ROOT/guix-system/system.scm"
     QCOW=$(guix time-machine -C guix-system/channels.scm -- \
         system image -t qcow2 -L "$REPO_ROOT" guix-system/system.scm \
