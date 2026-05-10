@@ -72,7 +72,10 @@ if [ "$BUILD" = 1 ]; then
     # with canonicalize-path: No such file or directory. make is
     # idempotent.
     echo "emacs-os.sh: building host-side binaries (pid1, shstub)"
-    make -C pid1
+    # `all` builds both emacs-init AND pid1-module.so. default `make`
+    # only produces emacs-init; the .so would then be missing and
+    # guix dies with canonicalize-path on pid1-module.so.
+    make -C pid1 all
     make -C shstub
     echo "emacs-os.sh: building ISO from $REPO_ROOT"
     echo "emacs-os.sh: ~30min cold cache, ~2min warm"

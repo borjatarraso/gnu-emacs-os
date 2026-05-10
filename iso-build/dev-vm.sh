@@ -72,7 +72,11 @@ if [ "$BUILD" = 1 ]; then
     # canonicalize-path: No such file or directory. make is idempotent;
     # if the binaries are up to date this is a no-op.
     echo "dev-vm.sh: building host-side binaries (pid1, shstub)"
-    make -C pid1
+    # `all` builds both emacs-init AND pid1-module.so. system.scm
+    # references both as local-file inputs; the default `make` target
+    # only produces emacs-init, which leaves the .so missing and the
+    # build fails with canonicalize-path on pid1-module.so.
+    make -C pid1 all
     make -C shstub
     echo "dev-vm.sh: building qcow2 from $REPO_ROOT/guix-system/system.scm"
     QCOW=$(guix time-machine -C guix-system/channels.scm -- \

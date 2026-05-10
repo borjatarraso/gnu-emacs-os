@@ -36,6 +36,7 @@ rm -f /tmp/geos-*.iso
 
 rm -f "$REPO_ROOT"/boot-*.log
 rm -f "$REPO_ROOT"/pid1/emacs-init
+rm -f "$REPO_ROOT"/pid1/pid1-module.so
 rm -f "$REPO_ROOT"/shstub/sh
 
 # .elc under emacs-init/. tolerate the absence of any.
