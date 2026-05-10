@@ -108,29 +108,29 @@ GEOS supports two boot modes. The mode is picked at GRUB time via the
 `geos.mode=` kernel cmdline token, which PID 1 reads from
 `/proc/cmdline` before it spawns Xorg.
 
-  - `geos.mode=console` (the v0.3 default, baked into the image's
+  - `geos.mode=ui` (the default, baked into the image's
     `kernel-arguments`, also what you fall back to if the token is
-    absent or malformed). PID 1 skips Xorg entirely and spawns Emacs
-    on `/dev/console` with `TERM=linux`. No X server, no EXWM, no GUI.
-    The session is the kernel framebuffer console with Emacs filling
-    it. `M-x eshell` for the shell, all the system buffers
+    absent or malformed). PID 1 spawns Xorg with the modesetting
+    driver against `/dev/dri/card0`, then spawns Emacs with
+    `DISPLAY=:0` so Emacs comes up as an X client and EXWM grabs the
+    root window. `s-&` launches X clients, the frame is fullscreen.
+    This is the standard graphical session.
+  - `geos.mode=console`. PID 1 skips Xorg entirely and spawns Emacs
+    on `/dev/console` with `TERM=linux`. No X server, no EXWM, no
+    GUI. The session is the kernel framebuffer console with Emacs
+    filling it. `M-x eshell` for the shell, all the system buffers
     (`*processes*`, `*network*`, `*journal*`, `*services*`,
     `*disks*`, `*packages*`) work exactly like they do in UI mode.
     This is the right mode for a serial-console headless box, an SSH-
     equivalent session, or just doing all your work in a framebuffer
-    Emacs the way nature intended.
-  - `geos.mode=ui`. PID 1 spawns Xorg with the modesetting driver
-    against `/dev/dri/card0`, then spawns Emacs with `DISPLAY=:0` so
-    Emacs comes up as an X client and EXWM grabs the root window.
-    `s-&` launches X clients, the frame is fullscreen. Use this when
-    you actually want a graphical session.
+    Emacs.
 
 To pick the mode at boot, hit `e` at the GRUB menu, find the line that
-starts with `linux /gnu/store/...`, and replace `geos.mode=console` with
-`geos.mode=ui` (or vice versa) at the end of that line. Press `Ctrl-x`
-(or `F10`) to boot. The choice persists for that boot only; the next
-reboot reverts to whatever the GRUB entry has baked in. To make the
-choice permanent, edit the token in `kernel-arguments` in
+starts with `linux /gnu/store/...`, and replace `geos.mode=ui` with
+`geos.mode=console` (or vice versa) at the end of that line. Press
+`Ctrl-x` (or `F10`) to boot. The choice persists for that boot only;
+the next reboot reverts to whatever the GRUB entry has baked in. To
+make the choice permanent, edit the token in `kernel-arguments` in
 `guix-system/system.scm` and rebuild the image.
 
 The boot log echoes the chosen mode as one of:
@@ -140,7 +140,7 @@ pid1: geos.mode=console, skipping Xorg, emacs on /dev/console
 pid1: geos.mode=ui, will spawn Xorg + EXWM
 ```
 
-A missing or unrecognized value defaults to console. An unknown value
+A missing or unrecognized value defaults to UI. An unknown value
 also logs a warning so you can see what the operator typed.
 
 ## fast iteration with the qcow2 image

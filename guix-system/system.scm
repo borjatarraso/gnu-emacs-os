@@ -337,15 +337,15 @@
   ;; loaded from initrd-modules, we WANT KMS up so Xorg's modesetting
   ;; driver has a /dev/dri/card0 to bind. vesafb is no longer the
   ;; rendering surface; virtio-gpu's drm fbcon is.
-  ;; geos.mode=console is the v0.3 default. PID 1 reads this from
-  ;; /proc/cmdline before deciding whether to spawn Xorg. console mode
-  ;; runs emacs straight on /dev/console with TERM=linux; pass
-  ;; geos.mode=ui at the GRUB editor (or swap the token here and
-  ;; rebuild) to land in the EXWM session instead.
+  ;; geos.mode=ui is the default. PID 1 reads this from /proc/cmdline
+  ;; before deciding whether to spawn Xorg. UI mode brings up Xorg +
+  ;; EXWM and runs Emacs as an X client; pass geos.mode=console at
+  ;; the GRUB editor (or swap the token here and rebuild) to land
+  ;; straight on /dev/console instead.
   (kernel-arguments
    (cons* "console=tty1"
           "console=ttyS0,115200"
-          "geos.mode=console"
+          "geos.mode=ui"
           %default-kernel-arguments))
 
   ;; phase 5c: load virtio_gpu in the initrd so /dev/dri/card0 exists

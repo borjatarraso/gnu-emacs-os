@@ -82,17 +82,67 @@ raw_mount(const char *src, const char *tgt, const char *type,
     return mount(src, tgt, type, flags, opts);
 }
 
-#ifdef PID1_MODULE
-/* sethostname wrapper. exists as a function so the module path can
- * call it without dragging in any boot-time logic. boot mode never
- * calls this (the kernel cmdline already pinned a hostname by the
- * time we run), so it is module-only to keep -Wunused-function happy
- * under STATIC=1 builds. invariant: returns 0 on success, -1 with
- * errno set on failure. */
+/* sethostname wrapper. shared between two callers: the boot path
+ * (set_hostname_at_boot, below) and the elisp module entry point
+ * (Fpid1_set_hostname, gated on PID1_MODULE). invariant: returns 0
+ * on success, -1 with errno set on failure. */
 static int
 raw_set_hostname(const char *name, size_t len)
 {
     return sethostname(name, len);
+}
+
+#ifndef PID1_MODULE
+/* read /etc/hostname (which guix's etc-service-type writes from the
+ * operating-system host-name field), trim trailing whitespace, and
+ * call sethostname. fall back to the hardcoded "lambda" if the file
+ * is unreadable, empty, or whitespace-only. invariant: never errors
+ * out the boot. failures log to /dev/console and continue. boot path
+ * only because console() is gated on !PID1_MODULE; the module path
+ * uses Fpid1_set_hostname driven from elisp instead. */
+static void
+set_hostname_at_boot(void)
+{
+    char buf[256];
+    ssize_t n = -1;
+    int fd = open("/etc/hostname", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        n = read(fd, buf, sizeof buf - 1);
+        (void)close(fd);
+    }
+    /* trim trailing whitespace/newline. if nothing readable survives,
+     * fall back to "lambda" so uname -a never shows (none). */
+    if (n > 0) {
+        buf[n] = '\0';
+        while (n > 0
+               && (buf[n - 1] == '\n' || buf[n - 1] == '\r'
+                   || buf[n - 1] == ' ' || buf[n - 1] == '\t')) {
+            buf[--n] = '\0';
+        }
+    }
+    const char *name;
+    size_t len;
+    if (n > 0) {
+        name = buf;
+        len = (size_t)n;
+    } else {
+        name = "lambda";
+        len = 6;
+        console("pid1: /etc/hostname unreadable or empty, defaulting to lambda");
+    }
+    if (raw_set_hostname(name, len) < 0) {
+        char msg[384];
+        (void)snprintf(msg, sizeof msg,
+                       "pid1: sethostname(%s) failed: %s",
+                       name, strerror(errno));
+        console(msg);
+        return;
+    }
+    {
+        char msg[320];
+        (void)snprintf(msg, sizeof msg, "pid1: hostname set to %s", name);
+        console(msg);
+    }
 }
 #endif
 
@@ -240,22 +290,21 @@ read_geos_mode(void)
 {
     int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        console("pid1: /proc/cmdline unreadable, defaulting to console mode");
-        return GEOS_MODE_CONSOLE;
+        console("pid1: /proc/cmdline unreadable, defaulting to ui mode");
+        return GEOS_MODE_UI;
     }
     char buf[4096];
     ssize_t n = read(fd, buf, sizeof buf - 1);
     (void)close(fd);
-    if (n <= 0) return GEOS_MODE_CONSOLE;
+    if (n <= 0) return GEOS_MODE_UI;
     buf[n] = '\0';
     const char *key = "geos.mode=";
     char *p = strstr(buf, key);
-    /* default-on-absence flipped from ui to console for v0.3: GEOS is
-     * a console-first OS, the GUI is opt-in. the operating-system
-     * record bakes geos.mode=console into kernel-arguments anyway, so
-     * this fallback only fires on a hand-rolled boot or a corrupt
-     * cmdline. either way, console is the safer place to land. */
-    if (!p) return GEOS_MODE_CONSOLE;
+    /* default-on-absence is ui: the operating-system record bakes
+     * geos.mode=ui into kernel-arguments, so this fallback only fires
+     * on a hand-rolled boot or a corrupt cmdline. ui is the project
+     * default, picking it on absence keeps both layers in agreement. */
+    if (!p) return GEOS_MODE_UI;
     p += strlen(key);
     /* extract the token bound by whitespace/newline; we only care about
      * a small, fixed set of values so a 32-byte stack copy is plenty. */
@@ -280,10 +329,10 @@ read_geos_mode(void)
     {
         char msg[128];
         (void)snprintf(msg, sizeof msg,
-                       "pid1: unknown geos.mode=%s, defaulting to console", val);
+                       "pid1: unknown geos.mode=%s, defaulting to ui", val);
         console(msg);
     }
-    return GEOS_MODE_CONSOLE;
+    return GEOS_MODE_UI;
 }
 
 /* lays down /run/current-system as a symlink to the gnu.system= path.
@@ -943,6 +992,15 @@ main(int argc, char **argv)
                  "pid1: bring up lo failed: %s", strerror(errno));
         console(buf);
     }
+
+    /* hostname before emacs starts: by the time the userland reads
+     * /proc/sys/kernel/hostname (or runs uname -a), the value must
+     * already be the operating-system's host-name, not the kernel's
+     * compile-time "(none)". elisp/core/hostname.el ALSO calls
+     * pid1-set-hostname for hot-update from M-x, but this is the
+     * unconditional baseline that runs even if the module fails to
+     * load. */
+    set_hostname_at_boot();
 
     /* SIGCHLD: reap orphans reparented to us when their parents died */
     struct sigaction sa;
