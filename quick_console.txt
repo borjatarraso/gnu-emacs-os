@@ -1,3 +1,0 @@
-cd /path/to/emacs-os
-./iso-build/cleanup.sh
-./iso-build/dev-vm.sh

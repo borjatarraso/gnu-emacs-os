@@ -17,19 +17,27 @@ dynamic module, so the supervisor lives inside the supervised process.
 Every system concept (`top`, `ip a`, `journalctl`, `df`, `apt`) is a
 buffer with a major mode and a refresh timer.
 
-This is v0.2. It runs. I use it.
+This is v0.3.1. It runs. I use it.
 
 ## try it
 
 ```
-cd iso-build
-guix time-machine -C channels.scm -- \
-    system image -L .. build.scm
-./qemu-harness.sh /gnu/store/...-image.iso
+./iso-build/dev-vm.sh
 ```
 
-You need a Linux host with KVM, Guix installed, and about 8 GB free
-in `/gnu/store`. Boot takes around eleven seconds. Full instructions
+That builds the host-side binaries (`pid1/`, `shstub/`), then runs
+`guix time-machine` against the pinned channel to produce a qcow2,
+then boots it under QEMU/KVM. First build is large (~8 GB into
+`/gnu/store`); subsequent ones are seconds.
+
+For a headless smoke pass:
+
+```
+./iso-build/smoke-test.sh
+```
+
+You need a Linux host with KVM and Guix installed. Boot to a
+usable EXWM frame takes about eleven seconds. Full instructions
 in [docs/INSTALL.md](docs/INSTALL.md). The why is in
 [docs/MANIFESTO.md](docs/MANIFESTO.md), and the manifesto is the
 document I would actually rather you read first.
@@ -53,16 +61,31 @@ document I would actually rather you read first.
     via the pid1 module. No `/sbin/poweroff`, no socket, no sudo.
   - `*processes*`, `*network*`, `*journal*`, `*services*`, `*disks*`,
     `*packages*` are all live buffers with sensible keybindings.
-  - The whole image builds reproducibly from a pinned Guix channel
-    (commit `230aa373f315f247852ee07dff34146e9b480aec`).
+  - `/etc/hostname` is read and applied at boot via `pid1-set-hostname`
+    (no Shepherd hostname service to depend on).
+  - GRUB picks the boot mode from `geos.mode=`; `ui` is the default,
+    `geos.mode=console` lands on a raw `/dev/console` Emacs without Xorg.
+  - Persistent state under `/var/emacs/`: pid1 mounts an ext4 partition
+    labelled `geos-var` if present, falls back to tmpfs otherwise.
+    Crash-safe `state-write` (rename + parent fsync via `pid1-fsync-dir`).
+    See [docs/STATE_LAYOUT.md](docs/STATE_LAYOUT.md).
+  - `iso-build/freeze-tests.el` is an in-VM abuse suite that asserts
+    the panic buffer survives runaway loops, catastrophic regex, slow
+    network, bad tramp, `kill-emacs`, and a state-write round trip.
+  - `iso-build/smoke-test.sh` boots a headless qcow2 and gates on
+    PID 1, userland, `/var` mount, and state-mode markers.
+  - The whole image builds reproducibly from a pinned Guix channel.
 
 ## what does not work yet
 
 The Hurd variant. Real hardware (only QEMU is exercised). Multi-user.
-Audio. Bluetooth. Wayland. Real networking beyond `lo`. The list lives
-in [docs/ROADMAP.md](docs/ROADMAP.md); v0.3 is where it gets shorter.
-v0.2 is about "I can boot it, type into it, see the screen, and shut
-it down without a host kill", which works.
+Audio. Bluetooth. Wayland. Real networking beyond `lo`. Real service
+supervisor (the registry is wired but the engine is the next item to
+land). Disk encryption at boot. The list lives in
+[docs/ROADMAP.md](docs/ROADMAP.md), with the detailed v0.4 plan in
+[docs/v04-plan.md](docs/v04-plan.md). v0.3.1 is about "I can boot it,
+type into it, see the screen, save state across reboots, and shut it
+down without a host kill", which works.
 
 ## the failure mode I have accepted
 
@@ -78,7 +101,14 @@ you, this is not your OS, and I will not be offended.
   - v0.1: tagged, ISO is 1.57 GB, boots in QEMU. Xvfb only.
   - v0.2: tagged. Real Xorg, working input, poweroff, hostname. Same
     ISO build flow.
-  - v0.3: scoped, not started. See [docs/ROADMAP.md](docs/ROADMAP.md).
+  - v0.3.1: tagged. Round-5 hardening across the pid1 ABI, the
+    supervision throttle, and the buffer renderers. Long-standing
+    fullscreen-pre-WM hang in `exwm-config.el` fixed (was making
+    headless smoke-tests time out). Freeze-test suite, AUTHORS,
+    contributor docs, user guide.
+  - v0.4: in flight. Persistent state under `/var/emacs/` is landed
+    (item 1 of 11). Plan in [docs/v04-plan.md](docs/v04-plan.md);
+    next up is the real service supervisor.
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.

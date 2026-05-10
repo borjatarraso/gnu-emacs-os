@@ -22,109 +22,75 @@ with the kernel name in parens. `/etc/hostname` actually applied at
 boot via `pid1-set-hostname`. Default host is `lambda`. GPLv3-or-later
 with SPDX headers everywhere.
 
-## v0.3 in priority order
+## v0.3 recap (done)
 
-### 1. core/supervise.el (the registry)
+Dual boot modes (`geos.mode=ui` default, `geos.mode=console` via the
+GRUB editor) so a broken Xorg does not lock the operator out of a
+working PID 1. Iso-build wrappers (`dev-vm.sh`, `smoke-test.sh`)
+replaced the per-session manual `guix time-machine` invocation.
+`pid1-set-hostname` reads `/etc/hostname` from C and applies it
+before forking emacs, with `\r` and `\n` rejected.
 
-The Phase 6 buffers all have `TODO(6):` markers waiting for a real
-supervisor. processes/disks/services register their refresh timers
-with it. journal registers its `dd if=/dev/kmsg` subprocess as kind
-`'process` so a follower death gets restarted. epdfinfo (pdf-tools)
-and any future ibus-daemon hang off the same registry.
+## v0.3.1 recap (done)
 
-The shape: a defvar holding `((id . (:kind X :restart-fn FN :state
-S))...)` plus `supervise-register`, `supervise-deregister`,
-`supervise-tick`. `supervise-tick` runs from a timer, walks the
-registry, and respawns anything dead. Restart cap: 5 in 60 seconds,
-mirroring the C-side Xorg cap.
+Maintenance bundle.  Round-5 hardening swept the pid1 emacs module
+ABI (copy_string_contents two-call pattern, pid1_signal_errno
+discipline), tightened the rolling crashloop window for Xorg and
+emacs respawns, made wait_for_x_socket reap a fast-failing Xorg
+with `WNOHANG`, and corrected a fistful of buffer renderers
+(processes pid cap, services `make-symbol`, journal O(1) line
+counter).  The long-standing exwm-config fullscreen-pre-WM hang
+that was timing out the headless smoke-test got deferred to
+`exwm-init-hook`. Added `iso-build/freeze-tests.el`, AUTHORS,
+docs/CONTRIBUTING.md, docs/USER_GUIDE.md.
 
-This is a one-week task and it closes a paper-cut from v0.1. Do this
-first because everything below registers with it.
+## v0.4 in flight
 
-### 2. real Xorg over KMS on bare metal
+The detailed plan lives in [v04-plan.md](v04-plan.md). Eleven items
+ordered into four phases, with dependency notes per item. The
+top-level shape:
 
-Already done in QEMU as part of v0.2: virtio_gpu KMS device,
-modesetting driver, working input. Bare-metal hardware needs the same
-shape with `i915` / `amdgpu` instead of virtio_gpu, plus a way to pick
-the right driver dynamically. Plan:
+### Phase A (foundational, in progress)
 
-  - extend the initrd modules list to include `i915`, `amdgpu`,
-    `nouveau` so any of the common GPUs come up with KMS available
-  - have pid1 (or core/exwm-config.el) probe `/sys/class/drm` for the
-    first `card*` device and select the matching xorg.conf snippet
-  - keep the modesetting driver as the default; only fall back to
-    framebuffer (`fbdev`) if no DRM device shows up
+- **1. persistent state under `/var/emacs/`** (done): `state-read` /
+  `state-write` / `state-delete` with rename(2) + `pid1-fsync-dir`,
+  ext4 (`geos-var` label) or tmpfs fallback. See
+  [STATE_LAYOUT.md](STATE_LAYOUT.md).
+- **2. first-class service definitions in Elisp**: `core/supervise.el`
+  with `defservice` macro, restart policy, rolling 60s respawn cap,
+  `state-write`-backed registry. Closes the `TODO(6)` markers in the
+  buffer files.
+- **10. kernel-cmdline boot menu in GRUB**: GRUB editor entries for
+  `geos.mode=ui` and `geos.mode=console` so the operator picks at
+  boot instead of having to rebuild.
 
-The supervisor side is already correct (5/60 respawn cap, sentinel,
-SIGTERM grace). This is purely a userspace + initrd question.
+### Phase B (user-visible utility)
 
-### 3. networking that is not just lo
+- **5. network configuration UI** (DHCP, DNS, real interface bring-up
+  via SIOCS\* through a `pid1-set-address` module call)
+- **6. package management buffer** (`*packages*` with install / remove
+  driven by `guix package` via `make-process`)
+- **7. suspend / resume** through `/sys/power/state` with a
+  `pid1-suspend` wrapper so the supervisor can quiesce timers
 
-Right now `network-interface-config` only knows how to bring up
-loopback. To make the box useful on a network I need:
+### Phase C (multi-user, install)
 
-  - `pid1-set-address` exposed as a dynamic-module call wrapping
-    SIOCSIFADDR / SIOCSIFNETMASK / SIOCSIFFLAGS. The TODO(5c) marker
-    in core/network.el is waiting for this.
-  - a DHCPv4 client. dhcpcd as a long-running process registered with
-    supervise.el. The `*network*` buffer grows a `D` keystroke to
-    request a lease.
-  - a DNS resolver. The simplest thing that works: a `/etc/resolv.conf`
-    written by the dhcp lease handler, plus emacs-side use of
-    `dns-query` for any name lookups in elisp. No nss, no glibc
-    resolver hooks.
-  - wifi. `wpa_supplicant` registered with supervise.el. A new
-    `*wifi*` buffer (run /buffer-it for it) that lists scan results
-    and calls into wpa_cli over its control socket. No shell-out.
+- **4. user accounts + login** (passwd / shadow under `/var/emacs/users/`,
+  setuid helper for service `:user`/`:group` enforcement)
+- **9. disk encryption (LUKS at boot)** (cryptsetup wired into the
+  initrd, passphrase prompt before pid1 takes over)
+- **3. real installer** (a `*reconfigure*` buffer that runs
+  `guix system reconfigure` and surfaces the build log)
 
-This phase is the largest and the most user-visible. After this the
-OS is actually useful.
+### Phase D (long tail)
 
-### 4. audio
+- **8. audio**: ALSA via a small `pid1-audio.so` companion module,
+  mpv-as-backend for media
+- **11. Hurd kernel variant**: spike on whether the same userland
+  builds against gnumach, or whether pid1 needs a Hurd-side rewrite
 
-ALSA-only first, PulseAudio later or never. The kernel module loads
-at boot, `/dev/snd/*` shows up. emacs has no native audio, so:
+## explicitly punted to v0.5 or later
 
-  - a small audio dynamic module (`pid1-audio.so` or a sibling) that
-    wraps `snd_pcm_*` for playback. Read-only from the buffer side
-    initially: a `*audio*` buffer that shows current cards and
-    streams.
-  - mpv-as-backend for actual media playback, via `make-process` (no
-    shell). mpv supports a JSON IPC socket which is the right shape
-    for emacs to drive.
-  - microphone capture punted to v0.3.
-
-### 5. persistence and `*reconfigure*`
-
-A v0.1 boot is stateless. Every reboot resets `~/`. For v0.2 I want:
-
-  - a separate `/home` partition (or a qcow2 layer) that survives the
-    image rebuild
-  - a `*reconfigure*` buffer that runs `guix system reconfigure
-    /etc/config.scm` from inside the OS. This is the loop-closing
-    moment: the OS rebuilds itself.
-  - the buffer captures the build log incrementally (same pattern as
-    journal.el's `dd` subprocess), surfaces success or failure, and
-    on success prompts for reboot.
-
-After this, the OS is self-hosting in the meaningful sense.
-
-### 6. odds and ends that I will not let slip past v0.2
-
-  - fontconfig cache build hook on first boot, so emoji/CJK actually
-    render instead of warning and skipping
-  - power management: suspend/resume via `/sys/power/state`. Wrap it
-    in a `pid1-suspend` module call so the supervisor can quiesce
-    timers across the suspend/resume boundary.
-  - keyboard layout buffer (`*kbd*`) backed by `setxkbmap` driven via
-    `process-file`, no shell
-
-## explicitly punted to v0.4 or later
-
-  - Hurd variant. Interesting but not on the daily-driver path.
-  - Multi-user. The current model is "one human at the console". I
-    do not have a good answer for what `su` would mean when the
-    shell is eshell and the supervisor is shared.
   - Wayland. EXWM is X11-only. A Wayland equivalent is a different
     project.
   - Bluetooth. bluez is its own dependency mountain.
@@ -132,11 +98,11 @@ After this, the OS is self-hosting in the meaningful sense.
 
 ## the meta-task
 
-After v0.3 is functionally complete, I want to actually ship GEOS as
+After v0.4 is functionally complete, I want to actually ship GEOS as
 a daily driver. That means:
 
   - real install media that boots on a non-virtualized x86_64 laptop
   - a one-page "is this for you" landing page on the manifesto
-  - a `git tag v0.3` that I am willing to point friends at
+  - a `git tag v0.4` that I am willing to point friends at
 
 That is the actual goal. Everything above is the path to get there.

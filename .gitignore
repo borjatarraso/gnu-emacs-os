@@ -23,3 +23,11 @@ boot-*.log
 
 # Local planning doc, not part of the shipped repo
 /plan.txt
+
+# Internal scratch: personal bring-up notes that live under
+# ~/Downloads/ on my workstation.  they bake in a hard-coded $REPO
+# path and a manual git clone step, both of which are wrong for
+# anyone else.  the public bring-up path is iso-build/dev-vm.sh +
+# docs/INSTALL.md.
+/quick_console.txt
+/quick_console_fish.txt
