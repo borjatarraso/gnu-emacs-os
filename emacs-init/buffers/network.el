@@ -20,6 +20,7 @@
 ;; through `panic-handle'. it does NOT die.
 
 (require 'panic)
+(require 'cl-lib)  ; cl-flet in network-buffer-show-iface-details
 
 ;; core/network.el ships the parsers. during early dev this file may
 ;; not be loaded yet. we tolerate that and print a placeholder, per
@@ -156,7 +157,15 @@ two-second wakeup forever."
       (with-current-buffer buf
         (condition-case err
             (network-buffer--render)
-          (error (panic-handle err 'network-buffer-timer))))
+          (error
+           ;; fboundp guard: if panic.el somehow has not loaded yet
+           ;; (timer scheduled before init.el's -l chain finished, or
+           ;; load order regression), the bare panic-handle call would
+           ;; itself raise void-function and detach the timer with no
+           ;; trace.  degrade to message in that window.
+           (if (fboundp 'panic-handle)
+               (panic-handle err 'network-buffer-timer)
+             (message "network-buffer-timer: %S (panic-handle unbound)" err)))))
     ;; the buffer-local slot is gone with the buffer, so we cannot
     ;; cancel via the stash. walk timer-list and cancel by callback
     ;; identity. this is O(timers) but timers are few and we only
@@ -200,15 +209,23 @@ Bound to `RET'. silently no-ops on lines without an iface."
           (let ((inhibit-read-only t))
             (erase-buffer)
             (special-mode)
-            (insert (format "iface:      %s\n" (plist-get plist :iface)))
-            (insert (format "rx-bytes:   %d\n" (plist-get plist :rx-bytes)))
-            (insert (format "rx-packets: %d\n" (plist-get plist :rx-packets)))
-            (insert (format "rx-errs:    %d\n" (plist-get plist :rx-errs)))
-            (insert (format "rx-drop:    %d\n" (plist-get plist :rx-drop)))
-            (insert (format "tx-bytes:   %d\n" (plist-get plist :tx-bytes)))
-            (insert (format "tx-packets: %d\n" (plist-get plist :tx-packets)))
-            (insert (format "tx-errs:    %d\n" (plist-get plist :tx-errs)))
-            (insert (format "tx-drop:    %d\n" (plist-get plist :tx-drop)))
+            ;; numberp guards: if /proc/net/dev parsing returned a
+            ;; short row earlier, the missing counters land here as
+            ;; nil; %d on nil signals wrong-type-argument and pops a
+            ;; *Backtrace* the moment the user hits RET.  fall back to
+            ;; "?" instead.
+            (cl-flet ((cnt (k)
+                        (let ((v (plist-get plist k)))
+                          (if (numberp v) (format "%d" v) "?"))))
+              (insert (format "iface:      %s\n" (plist-get plist :iface)))
+              (insert (format "rx-bytes:   %s\n" (cnt :rx-bytes)))
+              (insert (format "rx-packets: %s\n" (cnt :rx-packets)))
+              (insert (format "rx-errs:    %s\n" (cnt :rx-errs)))
+              (insert (format "rx-drop:    %s\n" (cnt :rx-drop)))
+              (insert (format "tx-bytes:   %s\n" (cnt :tx-bytes)))
+              (insert (format "tx-packets: %s\n" (cnt :tx-packets)))
+              (insert (format "tx-errs:    %s\n" (cnt :tx-errs)))
+              (insert (format "tx-drop:    %s\n" (cnt :tx-drop))))
             (goto-char (point-min))))
         (display-buffer buf)))))
 

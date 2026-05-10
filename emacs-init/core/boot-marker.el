@@ -22,6 +22,8 @@
 ;; on a dev host, no module loaded, etc) the writes are silently
 ;; skipped.  the markers exist for the smoke test, not for users.
 
+(require 'panic)
+
 (defvar boot-marker--console "/dev/console"
   "Where the smoke-test serial console lives during boot.
 defvar (not defconst) so a test harness can rebind it.")
@@ -37,10 +39,15 @@ loaded interactively will not match.  also handles the case where
 /proc/cmdline is unreadable (non-Linux dev host) by returning nil."
   (and (file-readable-p boot-marker--cmdline)
        (condition-case _
-           (with-temp-buffer
-             (insert-file-contents boot-marker--cmdline)
-             (goto-char (point-min))
-             (re-search-forward "\\bgeos\\.mode=" nil t))
+           (let ((coding-system-for-read 'binary))
+             (with-temp-buffer
+               (insert-file-contents boot-marker--cmdline)
+               (goto-char (point-min))
+               ;; anchor on the start of cmdline or a literal space.
+               ;; \b alone misfires on tokens like "not-geos.mode="
+               ;; because the dash-to-letter is also a word boundary.
+               (re-search-forward
+                "\\(?:^\\|[ \t]\\)geos\\.mode=" nil t)))
          (error nil))))
 
 (defun boot-marker--write (msg)

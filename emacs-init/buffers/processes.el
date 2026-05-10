@@ -33,6 +33,10 @@
   (error
    (message "processes-buffer: require panic failed: %S" err)))
 
+;; cl-position lives in cl-lib.  emacs ships it preloaded most days,
+;; but byte-compile and -Q without site-load do not, so be explicit.
+(require 'cl-lib)
+
 (defvar processes-buffer-name "*processes*"
   "Name of the canonical processes state buffer.
 Per project rules this buffer is conceptually unkillable. the
@@ -175,18 +179,40 @@ later, that is the nature of /proc."
       (error nil))
     (sort pids #'<)))
 
+(defconst processes-buffer-pid-cap 2000
+  "Hard cap on rows shown in *processes*.
+Walking /proc with no bound costs O(N) syscalls, O(N) parses, and O(N)
+inserts per refresh.  On a container host with 10K+ pids the buffer
+becomes hundreds of MB and the 2-second refresh tick falls behind
+itself.  When we hit the cap we render the first N pids in ascending
+order and append a single \"[... M more ...]\" footer line in
+`processes-buffer--render'.  2000 is enough to cover a desktop and
+most servers without paging the operator out of context.
+(BLOCKER, audit round-5 2026-05-10)")
+
+(defvar processes-buffer--truncated 0
+  "How many pids were dropped on the most recent collect, for the footer.")
+
 (defun processes-buffer--collect ()
   "Walk /proc and return a list of process plists.
 Each plist carries :pid :user :state :rss :cpu :comm :cmdline.
 cpu% is filled in against `processes-buffer--last-jiffies' from
-the previous tick. on the first tick everything reads 0.0."
+the previous tick. on the first tick everything reads 0.0.
+Cap of `processes-buffer-pid-cap' applied; surplus pids tracked in
+`processes-buffer--truncated'."
   (let* ((now (float-time))
          (dt (if processes-buffer--last-sample-time
                  (max 0.001 (- now processes-buffer--last-sample-time))
                nil))
          (new-jiffies (make-hash-table :test 'eql))
-         (rows nil))
-    (dolist (pid (processes-buffer--list-pids))
+         (rows nil)
+         (all-pids (processes-buffer--list-pids))
+         (n-all (length all-pids))
+         (capped (if (> n-all processes-buffer-pid-cap)
+                     (seq-take all-pids processes-buffer-pid-cap)
+                   all-pids)))
+    (setq processes-buffer--truncated (max 0 (- n-all (length capped))))
+    (dolist (pid capped)
       (let* ((stat-raw (processes-buffer--read-file
                         (format "/proc/%d/stat" pid)))
              (stat (processes-buffer--parse-stat stat-raw)))
@@ -262,7 +288,11 @@ timer or kill the buffer."
           (if (null rows)
               (insert "(no data)\n")
             (dolist (r rows)
-              (insert (processes-buffer--render-row r) "\n"))))
+              (insert (processes-buffer--render-row r) "\n"))
+            (when (> processes-buffer--truncated 0)
+              (insert (format "[... %d more pid(s) hidden, cap=%d ...]\n"
+                              processes-buffer--truncated
+                              processes-buffer-pid-cap)))))
       (error
        (if (fboundp 'panic-handle)
            (panic-handle err 'processes-buffer-render)
@@ -345,31 +375,69 @@ Bound to `RET'. silently no-ops on lines without a row."
             (goto-char (point-min))))
         (display-buffer buf)))))
 
+(defconst processes-buffer--known-signals
+  '("HUP" "INT" "QUIT" "ILL" "TRAP" "ABRT" "BUS" "FPE"
+    "KILL" "USR1" "SEGV" "USR2" "PIPE" "ALRM" "TERM"
+    "STKFLT" "CHLD" "CONT" "STOP" "TSTP" "TTIN" "TTOU"
+    "URG" "XCPU" "XFSZ" "VTALRM" "PROF" "WINCH" "IO"
+    "PWR" "SYS")
+  "Whitelist of POSIX signal names accepted by `processes-buffer-signal'.
+The threat model: an unfiltered (intern (upcase ...)) lets a typo
+intern an arbitrary symbol into obarray.  worse, a sufficiently
+clever input could synthesize the name of an existing callable
+that `signal-process' might happen to dispatch through, depending
+on emacs internals.  this list mirrors the names exported by
+`signal-process' itself on linux-glibc; anything off the list gets
+rejected with a message instead of being passed through.  add to
+this list only after checking the name appears in signal(7).")
+
 (defun processes-buffer-signal ()
   "Send a signal to the process on the current row.
 Bound to `k'. prompts for a signal name, defaulting to TERM.
 uses `signal-process', never shells out to kill(1). errors route
 through panic-handle so a permission denied does not kill the
-buffer."
+buffer.
+
+Refuses to signal pid 1.  on GEOS pid 1 IS our emacs (and on any
+linux box pid 1 is init, signaling which is rarely what a user
+in a process viewer actually wants).  if a future operator really
+needs to kick pid 1, M-: (signal-process 1 'TERM) is still there,
+but a single keypress in *processes* should not be able to brick
+the OS."
   (interactive)
   (let ((row (processes-buffer-row-at-point)))
-    (if (null row)
-        (message "no process on this line")
+    (cond
+     ((null row)
+      (message "no process on this line"))
+     ((= (plist-get row :pid) 1)
+      (message "refusing to signal pid 1 (would take down init)"))
+     (t
       (let* ((pid (plist-get row :pid))
-             (sig (read-string
+             (raw (read-string
                    (format "signal to send to %d (%s) [TERM]: "
                            pid (plist-get row :comm))
                    nil nil "TERM"))
-             (sig-sym (intern (upcase sig))))
-        (condition-case err
-            (let ((rc (signal-process pid sig-sym)))
-              (if (eq rc 0)
-                  (message "sent SIG%s to %d" (upcase sig) pid)
-                (message "signal-process returned %S for pid %d" rc pid)))
-          (error
-           (if (fboundp 'panic-handle)
-               (panic-handle err 'processes-buffer-signal)
-             (message "signal failed: %S" err))))))))
+             (name (upcase (string-trim raw))))
+        (cond
+         ((not (member name processes-buffer--known-signals))
+          (message "unknown signal %S, refusing (allowed: %s)"
+                   name
+                   (mapconcat #'identity
+                              processes-buffer--known-signals
+                              " ")))
+         (t
+          ;; safe to intern: name passed the whitelist.
+          (let ((sig-sym (intern name)))
+            (condition-case err
+                (let ((rc (signal-process pid sig-sym)))
+                  (if (eq rc 0)
+                      (message "sent SIG%s to %d" name pid)
+                    (message "signal-process returned %S for pid %d"
+                             rc pid)))
+              (error
+               (if (fboundp 'panic-handle)
+                   (panic-handle err 'processes-buffer-signal)
+                 (message "signal failed: %S" err))))))))))))
 
 (defun processes-buffer-quit ()
   "Bury *processes*. Per project rules we do not kill it."

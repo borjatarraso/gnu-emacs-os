@@ -44,6 +44,116 @@ buffer being killed is the panic buffer."
 
 (add-hook 'kill-buffer-query-functions #'panic--unkillable)
 
+;; refuse (kill-emacs) and friends.  PID 1's emacs going down is a
+;; full userland reboot from the supervisor's point of view; nothing
+;; in elisp should be able to trigger that by accident.  the right way
+;; to power down is M-x geos-poweroff (which calls reboot(2) directly,
+;; bypassing this gate).  we hook three paths and they layer like this:
+;;
+;;   - advice-add :around on `kill-emacs' itself.  this is the strong
+;;     gate: programmatic (kill-emacs) bypasses query-functions, so we
+;;     pin around-advice at depth -100 to make sure no later advice can
+;;     slip in front and let the kill through.  refuses by returning nil
+;;     without calling the original.
+;;
+;;   - kill-emacs-query-functions: consulted by save-buffers-kill-* and
+;;     the windowing shutdown paths.  returning nil aborts the kill.
+;;     redundant given the around-advice but cheap and clearer in
+;;     post-mortems (the user sees the refusal message).
+;;
+;;   - kill-emacs-hook: only fires when a kill ACTUALLY proceeds (the
+;;     gates above let it through, e.g. geos-poweroff bound
+;;     `panic-allow-kill-emacs').  we leave a breadcrumb so a
+;;     post-mortem can tell deliberate exit from anything that managed
+;;     to slip past.
+;;
+;; opt-out: bind `panic-allow-kill-emacs' to non-nil (e.g. inside
+;; geos-poweroff after the user confirmed) to skip both gates.
+
+(defvar panic-allow-kill-emacs nil
+  "Bind non-nil to allow `kill-emacs' through the panic gate.
+Set by the deliberate shutdown paths (geos-poweroff, geos-reboot)
+just before they hand off to the kernel.  Anywhere else, leaving
+this nil refuses the kill and logs a breadcrumb.")
+
+(defvar panic--running-as-pid1
+  (and (boundp 'pid1-as-emacs-p) pid1-as-emacs-p)
+  "Non-nil when this Emacs is the PID 1 supervisor.
+Initialized from `pid1-as-emacs-p' which early-init.el sets before
+panic.el is loaded; on a dev host where early-init.el wasn't read
+the symbol is unbound and we default to nil.  The kill-emacs gates
+check this rather than sniffing for individual module symbols, so
+dev-host emacs sessions that happen to byte-compile this file are
+not held hostage by the gate.")
+
+(defun panic--refuse-kill-emacs ()
+  "Refuse (kill-emacs) unless `panic-allow-kill-emacs' is set.
+Returning nil from `kill-emacs-query-functions' aborts the kill.
+On a non-PID1 emacs (`panic--running-as-pid1' nil) we wave the
+kill through so dev-host sessions aren't held hostage by this
+hook.  Batch emacs (`noninteractive') is also waved through: it
+has no user to read the refusal message and would just hang."
+  (cond
+   (panic-allow-kill-emacs t)
+   (noninteractive t)
+   ((not panic--running-as-pid1) t)
+   (t
+    (panic-handle (list 'kill-emacs-refused 'interactive)
+                  'panic--refuse-kill-emacs)
+    (message "panic: kill-emacs refused; use M-x geos-poweroff to shut down")
+    nil)))
+
+(add-hook 'kill-emacs-query-functions #'panic--refuse-kill-emacs)
+
+(defun panic--note-kill-emacs ()
+  "Leave a breadcrumb in *panic* when (kill-emacs) actually proceeds.
+The kill has already been authorized by the time this runs; we
+cannot stop it.  We log so a post-mortem can tell whether the
+exit was deliberate (geos-poweroff / geos-reboot bound
+`panic-allow-kill-emacs') or accidental."
+  (panic-handle (list 'kill-emacs-proceeding
+                      (cons 'allowed panic-allow-kill-emacs))
+                'panic--note-kill-emacs))
+
+(add-hook 'kill-emacs-hook #'panic--note-kill-emacs)
+
+;; programmatic (kill-emacs) does NOT consult kill-emacs-query-functions
+;; (that is only run by save-buffers-kill-terminal and the windowing
+;; shutdown paths).  the freeze test calls (kill-emacs) directly to
+;; verify PID 1 cannot be tricked into exiting from elisp.  wrap
+;; kill-emacs itself so the refusal is symmetric.  on a non-PID1 emacs
+;; we still let it through, otherwise dev-host sessions would be held
+;; hostage by this advice the moment panic.el got loaded.
+;;
+;; depth -100 pins this advice OUTERMOST so we get the first chance to
+;; refuse.  any later `:around' at the default depth 0 sits beneath
+;; ours and will only run if WE call orig (i.e. we authorized the
+;; kill).  layering caveat: if we authorize and the inner advice then
+;; refuses, we lose the kill-emacs we expected to happen.  not a real
+;; concern today (no one else advises kill-emacs in this tree) but
+;; flagged here so a future `advice-add' on kill-emacs at depth 0
+;; doesn't surprise the next reader.
+(defun panic--refuse-kill-emacs-around (orig &rest args)
+  "Around-advice for `kill-emacs' that mirrors `panic--refuse-kill-emacs'.
+Bypasses the gate when `panic-allow-kill-emacs' is non-nil, when
+this is batch emacs (`noninteractive'), or when this Emacs is not
+the PID 1 supervisor (`panic--running-as-pid1' nil)."
+  (cond
+   (panic-allow-kill-emacs
+    (apply orig args))
+   (noninteractive
+    (apply orig args))
+   ((not panic--running-as-pid1)
+    (apply orig args))
+   (t
+    (panic-handle (list 'kill-emacs-refused 'programmatic)
+                  'panic--refuse-kill-emacs-around)
+    (message "panic: kill-emacs refused; use M-x geos-poweroff to shut down")
+    nil)))
+
+(advice-add 'kill-emacs :around #'panic--refuse-kill-emacs-around
+            '((depth . -100)))
+
 (defun panic--format-frames ()
   "Return a short string describing the current backtrace.
 Trimmed to `panic--frame-depth' frames. wrapped in
@@ -99,12 +209,19 @@ the backtrace."
 ;; `command-error-function' only fires for uncaught errors from
 ;; interactive commands. M-: (eval-expression) goes through its own
 ;; path, so wrap that too. anything you eval at the prompt gets the
-;; panic safety net.
+;; panic safety net.  re-signal after logging: M-: callers expect to
+;; see the error in the echo area, not have it disappear into
+;; *panic*.  the log + re-raise pattern means we get both: an audit
+;; trail in *panic* and the usual interactive feedback.
 (defun panic--eval-expression-advice (orig &rest args)
-  "Around-advice for `eval-expression' routing errors to panic."
+  "Around-advice for `eval-expression' routing errors to panic.
+Logs the error to *panic* then re-signals it so the user still
+sees the normal echo-area failure message."
   (condition-case err
       (apply orig args)
-    (error (panic-handle err 'eval-expression))))
+    (error
+     (panic-handle err 'eval-expression)
+     (signal (car err) (cdr err)))))
 
 (advice-add 'eval-expression :around #'panic--eval-expression-advice)
 

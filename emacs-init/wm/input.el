@@ -56,19 +56,26 @@ from this emacs build is silently dropped.")
 
 (defun input--trace (msg)
   "Best-effort trace to /dev/console; same shape as multimon--trace.
-Errors swallowed: tracing is never the failure mode."
+Errors swallowed: tracing is never the failure mode.
+write-region-inhibit-fsync is defensive: a no-op for character
+devices today but cheap to set in case a future emacs flushes ttys."
   (condition-case _
-      (write-region (format "input: %s\n" msg)
-                    nil "/dev/console" 'append 'nomsg)
+      (let ((write-region-inhibit-fsync t))
+        (write-region (format "input: %s\n" msg)
+                      nil "/dev/console" 'append 'nomsg))
     (error nil)))
 
 (defun input--method-available-p (name)
   "Return non-nil when input method NAME is registered in this emacs.
 quail loads its method registry lazily; we touch it via require so
-the assoc check below sees the in-tree methods."
+the assoc check below sees the in-tree methods.  on a fresh boot
+without `leim-list' loaded, `input-method-alist' is empty even
+after requiring `quail'; pull leim-list explicitly so the rfc1345
+and ipa methods register themselves before we look them up."
   (condition-case _
       (progn
         (require 'quail nil t)
+        (require 'leim-list nil t)
         (assoc name input-method-alist))
     (error nil)))
 

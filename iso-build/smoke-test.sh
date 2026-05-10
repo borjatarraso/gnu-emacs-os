@@ -68,17 +68,39 @@ if [ ! -f "$QCOW" ]; then
 fi
 
 LOG=$(mktemp -t geos-smoke.XXXXXX.log)
-PIDFILE=$(mktemp -t geos-smoke.XXXXXX.pid)
+# QPID is assigned immediately after the qemu fork; using a shell var
+# (not a pid file) eliminates the open-then-write race where a SIGINT
+# arriving between `qemu &` and `cat >file` would leak qemu.
+QPID=
 cleanup() {
-    if [ -s "$PIDFILE" ]; then
-        QPID=$(cat "$PIDFILE")
-        # SIGKILL: we do not want a polite shutdown to extend the
-        # smoke window. the qcow2 is read-only via -snapshot anyway.
+    if [ -n "$QPID" ]; then
+        # SIGTERM first so qemu can flush stdio and tear down KVM
+        # cleanly. give it 2 whole seconds (integer sleep, not 0.1,
+        # because POSIX sh requires integer arguments to sleep, dash
+        # and busybox both reject fractions, and the script uses
+        # #!/bin/sh) then SIGKILL anything that didn't notice. the
+        # qcow2 is read-only via -snapshot, so data integrity isn't
+        # at risk either way; this stops qemu from leaving stale
+        # tap fds or virtio-net entries on the host network
+        # namespace when the smoke test is rerun back-to-back.
+        kill -TERM "$QPID" 2>/dev/null || true
+        i=0
+        while [ "$i" -lt 2 ] && kill -0 "$QPID" 2>/dev/null; do
+            i=$((i + 1))
+            sleep 1
+        done
         kill -KILL "$QPID" 2>/dev/null || true
+        # zero the pid so the EXIT trap re-firing after INT/TERM
+        # doesn't run the whole TERM-grace-KILL dance against an
+        # already-dead pid (or, worse, against a recycled one).
+        QPID=
     fi
-    rm -f "$LOG" "$PIDFILE"
+    rm -f "$LOG"
 }
-trap cleanup EXIT INT TERM
+# HUP added so closing the controlling terminal still runs cleanup
+# (without it, qemu would be inherited by init and leak). QUIT for
+# C-\ symmetry with INT.
+trap cleanup EXIT INT TERM HUP QUIT
 
 echo "smoke-test: booting $QCOW (timeout ${TIMEOUT}s, log $LOG)"
 
@@ -102,7 +124,7 @@ qemu-system-x86_64 \
     -no-reboot \
     -snapshot \
     -drive "file=$QCOW,format=qcow2,if=virtio" &
-echo $! > "$PIDFILE"
+QPID=$!
 
 # two-layer success gate, mode-aware:
 #

@@ -42,6 +42,14 @@ in the form exwm wants (a flat plist of int monitor int monitor ...).")
 Resolved against PATH by `process-file' itself; we don't pre-resolve
 because PATH inside our boot env may shift between phases.")
 
+(defvar multimon--last-failure-key nil
+  "Last (rc . tail) we logged from xrandr.
+Dedupes repeated failures: multimon-rescan can fire on every
+randr event, and a misconfigured DISPLAY would otherwise spam
+*panic* with one entry per second.  We log when the failure
+shape changes (different rc, different tail) and stay silent
+between transitions.")
+
 (defun multimon--xrandr-listmonitors ()
   "Return the raw output of `xrandr --listmonitors' as a string.
 nil if xrandr is not on PATH, exits non-zero, or the call itself
@@ -54,25 +62,39 @@ binary on a single-head laptop is a no-op upgrade, not a panic."
           (cond
            ((not (numberp rc))
             ;; process-file returned a signal description, not an int.
-            ;; treat as failure, surface via panic and bail.
-            (when (fboundp 'panic-handle)
-              (panic-handle (list 'multimon-xrandr-signal rc)
-                            'multimon--xrandr-listmonitors))
+            ;; demoted from panic to message: a stuck X server can
+            ;; produce many of these per second and we do not want to
+            ;; drown *panic* in noise.  the tail is captured into the
+            ;; dedup key so the first instance still gets logged.
+            (let ((key (cons 'signal rc)))
+              (unless (equal key multimon--last-failure-key)
+                (setq multimon--last-failure-key key)
+                (when (fboundp 'panic-handle)
+                  (panic-handle (list 'multimon-xrandr-signal rc)
+                                'multimon--xrandr-listmonitors))))
             nil)
            ((/= rc 0)
             ;; non-zero exit. could mean DISPLAY isn't reachable, the
             ;; X server is mid-restart, or we are running on Xvfb which
-            ;; reports 0 monitors but exits 0 anyway. log + return nil
-            ;; rather than synthesizing a fake monitor.
-            (when (fboundp 'panic-handle)
-              (panic-handle (list 'multimon-xrandr-rc rc
-                                  (buffer-string))
-                            'multimon--xrandr-listmonitors))
+            ;; reports 0 monitors but exits 0 anyway. dedupe so a
+            ;; persistent failure logs once, not per rescan.
+            (let* ((tail (buffer-string))
+                   (key (cons rc tail)))
+              (unless (equal key multimon--last-failure-key)
+                (setq multimon--last-failure-key key)
+                (when (fboundp 'panic-handle)
+                  (panic-handle (list 'multimon-xrandr-rc rc tail)
+                                'multimon--xrandr-listmonitors))))
             nil)
-           (t (buffer-string)))))
+           (t
+            (setq multimon--last-failure-key nil)
+            (buffer-string)))))
     (error
-     (when (fboundp 'panic-handle)
-       (panic-handle err 'multimon--xrandr-listmonitors))
+     (let ((key (cons 'raised (car-safe err))))
+       (unless (equal key multimon--last-failure-key)
+         (setq multimon--last-failure-key key)
+         (when (fboundp 'panic-handle)
+           (panic-handle err 'multimon--xrandr-listmonitors))))
      nil)))
 
 (defun multimon--parse-listmonitors (output)
@@ -84,9 +106,14 @@ token is the connector name. we extract name, primary flag, and
 the geometry token. lines that don't match the regex are skipped."
   (let ((mons '()))
     (dolist (line (and output (split-string output "\n" t)))
-      ;; skip the count line ("Monitors: N") and any blank.
+      ;; skip the count line ("Monitors: N") and any blank.  the
+      ;; trailing capture is anchored to ([^space]+)$ rather than (.+)$
+      ;; so a future xrandr that appends extra fields after the
+      ;; canonical name does not capture them into :name.  if it ever
+      ;; does, the regex stops matching and we drop the line, which
+      ;; is preferable to handing exwm-randr a garbled monitor key.
       (when (string-match
-             "^[[:space:]]*[0-9]+:[[:space:]]+\\([+]?\\)\\(\\*?\\)\\([^[:space:]]+\\)[[:space:]]+\\([^[:space:]]+\\)[[:space:]]+\\(.+\\)$"
+             "^[[:space:]]*[0-9]+:[[:space:]]+\\([+]?\\)\\(\\*?\\)\\([^[:space:]]+\\)[[:space:]]+\\([^[:space:]]+\\)[[:space:]]+\\([^[:space:]]+\\)[[:space:]]*$"
              line)
         (let* ((primary (string= (match-string 2 line) "*"))
                (geom    (match-string 4 line))
@@ -146,10 +173,15 @@ monitor is harmless and matches exwm's docs."
 (defun multimon--trace (msg)
   "Best-effort trace to /dev/console; mirrors exwm-config's helper.
 Kept local so multimon doesn't have to depend on an internal of
-exwm-config.el. Errors swallowed: tracing is never the failure mode."
+exwm-config.el. Errors swallowed: tracing is never the failure mode.
+The write-region-inhibit-fsync bind is defensive: write-region
+only fsyncs regular files (not character devices) so it is a no-op
+here today, but keeping it set protects against a future emacs
+that decides to flush ttys on close."
   (condition-case _
-      (write-region (format "multimon: %s\n" msg)
-                    nil "/dev/console" 'append 'nomsg)
+      (let ((write-region-inhibit-fsync t))
+        (write-region (format "multimon: %s\n" msg)
+                      nil "/dev/console" 'append 'nomsg))
     (error nil)))
 
 (defun multimon-rescan ()

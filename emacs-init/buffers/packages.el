@@ -62,7 +62,14 @@ routed through `panic-handle' and leave state as `error'."
     (condition-case err
         (let ((sexp (with-temp-buffer
                       (insert-file-contents packages-buffer-manifest-path)
-                      (read (current-buffer)))))
+                      ;; bind read-circle nil so a manifest with #N=
+                      ;; circular markers cannot allocate unbounded
+                      ;; structure inside our process.  guix's manifest
+                      ;; format does not use circulars in practice but
+                      ;; the user's `guix package -e' form is sourced
+                      ;; from disk and we do not control its contents.
+                      (let ((read-circle nil))
+                        (read (current-buffer))))))
           (setq packages-buffer--cache
                 (packages-buffer--extract-top-level sexp)
                 packages-buffer--state 'ok))

@@ -80,9 +80,13 @@ if [ "$BUILD" = 1 ]; then
     echo "emacs-os.sh: building ISO from $REPO_ROOT"
     echo "emacs-os.sh: ~30min cold cache, ~2min warm"
     # guix system image writes diagnostics to stderr and the final
-    # store path to stdout. tail -n 1 is the canonical capture.
+    # store path to stdout, but a deprecation warning or substituter
+    # notice can also land on stdout, so filter to /gnu/store paths
+    # before tail.
     ISO=$(guix time-machine -C iso-build/channels.scm -- \
-        system image -L "$REPO_ROOT" iso-build/build.scm | tail -n 1)
+        system image -L "$REPO_ROOT" iso-build/build.scm \
+        | grep -E '^/gnu/store/[^[:space:]]+' \
+        | tail -n 1)
     if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
         echo "emacs-os.sh: build did not return an iso path" >&2
         echo "emacs-os.sh: got: '$ISO'" >&2

@@ -59,6 +59,12 @@ honest even if the kernel is screaming.")
   "Bytes left over from the previous filter call that did not end in \\n.
 Kmsg records are newline-terminated; partial reads happen.")
 
+(defvar-local journal-buffer--target nil
+  "Set on the dd work buffer to point at the *journal* buffer it feeds.
+Filter and sentinel use this rather than `process-buffer' so the work
+buffer can stay hidden and a filter error cannot leak raw kmsg bytes
+into *journal*.  (round-5)")
+
 (defvar-local journal-buffer--panic-mark 0
   "Number of characters already copied out of the *panic* buffer.")
 
@@ -171,34 +177,54 @@ position where the record should land (typically point-max)."
   "Return non-nil if point is at point-max (so we should auto-scroll)."
   (= (point) (point-max)))
 
+(defvar-local journal-buffer--line-count 0
+  "Local approximate line count, maintained incrementally.
+Cheaper than count-lines per tick (which is O(buffer-size)).
+(MAJOR, audit round-5 2026-05-10)")
+
 (defun journal-buffer--append-records (recs)
   "Append RECS (list of plists) to the current buffer.
 Auto-scrolls only if point was at point-max before the append.
-Trims oldest lines if we cross `journal-buffer-max-lines'."
+Trims oldest lines if we cross `journal-buffer-max-lines'.
+(MAJOR, round-5) maintains an incremental line counter so we never
+re-walk the whole buffer per tick."
   (when recs
     (let ((stick (journal-buffer--at-tail-p))
-          (inhibit-read-only t))
+          (inhibit-read-only t)
+          (added 0))
       (save-excursion
         (goto-char (point-max))
         (dolist (r recs)
           (condition-case err
-              (journal-buffer--render-record r)
+              (progn
+                (journal-buffer--render-record r)
+                (setq added (1+ added)))
             (error
-             (when (fboundp 'panic-handle)
-               (panic-handle err 'journal-buffer-render))))))
-      ;; trim if oversized. count lines once, drop a chunk if needed.
-      (let ((lines (count-lines (point-min) (point-max))))
-        (when (> lines journal-buffer-max-lines)
-          (let ((cut (/ journal-buffer-max-lines 4)))
-            (save-excursion
-              (goto-char (point-min))
-              (forward-line cut)
-              (delete-region (point-min) (point))))))
+             (condition-case _
+                 (when (fboundp 'panic-handle)
+                   (panic-handle err 'journal-buffer-render))
+               (error nil))))))
+      (cl-incf journal-buffer--line-count added)
+      ;; trim only when the local counter says we should.  the trim
+      ;; itself updates the counter from the actual delete-region
+      ;; instead of a re-count; keeps the loop O(records-added) rather
+      ;; than O(buffer-size).
+      (when (> journal-buffer--line-count journal-buffer-max-lines)
+        (let* ((cut (/ journal-buffer-max-lines 4))
+               (start (point-min)))
+          (save-excursion
+            (goto-char start)
+            (forward-line cut)
+            (delete-region start (point))
+            (setq journal-buffer--line-count
+                  (max 0 (- journal-buffer--line-count cut))))))
       (when stick
         (goto-char (point-max))
-        (let ((win (get-buffer-window (current-buffer) t)))
-          (when win
-            (set-window-point win (point-max))))))))
+        ;; (MAJOR, round-5) walk EVERY window showing this buffer, not
+        ;; just one.  multi-frame setups otherwise scroll only one
+        ;; frame and the others freeze with stale point.
+        (dolist (win (get-buffer-window-list (current-buffer) nil t))
+          (set-window-point win (point-max)))))))
 
 ;; ---------------- kmsg follower (dd subprocess) ----------------
 
@@ -206,8 +232,13 @@ Trims oldest lines if we cross `journal-buffer-max-lines'."
   "Process filter for the dd /dev/kmsg follower.
 PROC is the dd process; CHUNK is the raw bytes it just produced.
 We accumulate any leftover from a partial record and flush every
-complete \\n-terminated record into the journal buffer."
-  (let ((buf (process-buffer proc)))
+complete \\n-terminated record into the journal buffer.
+(round-5) the target *journal* buffer is found via the work-buffer's
+buffer-local `journal-buffer--target'; process-buffer points at the
+work buffer, not at *journal*."
+  (let* ((work (process-buffer proc))
+         (buf (and (buffer-live-p work)
+                   (buffer-local-value 'journal-buffer--target work))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (condition-case err
@@ -236,8 +267,12 @@ complete \\n-terminated record into the journal buffer."
              (panic-handle err 'journal-buffer-kmsg-filter))))))))
 
 (defun journal-buffer--kmsg-sentinel (proc event)
-  "Sentinel for the dd process. Marks kmsg as down on exit."
-  (let ((buf (process-buffer proc)))
+  "Sentinel for the dd process. Marks kmsg as down on exit.
+(round-5) finds the target *journal* buffer via the work-buffer's
+buffer-local `journal-buffer--target'."
+  (let* ((work (process-buffer proc))
+         (buf (and (buffer-live-p work)
+                   (buffer-local-value 'journal-buffer--target work))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (setq journal-buffer--kmsg-down t)
@@ -249,7 +284,10 @@ complete \\n-terminated record into the journal buffer."
                      (format "-- kmsg follower exited: %s"
                              (string-trim event))
                      'face 'journal-buffer-warn-face))
-            (insert "\n")))))))
+            (insert "\n")))))
+    ;; clean up the work buffer so we do not leak hidden buffers each
+    ;; time the supervisor reaps and respawns the journal viewer.
+    (when (buffer-live-p work) (kill-buffer work))))
 
 (defun journal-buffer--start-kmsg (buf)
   "Spawn `dd if=/dev/kmsg' attached to BUF.
@@ -260,17 +298,37 @@ is unambiguously a binary tool. iflag=nonblock would be nicer but
 not all coreutils builds have it; we accept blocking reads since
 dd is in its own process."
   (condition-case err
-      (let ((proc (make-process
-                   :name "journal-kmsg"
-                   :buffer buf
-                   :command '("dd" "if=/dev/kmsg" "bs=1024" "status=none")
-                   :connection-type 'pipe
-                   :noquery t
-                   :filter   #'journal-buffer--kmsg-filter
-                   :sentinel #'journal-buffer--kmsg-sentinel)))
+      (progn
+        ;; (MAJOR, round-5) initialise the residue + down flag BEFORE
+        ;; make-process so the filter sees a consistent state if the
+        ;; very first chunk arrives between fork+exec and the setq
+        ;; below.  the prior order set these AFTER make-process and
+        ;; relied on mode-setup having run first; the invariant was
+        ;; implicit and would silently regress if a future caller
+        ;; spawns kmsg before mode setup.  also use a hidden work
+        ;; buffer instead of `:buffer buf' so a filter error cannot
+        ;; leak raw kmsg bytes into *journal* via process-mark
+        ;; default insertion.
         (with-current-buffer buf
-          (setq journal-buffer--proc proc)
-          (setq journal-buffer--kmsg-down nil)))
+          (setq journal-buffer--proc-residue ""
+                journal-buffer--kmsg-down nil))
+        (let* ((work (generate-new-buffer
+                      (format " *journal-kmsg-stdout-%s*" (buffer-name buf))))
+               (proc (make-process
+                      :name "journal-kmsg"
+                      :buffer work
+                      :command '("dd" "if=/dev/kmsg" "bs=8192" "status=none")
+                      :connection-type 'pipe
+                      :noquery t
+                      :filter   #'journal-buffer--kmsg-filter
+                      :sentinel #'journal-buffer--kmsg-sentinel)))
+          ;; tag the work buffer with the journal buffer it feeds, so
+          ;; the filter/sentinel can find their target without using
+          ;; process-buffer (which is the work buffer, not *journal*).
+          (with-current-buffer work
+            (setq-local journal-buffer--target buf))
+          (with-current-buffer buf
+            (setq journal-buffer--proc proc))))
     (error
      (with-current-buffer buf
        (setq journal-buffer--kmsg-down t))
@@ -282,15 +340,25 @@ dd is in its own process."
 (defun journal-buffer--drain-panic (buf)
   "Copy any new bytes from *panic* into journal BUF.
 We track how many characters of *panic* we have already absorbed
-in `journal-buffer--panic-mark' and only fold in the suffix."
+in `journal-buffer--panic-mark' and only fold in the suffix.
+
+Mark semantics: we store the last point-max we copied through.
+buffer-substring is half-open at the end and 1-based at the start,
+so the next slice is [mark, end).  initial value 0 collapses to
+point-min on the first drain.  the previous code used (1+ mark)
+which dropped one byte per drain cycle, so the first byte after
+each tick was lost."
   (let ((src (get-buffer panic-buffer-name)))
     (when src
       (with-current-buffer buf
-        (let ((mark journal-buffer--panic-mark)
-              (end  (with-current-buffer src (point-max))))
-          (when (< mark end)
+        (let* ((mark journal-buffer--panic-mark)
+               (end  (with-current-buffer src (point-max)))
+               (start (if (zerop mark)
+                          (with-current-buffer src (point-min))
+                        mark)))
+          (when (< start end)
             (let* ((chunk (with-current-buffer src
-                            (buffer-substring-no-properties (1+ mark) end)))
+                            (buffer-substring-no-properties start end)))
                    (lines (split-string chunk "\n" t))
                    (now (current-time))
                    (recs (mapcar
@@ -314,32 +382,38 @@ we restart from zero."
   (when (file-readable-p journal-buffer-messages-path)
     (condition-case err
         (let* ((attrs (file-attributes journal-buffer-messages-path))
-               (size  (file-attribute-size attrs)))
-          (with-current-buffer buf
-            (when (< size journal-buffer--messages-pos)
-              (setq journal-buffer--messages-pos 0))
-            (when (> size journal-buffer--messages-pos)
-              (let ((from journal-buffer--messages-pos)
-                    (to   size))
-                (with-temp-buffer
-                  (insert-file-contents journal-buffer-messages-path
-                                        nil from to)
-                  (let* ((text (buffer-string))
-                         (lines (split-string text "\n" t))
-                         (now (current-time))
-                         (recs (mapcar
-                                (lambda (l)
-                                  ;; very loose: treat the whole line
-                                  ;; as the message, severity unknown.
-                                  (list :source 'messages
-                                        :sev "info"
-                                        :msg l
-                                        :time now
-                                        :raw l))
-                                lines)))
-                    (with-current-buffer buf
-                      (setq journal-buffer--messages-pos to)
-                      (journal-buffer--append-records recs))))))))
+               ;; attrs can be nil if the file vanished between
+               ;; file-readable-p and file-attributes (rotation race).
+               ;; file-attribute-size on nil returns nil, and the
+               ;; numeric comparisons below would then signal
+               ;; wrong-type-argument and abort the whole timer tick.
+               (size  (and attrs (file-attribute-size attrs))))
+          (when (numberp size)
+            (with-current-buffer buf
+              (when (< size journal-buffer--messages-pos)
+                (setq journal-buffer--messages-pos 0))
+              (when (> size journal-buffer--messages-pos)
+                (let ((from journal-buffer--messages-pos)
+                      (to   size))
+                  (with-temp-buffer
+                    (insert-file-contents journal-buffer-messages-path
+                                          nil from to)
+                    (let* ((text (buffer-string))
+                           (lines (split-string text "\n" t))
+                           (now (current-time))
+                           (recs (mapcar
+                                  (lambda (l)
+                                    ;; very loose: treat the whole line
+                                    ;; as the message, severity unknown.
+                                    (list :source 'messages
+                                          :sev "info"
+                                          :msg l
+                                          :time now
+                                          :raw l))
+                                  lines)))
+                      (with-current-buffer buf
+                        (setq journal-buffer--messages-pos to)
+                        (journal-buffer--append-records recs)))))))))
       (error
        (when (fboundp 'panic-handle)
          (panic-handle err 'journal-buffer-drain-messages))))))

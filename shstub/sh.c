@@ -16,13 +16,18 @@
  * needs to be ported to elisp; that is the whole point.
  *
  * things that are deliberate:
- *   - no malloc. one 8 KiB input cap, one 16 KiB output buffer, both
- *     on the stack. enough headroom for worst case escaping (every
- *     byte doubles).
- *   - no libc beyond execve, write, getenv, access, _exit, and the
- *     primitive memory ops i need to assemble the form. no printf,
- *     no strncat, no snprintf. snprintf in particular pulls in half
- *     of stdio and i do not need it.
+ *   - no malloc. one 8 KiB input cap, one 20 KiB output buffer, both
+ *     on the stack. headroom math: 8192 input bytes * 2 (worst-case
+ *     escape) = 16384, plus 17-byte prefix and 2-byte suffix = 16403,
+ *     plus a 64-byte safety guard = 16467. 20 KiB rounds that up
+ *     cleanly and leaves room for a future escape that needs more
+ *     than 2 bytes per input.
+ *   - no libc beyond execve, write, getenv, access, nanosleep,
+ *     _exit, and the primitive memory ops i need to assemble the
+ *     form. no printf, no strncat, no snprintf. snprintf in
+ *     particular pulls in half of stdio and i do not need it.
+ *     nanosleep was added for the emacs-server-socket readiness
+ *     poll (see wait_for_emacs_server).
  *   - exit codes: 2 for misuse, 22 (EINVAL) for command too long, 127
  *     for exec failure or missing emacsclient. otherwise execve
  *     replaces the process and the parent never returns.
@@ -30,10 +35,17 @@
  *     execve carries 0/1/2 over to emacsclient. nothing to leak.
  */
 
+/* nanosleep needs a feature-test macro to be declared under -std=c11.
+ * 200809L is the smallest value that exposes it (POSIX.1-2008). */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* environ is POSIX but not declared in unistd.h under strict c11
@@ -42,7 +54,7 @@
 extern char **environ;
 
 #define CMD_MAX     8192   /* 8 KiB of user-supplied command */
-#define FORM_MAX   16384   /* 16 KiB of assembled elisp form */
+#define FORM_MAX   20480   /* 20 KiB of assembled elisp form, see header */
 #define FORM_GUARD    64   /* refuse to write within this of the end */
 
 /* probe order for emacsclient. first existing path wins. if all three
@@ -65,6 +77,27 @@ err(const char *s)
     while (s[n] != '\0') n++;
     /* ignore short writes; stderr to a closed fd is not a crash case */
     (void)write(2, s, n);
+}
+
+/* (M-round-5, 2026-05-10) format a small unsigned int into BUF as
+ * decimal and return the number of bytes written.  invariant: BUF
+ * must be at least 11 bytes (max uint32 is 10 digits + NUL).  used
+ * by errno-aware err paths so the diagnostic carries enough info to
+ * debug ENOENT vs EACCES vs ENOMEM without pulling in snprintf. */
+static size_t
+itoa_u(unsigned int v, char *buf)
+{
+    char tmp[11];
+    size_t i = 0;
+    if (v == 0) { buf[0] = '0'; buf[1] = '\0'; return 1; }
+    while (v > 0 && i < sizeof tmp) {
+        tmp[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    size_t n = i;
+    for (size_t j = 0; j < n; j++) buf[j] = tmp[n - 1 - j];
+    buf[n] = '\0';
+    return n;
 }
 
 /* append src to dst at *off, bounded by cap. returns 0 on success, -1
@@ -143,6 +176,50 @@ find_emacsclient(void)
     return NULL;
 }
 
+/* (W11/M-round-5, audit 2026-05-10) wait up to ~3 seconds for the
+ * emacs server socket to appear.  in a normal boot it is already there
+ * by the time anything calls /bin/sh, but a guix activation gexp can
+ * fire /bin/sh between PID 1 mounting / and PID 1 fork+exec of emacs,
+ * in which case emacsclient lands before the server.
+ *
+ * the previous version hardcoded /tmp/emacs0 and /run/user/0; if shstub
+ * is ever called under non-zero euid (a setuid wrapper, future
+ * multi-user world), access(F_OK) on the uid-0 paths could falsely
+ * succeed against a stale or foreign socket and execve would then
+ * fail.  we now read getuid() and skip the wait entirely for
+ * non-zero uids, leaving emacsclient to handle its own discovery via
+ * $XDG_RUNTIME_DIR.
+ *
+ * timeout: 30 iterations * 100 ms = 3.0 s.  matches the 3-second
+ * promise in the header.  the previous 10-iter loop only delivered
+ * 1.0 s, which is too tight for cold-boot when PID 1 fork+exec emacs
+ * + emacs reaching server-start can take 1.5-2.0 s on slow hosts.
+ *
+ * returns 0 on success.  on timeout we fall through to execve so
+ * emacsclient prints its own diagnostic and the caller's exit status
+ * is meaningful, rather than this stub synthesising one. */
+static int
+wait_for_emacs_server(void)
+{
+    /* getuid() is signal-safe and always succeeds (POSIX). only the
+     * uid-0 paths are well-known; any other uid we leave to
+     * emacsclient + $XDG_RUNTIME_DIR. */
+    if (getuid() != 0) return 0;
+    static const char *const sock_paths[] = {
+        "/tmp/emacs0/server",
+        "/run/user/0/emacs/server",
+        NULL,
+    };
+    for (int i = 0; i < 30; i++) {
+        for (size_t j = 0; sock_paths[j] != NULL; j++) {
+            if (access(sock_paths[j], F_OK) == 0) return 0;
+        }
+        struct timespec ts = { 0, 100 * 1000 * 1000 }; /* 100 ms */
+        (void)nanosleep(&ts, NULL);
+    }
+    return -1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -162,9 +239,17 @@ main(int argc, char **argv)
 
     const char *cmd = argv[2];
     size_t cmdlen = strlen(cmd);
-    if (cmdlen > CMD_MAX) {
-        err("shstub: command longer than 8 KiB, refusing\n");
-        errno = EINVAL;
+    /* strict-less-than: CMD_MAX is the count of usable bytes, not a
+     * "valid up to and including" index.  matters for the FORM_MAX
+     * sizing above, which is computed as CMD_MAX*2 + headers + guard. */
+    if (cmdlen >= CMD_MAX) {
+        /* (M-round-5, 2026-05-10) dropped the now-cosmetic
+         * `errno = EINVAL` line: _exit ignores errno and the parent
+         * shell does not see it, so setting it served no purpose and
+         * mirrored the misconception that exit codes carry errno
+         * semantics.  the 22 in the exit code is the integer EINVAL
+         * value, kept for back-compat with anything reading $?. */
+        err("shstub: command at or beyond 8 KiB, refusing\n");
         _exit(22);
     }
 
@@ -183,6 +268,14 @@ main(int argc, char **argv)
         _exit(127);
     }
 
+    /* (W11) wait briefly for the emacs server socket so a /bin/sh
+     * call that races boot does not hard-fail.  on timeout, exec
+     * anyway: emacsclient prints its own diagnostic, and we want
+     * its exit code, not a synthesised one. */
+    if (wait_for_emacs_server() < 0) {
+        err("shstub: emacs server socket not ready, trying anyway\n");
+    }
+
     /* emacsclient -e FORM: -e is the short form of --eval and saves
      * three bytes of argv. exit status of emacsclient is forwarded
      * by the kernel; we never get here unless execve itself fails. */
@@ -196,7 +289,16 @@ main(int argc, char **argv)
 
     /* execve only returns on failure. one of: ENOENT (path vanished
      * between access and execve), EACCES (not executable), ENOMEM,
-     * E2BIG. all of them mean we have no shell to give the caller. */
-    err("shstub: execve of emacsclient failed\n");
+     * E2BIG. all of them mean we have no shell to give the caller.
+     *
+     * (M-round-5, 2026-05-10) emit errno as a decimal so the operator
+     * can distinguish the failure modes above without re-running under
+     * strace.  no strerror() because that pulls in the locale machinery
+     * and we want this stub to stay minimal. */
+    char nbuf[11];
+    (void)itoa_u((unsigned int)errno, nbuf);
+    err("shstub: execve of emacsclient failed (errno=");
+    (void)write(2, nbuf, strlen(nbuf));
+    err(")\n");
     _exit(127);
 }

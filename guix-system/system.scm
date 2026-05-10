@@ -220,24 +220,148 @@
     ;;         and exwm-config.
     (simple-service 'emacs-init-boot
                     boot-service-type
-                    #~(begin
+                    ;; everything goes inside one (let () ...) so that
+                    ;; the helpers we define here cannot collide with
+                    ;; bindings introduced by other boot-service-type
+                    ;; extensions (which all splice into the same
+                    ;; top-level begin).  a future shepherd-or-similar
+                    ;; extension defining its own `console-write' would
+                    ;; otherwise silently shadow ours.
+                    #~(let ()
+                        ;; console-write: non-blocking write of MSG to
+                        ;; /dev/console.  the boot script runs as PID 1
+                        ;; before any reader is consuming the console
+                        ;; output, so a plain blocking open + write
+                        ;; could stall the entire boot if the kernel
+                        ;; ring buffer were full.  open with O_NONBLOCK
+                        ;; and silently drop on any error: a lost
+                        ;; diagnostic is better than a wedged init.
+                        ;; the inner catch is `#t' (not just
+                        ;; system-error) because `display' on a non-
+                        ;; string would raise wrong-type-arg and we
+                        ;; would rather lose one log line than abort
+                        ;; PID 1 over a future caller bug.
+                        (define (console-write msg)
+                          (catch #t
+                            (lambda ()
+                              (let* ((fd (open-fdes
+                                          "/dev/console"
+                                          (logior O_WRONLY
+                                                  O_NONBLOCK
+                                                  O_CLOEXEC)))
+                                     (port (fdopen fd "w")))
+                                (catch #t
+                                  (lambda ()
+                                    (display msg port)
+                                    (force-output port))
+                                  (lambda _ #f))
+                                (close-port port)))
+                            (lambda _ #f)))
                         ;; lay down /bin/sh -> shstub before handing
                         ;; off, because activation (which would
                         ;; normally do this via extra-special-file)
                         ;; never runs: our execl replaces the boot
                         ;; script process before activate.scm loads.
-                        ;; if /bin already has an sh from the rootfs,
-                        ;; replace it; the catch eats EEXIST when the
-                        ;; symlink is already correct from a previous
-                        ;; boot of the same store path.
-                        (catch #t
+                        ;;
+                        ;; crash-safe swap: write the new symlink to a
+                        ;; sibling temp path and rename(2) it on top of
+                        ;; /bin/sh.  rename is atomic on the same fs, so
+                        ;; a crash mid-swap leaves either the old sh or
+                        ;; the new one, never a missing entry.  a
+                        ;; missing /bin/sh would brick eshell's shstub
+                        ;; bridge and most posix expectations downstream.
+                        ;;
+                        ;; catch only 'system-error so unrelated bugs
+                        ;; (a typo'd binding, etc.) still abort instead
+                        ;; of being silently swallowed.  on EEXIST or
+                        ;; perms issues we leave a breadcrumb on the
+                        ;; console and continue: a previous boot may
+                        ;; have already laid down the correct symlink.
+                        ;; (B1, audit round-5 2026-05-10) the boot
+                        ;; gexp runs BEFORE Guix activation, so /bin
+                        ;; may not exist yet on a freshly-built rootfs
+                        ;; (activation is what materialises the FHS
+                        ;; skeleton).  symlink would then fail with
+                        ;; ENOENT and the shstub bridge stays offline
+                        ;; for the entire boot.  ensure /bin exists as
+                        ;; a real directory first.  catch system-error
+                        ;; so a parent-fs that already has /bin (or
+                        ;; that has /bin as a symlink to an existing
+                        ;; profile dir) does not abort us; we follow
+                        ;; up with stat to check.
+                        (catch 'system-error
+                          (lambda () (mkdir "/bin"))
+                          (lambda _ #t))
+                        (let* ((bin-st (stat "/bin" #f))
+                               (bin-ok (and bin-st
+                                            (eq? (stat:type bin-st)
+                                                 'directory))))
+                          (unless bin-ok
+                            ;; /bin is a symlink or missing entirely;
+                            ;; the swap below will likely fail with
+                            ;; EROFS or ENOTDIR.  log loudly so the
+                            ;; operator can spot the cause without
+                            ;; reading strace.
+                            (console-write
+                             "pid1: /bin is not a real directory; sh swap may fail\n")))
+                        (let ((tmp "/bin/sh.geos-new"))
+                          (catch 'system-error
+                            (lambda ()
+                              (when (file-exists? tmp)
+                                (delete-file tmp))
+                              (symlink #$shstub-sh tmp)
+                              (rename-file tmp "/bin/sh"))
+                            (lambda (key . args)
+                              (console-write
+                               (string-append
+                                "pid1: /bin/sh swap failed: "
+                                (object->string args) "\n")))))
+                        ;; verify the swap landed.  if /bin/sh is
+                        ;; missing, dangling, or doesn't resolve to a
+                        ;; regular executable, the shstub bridge is
+                        ;; broken and eshell will fail at the first
+                        ;; `sh -c'.  log it; we still proceed (a
+                        ;; degraded shell is better than refusing to
+                        ;; boot).  `stat' with exception-flag #f
+                        ;; returns #f on any error rather than
+                        ;; raising, so no catch needed: dangling
+                        ;; symlink, ENOENT and EPERM all fall into the
+                        ;; "not a regular file" branch.
+                        ;;
+                        ;; (B2, audit round-5 2026-05-10) also assert
+                        ;; the executable bit is set somewhere; without
+                        ;; this a Makefile regression that drops +x
+                        ;; passes the type check then every execve
+                        ;; fails with EACCES at runtime.
+                        (let ((st (stat "/bin/sh" #f)))
+                          (cond
+                           ((not (and st (eq? (stat:type st) 'regular)))
+                            (console-write
+                             "pid1: /bin/sh post-swap check failed (missing, dangling, or not a regular file)\n"))
+                           ((zero? (logand (stat:perms st) #o111))
+                            (console-write
+                             "pid1: /bin/sh post-swap check failed (no executable bit)\n"))))
+                        ;; execl replaces this process.  if it returns
+                        ;; or raises, the binary is missing or not
+                        ;; executable, and falling through would let
+                        ;; the kernel panic with a useless "init
+                        ;; exited".  catch system-error so we can name
+                        ;; the cause on /dev/console before exiting.
+                        ;; shepherd is gone: nothing else would start
+                        ;; if we just dropped through.
+                        (catch 'system-error
                           (lambda ()
-                            (when (file-exists? "/bin/sh")
-                              (delete-file "/bin/sh"))
-                            (symlink #$shstub-sh "/bin/sh"))
-                          (const #f))
-                        (execl #$emacs-init-binary
-                               "emacs-init"
+                            ;; (M2, audit round-5 2026-05-10) pass the
+                            ;; full store path as argv[0] instead of
+                            ;; the bare "emacs-init" string.  /proc/1/
+                            ;; cmdline then points at the actual binary
+                            ;; (helpful for debugging core dumps and for
+                            ;; any future tooling that locates pid1 via
+                            ;; argv[0]).  emacs-init.c does not branch
+                            ;; on argv[0], so the change is invisible
+                            ;; at runtime aside from /proc cosmetics.
+                            (execl #$emacs-init-binary
+                               #$emacs-init-binary
                                #$(file-append emacs "/bin/emacs")
                                #$pid1-module-so
                                ;; argv[3]: X server spec, colon-joined.
@@ -330,7 +454,27 @@
                                ;; userland-up sentinel at load time;
                                ;; reaching this -l proves every
                                ;; previous -l above also ran.
-                               "-l" #$boot-marker-el))))
+                               "-l" #$boot-marker-el))
+                          (lambda (key . args)
+                            (console-write
+                             (string-append
+                              "pid1: execl emacs-init failed: "
+                              (object->string args) "\n"))))
+                        ;; either execl raised (caught above) or it
+                        ;; returned without raising (shouldn't happen,
+                        ;; but be defensive).  if we exit, the kernel
+                        ;; immediately panics with "init exited" and
+                        ;; the user sees nothing useful.  instead,
+                        ;; loop forever logging once a minute so a
+                        ;; serial-console observer can read why we
+                        ;; gave up.  the only escape is power cycle,
+                        ;; which is also what primitive-exit would
+                        ;; force, but with a noticeable trail.
+                        (let loop ()
+                          (console-write
+                           "pid1: execl returned, init wedged; reboot to recover\n")
+                          (sleep 60)
+                          (loop)))))
 
 (operating-system
   (host-name "lambda")
@@ -360,6 +504,15 @@
    (cons* "console=tty1"
           "console=ttyS0,115200"
           "geos.mode=ui"
+          ;; (B3, audit round-5 2026-05-10) emacs-init.c documents
+          ;; reliance on `panic=10' so the kernel reboots after a
+          ;; supervisor-side _exit(127).  without panic= the kernel
+          ;; locks indefinitely on the "init exited" panic and the
+          ;; VM/host needs an external power cycle.  oops=panic
+          ;; promotes a kernel oops to a panic so the same recovery
+          ;; path catches both.
+          "panic=10"
+          "oops=panic"
           %default-kernel-arguments))
 
   ;; phase 5c: load virtio_gpu in the initrd so /dev/dri/card0 exists

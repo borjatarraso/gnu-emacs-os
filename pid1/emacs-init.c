@@ -63,11 +63,17 @@ int plugin_is_GPL_compatible;
 static void
 console(const char *msg)
 {
+    /* FORTIFY makes write/close warn_unused_result-warn through (void)
+     * casts, so explicitly drop the result into a sink variable that
+     * we then cast away.  there is genuinely nothing to do if these
+     * fail: we are already trying to report a problem to the only
+     * channel we have. */
     int fd = open("/dev/console", O_WRONLY | O_CLOEXEC);
     if (fd < 0) return;
-    (void)write(fd, msg, strlen(msg));
-    (void)write(fd, "\n", 1);
-    (void)close(fd);
+    ssize_t r;
+    r = write(fd, msg, strlen(msg)); (void)r;
+    r = write(fd, "\n", 1);          (void)r;
+    int c = close(fd);                (void)c;
 }
 #endif
 
@@ -120,6 +126,36 @@ set_hostname_at_boot(void)
             buf[--n] = '\0';
         }
     }
+    /* reject embedded NUL bytes. /etc/hostname is plain text by spec,
+     * but if it contains a stray NUL we'd hand a truncated name to
+     * sethostname(2) and confuse anything that later does
+     * gethostname() + strlen. easier to fail closed.
+     *
+     * (M6, audit round-5 2026-05-10) also reject embedded \r and \n
+     * in the middle of the name.  the trailing-trim loop above only
+     * strips trailing whitespace, so a file like "foo\r\nbar" keeps
+     * an embedded \r that sethostname accepts and gethostname later
+     * surfaces as a control-char nodename, garbling shells, prompts,
+     * and DNS PTR lookups.  fail closed and fall back to "lambda". */
+    for (ssize_t i = 0; i < n; i++) {
+        if (buf[i] == '\0' || buf[i] == '\r' || buf[i] == '\n') {
+            n = 0;
+            break;
+        }
+    }
+    /* HOST_NAME_MAX bound. linux's HOST_NAME_MAX is 64 INCLUDING the
+     * NUL terminator; sethostname(2) takes a length but utsname.nodename
+     * is sized to HOST_NAME_MAX, so a 64-byte name leaves no room for
+     * the NUL gethostname(3) writes. cap at 63 to keep
+     * set/get round-tripping. */
+    if (n > 63) {
+        char msg[160];
+        (void)snprintf(msg, sizeof msg,
+                       "pid1: /etc/hostname is %zd bytes, max 63; using lambda",
+                       n);
+        console(msg);
+        n = 0;
+    }
     const char *name;
     size_t len;
     if (n > 0) {
@@ -156,7 +192,13 @@ raw_bring_up_lo(void)
     if (s < 0) return -1;
     struct ifreq r;
     memset(&r, 0, sizeof r);
-    strncpy(r.ifr_name, "lo", IFNAMSIZ - 1);
+    /* IFNAMSIZ is 16 on linux; "lo" is 3 bytes incl. NUL.  memcpy +
+     * explicit terminator instead of strncpy: if a future change
+     * extends this to a longer name, strncpy can leave the field
+     * un-NUL-terminated when the source is exactly IFNAMSIZ long, and
+     * the audit caught it as a latent trap. */
+    memcpy(r.ifr_name, "lo", 3);
+    r.ifr_name[IFNAMSIZ - 1] = '\0';
     if (ioctl(s, SIOCGIFFLAGS, &r) < 0) {
         int saved = errno;
         (void)close(s);
@@ -236,8 +278,21 @@ read_gnu_system_path(char *out, size_t out_len)
 {
     int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
-    char buf[4096];
-    ssize_t n = read(fd, buf, sizeof buf - 1);
+    /* (B4, audit round-5 2026-05-10) /proc/cmdline can exceed 4 KiB
+     * on systems with many kernel parameters (verbose efistub args,
+     * dracut early-storage tokens, distro-shipped kernel pinning).
+     * a single 4 KiB read could land mid-token and cause us to miss
+     * gnu.system=.  bump the buffer to 16 KiB and loop the read so
+     * a partial-read kernel never breaks the parser. */
+    char buf[16384];
+    ssize_t n = 0;
+    for (;;) {
+        ssize_t r = read(fd, buf + n, sizeof buf - 1 - (size_t)n);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        n += r;
+        if ((size_t)n >= sizeof buf - 1) break;
+    }
     (void)close(fd);
     if (n <= 0) return -1;
     buf[n] = '\0';
@@ -293,8 +348,16 @@ read_geos_mode(void)
         console("pid1: /proc/cmdline unreadable, defaulting to ui mode");
         return GEOS_MODE_UI;
     }
-    char buf[4096];
-    ssize_t n = read(fd, buf, sizeof buf - 1);
+    /* (B4) /proc/cmdline can exceed 4 KiB on real systems; loop. */
+    char buf[16384];
+    ssize_t n = 0;
+    for (;;) {
+        ssize_t r = read(fd, buf + n, sizeof buf - 1 - (size_t)n);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        n += r;
+        if ((size_t)n >= sizeof buf - 1) break;
+    }
     (void)close(fd);
     if (n <= 0) return GEOS_MODE_UI;
     buf[n] = '\0';
@@ -464,7 +527,32 @@ static pid_t xorg_pid = -1;
 #define XORG_RESPAWN_WINDOW_SEC 60
 static int xorg_respawns_window = 0;
 static time_t xorg_window_start = 0;
+/* (B3, audit round-5 2026-05-10) track the last respawn time
+ * separately so the window resets after a quiet period, not just
+ * after WINDOW_SEC has elapsed since first respawn.  without this
+ * the counter monotonically accrues against an ancient window
+ * start until WINDOW_SEC fires once, meaning a long-stable system
+ * with one ancient crash plus one new crash trips at the cap. */
+static time_t xorg_last_respawn = 0;
 static int xorg_disabled = 0;
+
+/* emacs respawn cap, same shape as xorg's. an emacs that segfaults
+ * during early init.el evaluation would otherwise fork-exec-die in a
+ * tight loop, pinning a cpu and hiding the underlying error in a
+ * tornado of /dev/console output. when the cap trips we drop to a
+ * holding pattern that just reaps zombies and leaves the operator
+ * a chance to debug from the framebuffer login (or, in qemu, to
+ * read the serial log without it being overwritten every second). */
+#define EMACS_RESPAWN_CAP 5
+#define EMACS_RESPAWN_WINDOW_SEC 60
+static int emacs_respawns_window = 0;
+static time_t emacs_window_start = 0;
+/* (B3, audit round-5 2026-05-10) same defence as xorg_last_respawn:
+ * reset the window after a quiet stretch so an ancient crash plus one
+ * new crash inside the never-decayed original window does not trip the
+ * cap. */
+static time_t emacs_last_respawn = 0;
+static int emacs_holding = 0;
 
 /* fork+exec the X server (Xvfb in 5a, Xorg in 5c) on display :0.
  * invariant: never returns in the child; in the parent returns the
@@ -532,40 +620,61 @@ spawn_xorg(void)
             if (xlog > 2) (void)close(xlog);
         }
 
+        /* (M5, audit round-5 2026-05-10) anchor on the path component
+         * boundary.  the prior `path_ends_with(..., "Xvfb")' fallback
+         * matched "/usr/local/MyXvfb" too, which would silently turn
+         * a real Xorg into Xvfb-flag mode and drop -config etc.  the
+         * bare-basename case ("Xvfb" with no slash) needs exact
+         * strcmp, not a tail compare. */
         int is_xvfb = path_ends_with(xorg_path, "/Xvfb")
-                      || path_ends_with(xorg_path, "Xvfb");
+                      || (xorg_path && strcmp(xorg_path, "Xvfb") == 0);
 
-        char *xargv[16];
+        /* (W7, audit 2026-05-10) worst case in the Xorg branch is
+         * 13 entries + NULL.  bumped from 16 to 20 for headroom and
+         * added a runtime guard before each push so a future flag
+         * addition cannot silently overflow.  the XARGV_PUSH macro
+         * panics the boot rather than corrupting the stack frame. */
+        #define XARGV_CAP 20
+        char *xargv[XARGV_CAP];
         int xi = 0;
-        xargv[xi++] = (char *)xorg_path;
-        xargv[xi++] = ":0";
+        #define XARGV_PUSH(s) do {                                           \
+            if (xi >= XARGV_CAP - 1) {                                       \
+                console("pid1: xargv overflow building X server argv");      \
+                _exit(127);                                                  \
+            }                                                                \
+            xargv[xi++] = (char *)(s);                                       \
+        } while (0)
+        XARGV_PUSH(xorg_path);
+        XARGV_PUSH(":0");
         if (is_xvfb) {
-            xargv[xi++] = "-screen";
-            xargv[xi++] = "0";
-            xargv[xi++] = "1024x768x24";
-            xargv[xi++] = "-nolisten";
-            xargv[xi++] = "tcp";
-            xargv[xi++] = "-noreset";
+            XARGV_PUSH("-screen");
+            XARGV_PUSH("0");
+            XARGV_PUSH("1024x768x24");
+            XARGV_PUSH("-nolisten");
+            XARGV_PUSH("tcp");
+            XARGV_PUSH("-noreset");
         } else {
             /* Xorg path: keep the original phase-5a flag set in case
              * we flip back when 5c lands a working KMS driver. */
-            xargv[xi++] = "vt7";
-            xargv[xi++] = "-keeptty";
-            xargv[xi++] = "-nolisten";
-            xargv[xi++] = "tcp";
-            xargv[xi++] = "-noreset";
-            xargv[xi++] = "-logfile";
-            xargv[xi++] = "/tmp/Xorg.0.log";
+            XARGV_PUSH("vt7");
+            XARGV_PUSH("-keeptty");
+            XARGV_PUSH("-nolisten");
+            XARGV_PUSH("tcp");
+            XARGV_PUSH("-noreset");
+            XARGV_PUSH("-logfile");
+            XARGV_PUSH("/tmp/Xorg.0.log");
             if (xorg_conf_path && xorg_conf_path[0] != '\0') {
-                xargv[xi++] = "-config";
-                xargv[xi++] = (char *)xorg_conf_path;
+                XARGV_PUSH("-config");
+                XARGV_PUSH(xorg_conf_path);
             }
             if (xorg_module_path && xorg_module_path[0] != '\0') {
-                xargv[xi++] = "-modulepath";
-                xargv[xi++] = (char *)xorg_module_path;
+                XARGV_PUSH("-modulepath");
+                XARGV_PUSH(xorg_module_path);
             }
         }
         xargv[xi] = NULL;
+        #undef XARGV_PUSH
+        #undef XARGV_CAP
 
         char xkbdir_buf[1024];
         char fontpath_buf[1024];
@@ -604,14 +713,31 @@ spawn_xorg(void)
  * so this is the cheapest reliable readiness check. we deliberately
  * do not connect()+disconnect() because a half-init server can accept
  * the connection then drop it, which trips emacs's x-open-connection
- * with a worse error than "connect refused, retry". */
+ * with a worse error than "connect refused, retry".
+ *
+ * (M4, audit round-5 2026-05-10) also poll waitpid(xpid, ...) so we
+ * exit early if the Xorg child died before binding the socket.
+ * without this, an Xorg that crashes 50ms after fork wastes the full
+ * 10s deadline before we report failure, then the supervisor respawns
+ * it and we wait another 10s.  with the poll, a crash is detected on
+ * the next 100ms tick.  pass -1 to skip the waitpid (preserves the
+ * old shape for callers that have not captured the pid). */
 static int
-wait_for_x_socket(void)
+wait_for_x_socket(pid_t xpid)
 {
     const char *path = "/tmp/.X11-unix/X0";
     for (int i = 0; i < 100; i++) {
         struct stat st;
         if (stat(path, &st) == 0) return 0;
+        if (xpid > 0) {
+            int status = 0;
+            pid_t r = waitpid(xpid, &status, WNOHANG);
+            if (r == xpid) {
+                /* child reaped here, supervisor loop will not see it.
+                 * caller must treat this as crash and not double-reap. */
+                return -1;
+            }
+        }
         struct timespec ts = { 0, 100 * 1000 * 1000 }; /* 100ms */
         (void)nanosleep(&ts, NULL);
     }
@@ -657,7 +783,7 @@ xorg_bring_up(void)
         display_env = NULL;
         return -1;
     }
-    if (wait_for_x_socket() < 0) {
+    if (wait_for_x_socket(xpid) < 0) {
         console("pid1: X socket /tmp/.X11-unix/X0 never appeared");
         /* leave the Xorg child running anyway: it might still be
          * coming up and a later session may use it. killing it here
@@ -684,10 +810,13 @@ xorg_note_respawn(void)
 {
     time_t now = time(NULL);
     if (xorg_window_start == 0
-        || now - xorg_window_start > XORG_RESPAWN_WINDOW_SEC) {
+        || now - xorg_window_start > XORG_RESPAWN_WINDOW_SEC
+        || (xorg_last_respawn != 0
+            && now - xorg_last_respawn > XORG_RESPAWN_WINDOW_SEC)) {
         xorg_window_start = now;
         xorg_respawns_window = 0;
     }
+    xorg_last_respawn = now;
     xorg_respawns_window++;
     if (xorg_respawns_window > XORG_RESPAWN_CAP) {
         if (!xorg_disabled) {
@@ -697,6 +826,36 @@ xorg_note_respawn(void)
         xorg_disabled = 1;
         display_env = NULL;
         xorg_pid = -1;
+        return 0;
+    }
+    return 1;
+}
+
+/* (B6, skeptic 2026-05-10) record an emacs respawn against the rolling
+ * window and decide whether the supervisor should keep trying.  same
+ * shape as xorg_note_respawn: returns 1 if under cap, 0 if we just
+ * tripped or already had.  callers that get 0 must stop forking emacs
+ * and switch the supervisor to a holding pattern (zombie reaper, no
+ * respawn) so the operator can read the failure on /dev/console. */
+static int
+emacs_note_respawn(void)
+{
+    time_t now = time(NULL);
+    if (emacs_window_start == 0
+        || now - emacs_window_start > EMACS_RESPAWN_WINDOW_SEC
+        || (emacs_last_respawn != 0
+            && now - emacs_last_respawn > EMACS_RESPAWN_WINDOW_SEC)) {
+        emacs_window_start = now;
+        emacs_respawns_window = 0;
+    }
+    emacs_last_respawn = now;
+    emacs_respawns_window++;
+    if (emacs_respawns_window > EMACS_RESPAWN_CAP) {
+        if (!emacs_holding) {
+            console("pid1: emacs crashloop, entering holding pattern; "
+                    "supervisor will reap zombies but not respawn emacs");
+        }
+        emacs_holding = 1;
         return 0;
     }
     return 1;
@@ -731,15 +890,27 @@ spawn_emacs(void)
             _exit(127);
         }
         /* TIOCSCTTY can fail if we are already a session leader on a
-         * controlling tty; not fatal, emacs still works on the fds. */
-        (void)ioctl(t, TIOCSCTTY, 0);
-        /* if the kernel handoff left fd 0/1/2 open, dup2 closes the
-         * old fd before re-targeting; if t happens to equal 0/1/2, the
-         * dup2 onto itself is a no-op and we keep going. only close t
-         * when it is a separate descriptor. */
-        if (t != 0 && dup2(t, 0) < 0) goto dup_fail;
-        if (t != 1 && dup2(t, 1) < 0) goto dup_fail;
-        if (t != 2 && dup2(t, 2) < 0) goto dup_fail;
+         * controlling tty; not fatal, emacs still works on the fds.
+         * (W6, audit 2026-05-10) log errno on failure so the boot
+         * trace tells us why the controlling-tty grab failed: EPERM
+         * means another session already owns it; ENOTTY means the fd
+         * is not a tty (would imply /dev/console resolved to a pipe). */
+        if (ioctl(t, TIOCSCTTY, 0) < 0) {
+            char buf[128];
+            snprintf(buf, sizeof buf,
+                     "pid1: TIOCSCTTY on console failed (%s), continuing",
+                     strerror(errno));
+            console(buf);
+        }
+        /* (W8, audit 2026-05-10) dup2(fd, fd) is documented as a no-op
+         * by POSIX (returns fd, leaves the fd intact) so the prior "skip
+         * when t == 0/1/2" guard was paranoia.  drop it; the code reads
+         * cleaner and we lose nothing.  only close t if it is past
+         * stdio so we do not yank the descriptor back out from under
+         * ourselves. */
+        if (dup2(t, 0) < 0) goto dup_fail;
+        if (dup2(t, 1) < 0) goto dup_fail;
+        if (dup2(t, 2) < 0) goto dup_fail;
         if (t > 2) (void)close(t);
         goto exec_emacs;
     dup_fail:
@@ -755,7 +926,14 @@ spawn_emacs(void)
          * stack array bounded by extra_argc + 3 so no malloc here.
          * cap is 64 so a runaway argv from a buggy gexp does not
          * blow the stack. */
-        if (extra_argc > 64) extra_argc = 64;
+        if (extra_argc > 64) {
+            char buf[96];
+            snprintf(buf, sizeof buf,
+                     "pid1: extra argv truncated to 64 (was %d), check boot gexp",
+                     extra_argc);
+            console(buf);
+            extra_argc = 64;
+        }
         char *argv[64 + 3];
         int ai = 0;
         argv[ai++] = (char *)emacs_path;
@@ -817,9 +995,26 @@ parse_xorg_spec(char *spec)
 }
 
 /* dump_file_to_console: shared helper for the two diagnostic dumps
- * below. reads PATH up to MAX bytes, splits on newline, and writes
- * each non-empty line prefixed with TAG to /dev/console. invariant:
- * never raises; bounded read, bounded line buffer. */
+ * below. reads PATH up to DUMP_MAX bytes, splits on newline, and
+ * writes each non-empty line prefixed with TAG to /dev/console.
+ *
+ * (B2, audit 2026-05-10) no malloc: PID 1's own header invariant says
+ * "no malloc", and the previous version called malloc twice per line
+ * which made that claim false. we replace both buffers with file-
+ * scope statics. PID 1's main() is single-threaded; both callers run
+ * sequentially before the supervisor loop, so static reuse is safe.
+ *
+ * DUMP_MAX caps the slurp at 64 KiB which is the larger of the two
+ * historical caps (Xorg.0.log). a file longer than that is truncated
+ * at the byte boundary and the trailing partial line dropped, which
+ * is preferable to either (a) skipping the dump entirely, or (b)
+ * reaching for malloc and breaking the project invariant.
+ *
+ * invariant: never raises; bounded read, bounded line buffer. */
+#define DUMP_MAX 65536
+#define DUMP_LINE_MAX 1024
+static char dump_buf[DUMP_MAX + 1];
+static char dump_line[DUMP_LINE_MAX];
 static void
 dump_file_to_console(const char *path, const char *tag, size_t max)
 {
@@ -830,45 +1025,35 @@ dump_file_to_console(const char *path, const char *tag, size_t max)
         console(miss);
         return;
     }
-    /* allocate on the stack: path-specific cap, never tiny, never
-     * unbounded. caller picks the size. */
-    char *buf = (char *)malloc(max + 1);
-    if (!buf) {
-        (void)close(fd);
-        char err[128];
-        (void)snprintf(err, sizeof err, "%s: oom", tag);
-        console(err);
-        return;
-    }
-    ssize_t n = read(fd, buf, max);
+    if (max > DUMP_MAX) max = DUMP_MAX;
+    ssize_t n = read(fd, dump_buf, max);
     (void)close(fd);
     if (n <= 0) {
-        free(buf);
         char empty[128];
         (void)snprintf(empty, sizeof empty, "%s: empty", tag);
         console(empty);
         return;
     }
-    buf[n] = '\0';
-    char *line = buf;
+    dump_buf[n] = '\0';
+    char *line = dump_buf;
     while (line && *line) {
         char *end = strchr(line, '\n');
         if (end) *end = '\0';
         if (*line) {
-            /* +tag prefix overhead, generous slack so the compiler does
-             * not warn about possible truncation. real lines never
-             * exceed ~500 chars in either source. */
-            size_t outsize = max + 64;
-            char *msg = (char *)malloc(outsize);
-            if (msg) {
-                (void)snprintf(msg, outsize, "%s: %s", tag, line);
-                console(msg);
-                free(msg);
-            }
+            /* DUMP_LINE_MAX caps any single emitted line. real lines
+             * in /proc/bus/input/devices and Xorg.0.log are well
+             * under 500 bytes; truncation here is a "log noise"
+             * outcome, not a correctness issue.  the explicit %.*s
+             * precision keeps -Wformat-truncation quiet about line
+             * pointing into a 64 KiB buffer. */
+            int avail = (int)sizeof dump_line - 64;
+            if (avail < 0) avail = 0;
+            (void)snprintf(dump_line, sizeof dump_line,
+                           "%s: %.*s", tag, avail, line);
+            console(dump_line);
         }
         line = end ? end + 1 : NULL;
     }
-    free(buf);
 }
 
 /* dump /proc/bus/input/devices to /dev/console, prefixed "input:".
@@ -886,15 +1071,18 @@ dump_input_devices(void)
  * after xorg_bring_up so the serial trace tells us what input devices
  * Xorg actually opened, what driver matches it found, and what it
  * complained about. log is bounded at 64 KiB which is far more than
- * any normal Xorg startup ever produces. invariant: never raises. */
+ * any normal Xorg startup ever produces. invariant: never raises.
+ *
+ * (W3, audit 2026-05-10) the prior version called sleep(2) here to
+ * give Xorg time to flush. 2s of dead boot time hurts perceived
+ * latency far more than a partially-flushed log hurts diagnostics:
+ * if the log is short, that itself is a useful signal that Xorg has
+ * not yet hit the InitInput phase. so we drop the sleep entirely. if
+ * future debugging needs the full log, dump_file_to_console can be
+ * re-invoked from elisp once emacs is up. */
 static void
 dump_xorg_log(void)
 {
-    /* short sleep so Xorg has a chance to flush its initial probe
-     * lines. xorg_bring_up returns once the X socket appears, but the
-     * driver match + InitInput phase happens shortly after. without
-     * the sleep the log is still half-written when we read it. */
-    sleep(2);
     dump_file_to_console("/tmp/Xorg.0.log", "xorg", 65536);
 }
 
@@ -959,7 +1147,7 @@ main(int argc, char **argv)
      *      giving a human enough time to read it before the verbose
      *      mount/X/emacs spew begins. two seconds is the sweet spot:
      *      longer is annoying on a reboot loop, shorter is unread. */
-    console("GNU/Emacs Operating System (GEOS) v0.2 booting...");
+    console("GNU/Emacs Operating System (GEOS) v0.3 booting...");
     console("--------------------------------------------------------");
     console("GNU/Emacs Operating System (GEOS). Maintainer <borja.tarraso@member.fsf.org>");
     console("--------------------------------------------------------");
@@ -1012,7 +1200,26 @@ main(int argc, char **argv)
     sa.sa_flags = SA_NOCLDSTOP;
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGCHLD, &sa, NULL) < 0) {
-        console("pid1: sigaction(SIGCHLD) failed, orphans will pile up");
+        /* (W4 v2, skeptic round-4 2026-05-10) the prior fallback to
+         * SIG_IGN looked clever (kernel auto-reaps zombies) but
+         * silently broke the supervisor: under SIG_IGN, waitpid(-1)
+         * returns ECHILD immediately even when our actual emacs and
+         * Xorg children exit, so we never see r==emacs or r==xorg_pid
+         * and the death-detection paths become unreachable.  the
+         * supervisor degrades from event-driven to polling-with-busy-
+         * sleep and the Xorg-died teardown branch never fires.
+         *
+         * better to abort hard.  PID 1 cannot do its job without
+         * SIGCHLD and the operator deserves to know loudly, not
+         * watch a half-broken supervisor for hours.  _exit makes
+         * the kernel panic, which boots straight to a recoverable
+         * state on any sensible kernel cmdline (panic=10 etc.). */
+        char buf[128];
+        snprintf(buf, sizeof buf,
+                 "pid1: sigaction(SIGCHLD) failed: %s. cannot supervise. aborting.",
+                 strerror(errno));
+        console(buf);
+        _exit(127);
     }
 
     /* boot mode toggle: /proc/cmdline geos.mode=console forces a
@@ -1070,6 +1277,27 @@ main(int argc, char **argv)
      * Xorg dies while emacs is still alive and we never notice until
      * the user closes their x frame; -1 lets either signal land. */
     for (;;) {
+        /* (B6) crashloop gate. once tripped we stay in the holding
+         * pattern: just reap whatever shows up so zombies do not pile
+         * up, but never fork emacs again. the operator gets a stable
+         * /dev/console to read the failure off of, instead of a
+         * one-line-per-second tornado of "emacs exited, respawning". */
+        if (emacs_holding) {
+            int st;
+            pid_t z = waitpid(-1, &st, 0);
+            if (z < 0 && errno == EINTR) continue;
+            if (z < 0) {
+                /* no children left at all (ECHILD) - sleep a bit so
+                 * we are not spinning on the syscall.  we keep
+                 * looping because Xorg may yet reparent something. */
+                sleep_at_least(5);
+            }
+            continue;
+        }
+        if (!emacs_note_respawn()) {
+            /* tripped this iteration; loop back to enter holding mode. */
+            continue;
+        }
         pid_t emacs = spawn_emacs();
         if (emacs < 0) {
             sleep_at_least(1);
@@ -1084,11 +1312,20 @@ main(int argc, char **argv)
                 continue;
             }
             if (r < 0) {
-                /* ECHILD here means emacs already vanished without
-                 * being seen; treat as a death and respawn. anything
-                 * else is unexpected, log and respawn anyway so we
-                 * never wedge here. */
-                console("pid1: waitpid() failed, respawning emacs anyway");
+                /* (W5) ECHILD here means waitpid found no children at
+                 * all, but we just spawned emacs. either emacs was
+                 * reaped between fork and our first waitpid (signal
+                 * handler raced us), or sigaction(SIGCHLD) failed at
+                 * boot and the kernel is auto-reaping. probe with
+                 * kill(emacs,0): if it returns 0 the process is alive
+                 * and we should keep waiting; ESRCH means dead, time
+                 * to respawn. */
+                if (kill(emacs, 0) == 0) {
+                    /* alive but unwaitable; brief sleep and retry. */
+                    sleep_at_least(1);
+                    continue;
+                }
+                console("pid1: waitpid() failed and emacs is gone, respawning");
                 emacs_dead = 1;
                 break;
             }
@@ -1163,45 +1400,67 @@ main(int argc, char **argv)
 
 /* signal pid1-error with a single string data argument. invariant:
  * sets a non-local exit on env; caller must return to elisp without
- * touching env again except for cleanup. */
-static void
+ * touching env again except for cleanup.
+ *
+ * (M3, audit round-5 2026-05-10) returns nil so callers can do
+ * `return pid1_signal_errno(env, ...);' without subsequently calling
+ * env->intern(env, "nil"), which is undefined after a non-local exit
+ * is set.  the nil is captured BEFORE non_local_exit_signal so the
+ * value is well-defined.  callers that don't return nil (e.g. those
+ * that signal then continue cleanup) can ignore the return. */
+static emacs_value
 pid1_signal_errno(emacs_env *env, const char *prefix, int err)
 {
     char buf[256];
     /* strerror is not async-signal-safe but we are not in a signal
      * handler here; we are in an elisp callback. fine. */
     snprintf(buf, sizeof buf, "%s: %s", prefix, strerror(err));
+    emacs_value Qnil = env->intern(env, "nil");
     emacs_value sym = env->intern(env, "pid1-error");
     emacs_value msg = env->make_string(env, buf, (ptrdiff_t)strlen(buf));
     emacs_value list_args[1] = { msg };
     emacs_value data = env->funcall(env, env->intern(env, "list"),
                                     1, list_args);
     env->non_local_exit_signal(env, sym, data);
+    return Qnil;
 }
 
-/* extract a lisp string into a freshly heap-allocated nul-terminated
- * c string. returns NULL on either a non-string argument or oom; in
- * both cases sets a non-local exit. caller must free the result. */
-static char *
-extract_cstring(emacs_env *env, emacs_value v)
+/* (B3, audit 2026-05-10) extract a lisp string into the caller's
+ * BUF of capacity BUFSIZE.  no malloc: the previous version called
+ * malloc on every Fpid1_* invocation, which a buggy elisp loop
+ * could fragment Emacs's heap with.  the new shape pushes the
+ * allocation onto the caller's stack, so the worst case is bounded
+ * by the function's own stack frame.
+ *
+ * returns 0 on success (BUF is NUL-terminated), -1 on failure with
+ * a non_local_exit already pending.  the caller MUST check before
+ * touching env again, per the emacs module ABI. */
+#define EXTRACT_BUF_MAX 4096
+static int
+extract_cstring_into(emacs_env *env, emacs_value v,
+                     char *buf, size_t bufsize)
 {
     ptrdiff_t need = 0;
     if (!env->copy_string_contents(env, v, NULL, &need)) {
-        /* copy_string_contents already signaled if it was the wrong
-         * type; if it was an oom we surface our own signal. either
-         * way, abort the call. */
-        return NULL;
+        /* copy_string_contents already signalled wrong-type; nothing
+         * for us to add.  caller checks non_local_exit. */
+        return -1;
     }
-    char *buf = malloc((size_t)need);
-    if (!buf) {
-        pid1_signal_errno(env, "pid1: malloc", ENOMEM);
-        return NULL;
+    /* (M2, audit round-5 2026-05-10) per the module ABI it is undefined
+     * to call any env-> function after a non-local-exit was raised but
+     * before the caller checks it.  the size probe above can leave a
+     * pending exit on, e.g., a finalized buffer; touching env again
+     * here would crash emacs.  check first, drop on pending exit. */
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return -1;
+    if (need < 1 || (size_t)need > bufsize) {
+        pid1_signal_errno(env, "pid1: argument too long", ENAMETOOLONG);
+        return -1;
     }
     if (!env->copy_string_contents(env, v, buf, &need)) {
-        free(buf);
-        return NULL;
+        return -1;
     }
-    return buf;
+    return 0;
 }
 
 /* (pid1-reap) -> list of (pid . status) cons pairs.
@@ -1220,7 +1479,15 @@ Fpid1_reap(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
     emacs_value acc = Qnil;
     int any_appended = 0;
 
-    for (;;) {
+    /* (W12, audit 2026-05-10) cap iterations.  the original loop
+     * could spin forever on a pathological signal storm: every EINTR
+     * `continue's without consuming progress, and a runaway elisp
+     * caller invoking pid1-reap from a signal handler could keep
+     * resetting the syscall before it returned 0.  4096 is well above
+     * any realistic burst (the kernel's RLIMIT_NPROC hard ceiling is
+     * lower in practice) and keeps the function response bounded. */
+    int iter_cap = 4096;
+    for (; iter_cap > 0; iter_cap--) {
         int status = 0;
         pid_t pid = waitpid(-1, &status, WNOHANG);
         if (pid == 0) break;
@@ -1239,6 +1506,20 @@ Fpid1_reap(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
         acc = env->funcall(env, Qcons, 2, cons_args);
         any_appended = 1;
     }
+    if (iter_cap == 0) {
+        /* tripped the cap; not strictly an error (we may have reaped
+         * 4096 zombies legitimately) but unusual enough to surface.
+         * cannot use console() here because it is gated to the boot
+         * build; raise a one-line lisp message via emacs's own message
+         * buffer so the operator sees it without crashing the call.
+         * use strlen instead of a hardcoded length so a future edit
+         * to the string does not ship a truncation bug. */
+        const char *txt =
+            "pid1: pid1-reap hit iteration cap, will resume next call";
+        emacs_value msg = env->make_string(env, txt, (ptrdiff_t)strlen(txt));
+        emacs_value margs[1] = { msg };
+        (void)env->funcall(env, env->intern(env, "message"), 1, margs);
+    }
 
     if (!any_appended) return Qnil;
     emacs_value rev_args[1] = { acc };
@@ -1252,45 +1533,45 @@ static emacs_value
 Fpid1_mount(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
 {
     (void)data;
-    if (nargs != 5) {
-        pid1_signal_errno(env, "pid1: pid1-mount needs 5 args", EINVAL);
-        return env->intern(env, "nil");
-    }
-    /* extract args one at a time and bail on first failure: per the
-     * emacs module ABI, once non_local_exit is set, subsequent env
-     * calls are undefined, so chained extract_cstring without a check
-     * after each is a real bug, not a defensive nit. */
-    char *src = NULL, *tgt = NULL, *type = NULL, *opts = NULL;
+    /* (M3, audit round-5 2026-05-10) cache Qnil up front so we never
+     * call env->intern after a non-local exit has been raised (ABI:
+     * undefined), and so the per-error path is one return statement. */
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 5)
+        return pid1_signal_errno(env, "pid1: pid1-mount needs 5 args", EINVAL);
+    /* (M8, audit round-5 2026-05-10) frame still ~16 KiB.  the module
+     * runs on the emacs main-thread stack (8 MiB by default on glibc),
+     * not a signal stack, so this is safe.  noted explicitly because
+     * the prior comment claimed PID 1's smaller stack budget, which
+     * applies only to the standalone-binary build path, not the
+     * module path. */
+    char src[EXTRACT_BUF_MAX];
+    char tgt[EXTRACT_BUF_MAX];
+    char type[EXTRACT_BUF_MAX];
+    char opts[EXTRACT_BUF_MAX];
     intmax_t flags_im = 0;
     int have_opts = 0;
-    src = extract_cstring(env, args[0]);
-    if (env->non_local_exit_check(env) != emacs_funcall_exit_return) goto bail;
-    tgt = extract_cstring(env, args[1]);
-    if (env->non_local_exit_check(env) != emacs_funcall_exit_return) goto bail;
-    type = extract_cstring(env, args[2]);
-    if (env->non_local_exit_check(env) != emacs_funcall_exit_return) goto bail;
+    if (extract_cstring_into(env, args[0], src, sizeof src) < 0)
+        return Qnil;
+    if (extract_cstring_into(env, args[1], tgt, sizeof tgt) < 0)
+        return Qnil;
+    if (extract_cstring_into(env, args[2], type, sizeof type) < 0)
+        return Qnil;
     flags_im = env->extract_integer(env, args[3]);
-    if (env->non_local_exit_check(env) != emacs_funcall_exit_return) goto bail;
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
     have_opts = env->is_not_nil(env, args[4]);
     if (have_opts) {
-        opts = extract_cstring(env, args[4]);
-        if (env->non_local_exit_check(env) != emacs_funcall_exit_return) goto bail;
+        if (extract_cstring_into(env, args[4], opts, sizeof opts) < 0)
+            return Qnil;
     }
-    goto extracted;
-bail:
-    free(src); free(tgt); free(type); free(opts);
-    return env->intern(env, "nil");
-extracted:
-    ;
 
-    int rc = raw_mount(src, tgt, type, (unsigned long)flags_im, opts);
+    int rc = raw_mount(src, tgt, type, (unsigned long)flags_im,
+                       have_opts ? opts : NULL);
     int err = errno;
-    free(src); free(tgt); free(type); free(opts);
 
-    if (rc < 0) {
-        pid1_signal_errno(env, "pid1: mount", err);
-        return env->intern(env, "nil");
-    }
+    if (rc < 0)
+        return pid1_signal_errno(env, "pid1: mount", err);
     return env->intern(env, "t");
 }
 
@@ -1301,19 +1582,21 @@ Fpid1_set_hostname(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
                    void *data)
 {
     (void)data;
-    if (nargs != 1) {
-        pid1_signal_errno(env, "pid1: pid1-set-hostname needs 1 arg", EINVAL);
-        return env->intern(env, "nil");
-    }
-    char *name = extract_cstring(env, args[0]);
-    if (!name) return env->intern(env, "nil");
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 1)
+        return pid1_signal_errno(env, "pid1: pid1-set-hostname needs 1 arg",
+                                 EINVAL);
+    /* HOST_NAME_MAX is 64 on linux including NUL; 256 here is plenty
+     * and leaves room for the pid1-set-hostname caller to send a
+     * larger string and have us reject it cleanly via errno=EINVAL
+     * from sethostname instead of silently truncating. */
+    char name[256];
+    if (extract_cstring_into(env, args[0], name, sizeof name) < 0)
+        return Qnil;
     int rc = raw_set_hostname(name, strlen(name));
     int err = errno;
-    free(name);
-    if (rc < 0) {
-        pid1_signal_errno(env, "pid1: sethostname", err);
-        return env->intern(env, "nil");
-    }
+    if (rc < 0)
+        return pid1_signal_errno(env, "pid1: sethostname", err);
     return env->intern(env, "t");
 }
 
@@ -1325,10 +1608,8 @@ Fpid1_bring_up_lo(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
                   void *data)
 {
     (void)nargs; (void)args; (void)data;
-    if (raw_bring_up_lo() < 0) {
-        pid1_signal_errno(env, "pid1: bring up lo", errno);
-        return env->intern(env, "nil");
-    }
+    if (raw_bring_up_lo() < 0)
+        return pid1_signal_errno(env, "pid1: bring up lo", errno);
     return env->intern(env, "t");
 }
 
@@ -1355,10 +1636,10 @@ Fpid1_poweroff(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
                void *data)
 {
     (void)nargs; (void)args; (void)data;
-    if (raw_reboot(RB_POWER_OFF) < 0) {
-        pid1_signal_errno(env, "pid1: poweroff", errno);
-    }
-    return env->intern(env, "nil");
+    emacs_value Qnil = env->intern(env, "nil");
+    if (raw_reboot(RB_POWER_OFF) < 0)
+        return pid1_signal_errno(env, "pid1: poweroff", errno);
+    return Qnil;
 }
 
 /* (pid1-reboot) -> never returns on success. RB_AUTOBOOT triggers
@@ -1370,10 +1651,10 @@ Fpid1_reboot(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
              void *data)
 {
     (void)nargs; (void)args; (void)data;
-    if (raw_reboot(RB_AUTOBOOT) < 0) {
-        pid1_signal_errno(env, "pid1: reboot", errno);
-    }
-    return env->intern(env, "nil");
+    emacs_value Qnil = env->intern(env, "nil");
+    if (raw_reboot(RB_AUTOBOOT) < 0)
+        return pid1_signal_errno(env, "pid1: reboot", errno);
+    return Qnil;
 }
 
 /* binds NAME to FUNC at top level via (defalias NAME FUNC). assumes

@@ -76,7 +76,13 @@ also 0, since this fallback has no memory."
   (mapcar
    (lambda (p)
      (let ((status (process-status p)))
-       (list :name (intern (process-name p))
+       ;; (MAJOR, audit round-5 2026-05-10) `make-symbol' returns an
+       ;; UNINTERNED symbol so an attacker who can name a subprocess
+       ;; cannot inject obarray entries that persist for the life of
+       ;; this emacs.  the rest of the renderer compares :name with
+       ;; symbol-name, which works the same for interned and uninterned
+       ;; symbols, so the swap is observation-equivalent.
+       (list :name (make-symbol (process-name p))
              :kind 'process
              :status (cond ((memq status '(run open listen connect)) 'running)
                            ((memq status '(exit signal closed failed)) 'dead)
@@ -135,12 +141,19 @@ the service is not running."
                      (lambda (a b)
                        (string< (format "%s" (plist-get a :name))
                                 (format "%s" (plist-get b :name))))))
-      (let* ((line (format "  %-22s %-9s %-7s %-9s %-8d %-10s"
+      (let* ((restarts-raw (plist-get s :restarts))
+             ;; %d crashes if the registry plist ever stores a non-
+             ;; integer (some legacy supervise.el rows used a string
+             ;; "0" or nil).  numberp-guard so the row degrades to "?"
+             ;; rather than taking the whole render down via condition-
+             ;; case at the caller.
+             (restarts (if (numberp restarts-raw) restarts-raw 0))
+             (line (format "  %-22s %-9s %-7s %-9s %-8d %-10s"
                            (plist-get s :name)
                            (or (plist-get s :status) 'unknown)
                            (services-buffer--format-pid s)
                            (or (plist-get s :kind) 'unknown)
-                           (or (plist-get s :restarts) 0)
+                           restarts
                            (services-buffer--format-uptime
                             (services-buffer--uptime s)))))
         ;; stash the plist on the line so RET / s / S / r can pick it

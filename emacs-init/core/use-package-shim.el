@@ -24,9 +24,22 @@
 (condition-case err
     (require 'use-package)
   (error
+   ;; loud failure path.  if use-package is not on the load-path,
+   ;; every subsequent userland/*.el will hit "void-function
+   ;; use-package" the moment it is loaded, which fans out into a
+   ;; storm of *panic* entries that obscure the root cause.  log
+   ;; the missing-package event with high signal so a human reading
+   ;; *panic* sees ONE clear message rather than thirty derived ones.
    (if (fboundp 'panic-handle)
-       (panic-handle err 'use-package-shim-require)
-     (message "use-package-shim: require failed: %S" err))))
+       (panic-handle (list 'use-package-missing err) 'use-package-shim-require)
+     (message "use-package-shim: require failed: %S" err))
+   ;; mirror to /dev/console when boot-marker is loaded so smoke-test
+   ;; harnesses can pick the failure up out-of-band.  guarded with
+   ;; require-noerror because boot-marker.el normally loads AFTER us.
+   (when (require 'boot-marker nil 'noerror)
+     (when (fboundp 'boot-marker--write)
+       (boot-marker--write
+        "use-package-shim: use-package missing, userland will not load")))))
 
 (when (featurep 'use-package)
   ;; register :comment so use-package--check-keywords stops rejecting

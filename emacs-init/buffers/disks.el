@@ -149,21 +149,39 @@ nil renders as \"?\" so a single failed statfs does not produce
    ((< n (* 1024 1024 1024 1024)) (format "%.1f GB" (/ n (* 1024.0 1024 1024))))
    (t (format "%.2f TB" (/ n (* 1024.0 1024 1024 1024))))))
 
-(defun disks-buffer--statfs (mount-point)
+(defconst disks-buffer--remote-fstypes
+  '("nfs" "nfs4" "cifs" "smbfs" "smb3" "fuse" "fuse.sshfs"
+    "fuse.gvfsd-fuse" "afs" "ceph" "glusterfs" "9p" "davfs")
+  "Filesystem types that may block in `file-system-info'.
+statfs(2) on a network or FUSE mount can hang for the protocol
+timeout (tens of seconds for NFS soft mounts, indefinitely for
+hard mounts) and emacs is single-threaded, so a single hung mount
+freezes the whole UI.  rows with these fstypes render \"?\" without
+calling statfs.  the user can still M-x df-on-this-mount manually
+if they accept the risk.")
+
+(defun disks-buffer--statfs (mount-point fstype)
   "Return (TOTAL USED FREE USED-PCT) for MOUNT-POINT or nil on failure.
 `file-system-info' returns (TOTAL FREE AVAIL) in bytes. we compute
 USED as TOTAL-FREE rather than TOTAL-AVAIL to match df's default
 column. on tmpfs/cgroup/proc the call can return nil; we surface
-that as nil so the row renders \"?\"."
-  (condition-case _
-      (let ((info (file-system-info mount-point)))
-        (when (and info (> (nth 0 info) 0))
-          (let* ((total (nth 0 info))
-                 (free  (nth 1 info))
-                 (used  (- total free))
-                 (pct   (/ (* 100.0 used) total)))
-            (list total used free pct))))
-    (error nil)))
+that as nil so the row renders \"?\".
+
+FSTYPE is checked against `disks-buffer--remote-fstypes' first to
+skip mounts that statfs(2) might block on.  emacs is single-
+threaded; one stuck NFS mount would freeze the whole UI."
+  (cond
+   ((member fstype disks-buffer--remote-fstypes) nil)
+   (t
+    (condition-case _
+        (let ((info (file-system-info mount-point)))
+          (when (and info (> (nth 0 info) 0))
+            (let* ((total (nth 0 info))
+                   (free  (nth 1 info))
+                   (used  (- total free))
+                   (pct   (/ (* 100.0 used) total)))
+              (list total used free pct))))
+      (error nil)))))
 
 (defun disks-buffer--render-block-devices (devs mounts)
   "Insert the block-devices section for DEVS, joining MOUNTS for the last column."
@@ -195,7 +213,7 @@ isn't, push it to a process-filter pipeline."
       (insert "  (no data)\n")
     (dolist (m mounts)
       (let* ((mp    (plist-get m :mount-point))
-             (info  (disks-buffer--statfs mp))
+             (info  (disks-buffer--statfs mp (plist-get m :fstype)))
              (used% (if info (format "%5.1f%%" (nth 3 info)) "    ?"))
              (free  (if info (disks-buffer--format-bytes (nth 2 info)) "?"))
              (rich  (append m (list :statfs info)))

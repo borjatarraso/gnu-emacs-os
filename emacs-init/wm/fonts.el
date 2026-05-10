@@ -63,13 +63,27 @@ and works as a pan-CJK fallback well enough for v1.")
 Idempotency guard so a stray re-load (or a future hot-config reload)
 doesn't keep stacking fontset entries.")
 
+(defvar fonts--trace-last nil
+  "Most recent message handed to `fonts--trace'.
+Used to dedup repeat writes when `fonts-apply' is on
+`after-make-frame-functions' and would otherwise stamp the serial
+console once per new frame.")
+
 (defun fonts--trace (msg)
   "Best-effort trace to /dev/console; same shape as multimon--trace.
-Errors swallowed: tracing is never the failure mode."
-  (condition-case _
-      (write-region (format "fonts: %s\n" msg)
-                    nil "/dev/console" 'append 'nomsg)
-    (error nil)))
+Dedup against the previous message so a frame-creation hook does
+not write the same line on every frame: per-frame DPI/size is
+usually stable on a single-monitor box, so the hash compare
+suppresses 99% of the spam.  multi-monitor configs that span DPI
+boundaries will still log on each transition.  Errors swallowed:
+tracing is never the failure mode."
+  (unless (equal msg fonts--trace-last)
+    (setq fonts--trace-last msg)
+    (condition-case _
+        (let ((write-region-inhibit-fsync t))
+          (write-region (format "fonts: %s\n" msg)
+                        nil "/dev/console" 'append 'nomsg))
+      (error nil))))
 
 (defun fonts--display-dpi ()
   "Return effective DPI of the current X display, or nil if we can't tell.
@@ -210,10 +224,15 @@ Emoji and CJK are best-effort and do not affect the return value."
        ((not have-default)
         ;; missing the default family is a degraded-mode condition,
         ;; not a panic per se, but it is unusual enough that we route
-        ;; through panic-handle so it shows up in *panic*.
-        (when (fboundp 'panic-handle)
-          (panic-handle (list 'fonts-default-missing fonts-default-family)
-                        'fonts-apply))
+        ;; through panic-handle so it shows up in *panic*.  guard
+        ;; against repeated logging: fonts-apply is on the
+        ;; after-make-frame-functions hook and would otherwise stamp
+        ;; *panic* on every new frame.  the trace still fires every
+        ;; time so a tail of /dev/console reflects current state.
+        (unless fonts--applied
+          (when (fboundp 'panic-handle)
+            (panic-handle (list 'fonts-default-missing fonts-default-family)
+                          'fonts-apply)))
         (fonts--trace
          (format "default family %s missing; leaving emacs default"
                  fonts-default-family)))

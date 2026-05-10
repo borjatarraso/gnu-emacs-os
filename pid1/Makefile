@@ -18,7 +18,22 @@ else
 STATIC_FLAG :=
 endif
 
-CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -O2
+# hardening defaults.  -Werror so a fresh toolchain warning blocks
+# build instead of being lost in the noise (PID 1 must be clean).
+# -fstack-protector-strong + -D_FORTIFY_SOURCE=2 are the standard
+# distro hardening pair.  -O2 is required for FORTIFY to do anything.
+# -fno-strict-aliasing because we do interpret raw byte buffers from
+# /proc and would rather be slow than miscompiled.
+#
+# stack-protector pulls in __stack_chk_fail from libssp; with
+# -static we need libssp.a available on the build host.  glibc
+# folds __stack_chk_fail into libc.a so this works out of the box
+# on any sane glibc system; on musl-static you would need to link
+# -lssp_nonshared explicitly.  guix's gcc-toolchain ships libssp
+# so the production build path is fine.
+CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
+           -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+           -fno-strict-aliasing
 LDFLAGS ?=
 PREFIX  ?= /
 SBINDIR ?= $(PREFIX)/sbin
@@ -46,7 +61,9 @@ EMACS_MODULE_INC := $(shell pkg-config --cflags-only-I emacs 2>/dev/null)
 endif
 endif
 
-MODULE_CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -O2 \
+MODULE_CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
+                 -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+                 -fno-strict-aliasing \
                  -fPIC -DPID1_MODULE $(EMACS_MODULE_INC)
 MODULE_LDFLAGS := -shared
 

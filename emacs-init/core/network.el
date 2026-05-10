@@ -110,10 +110,18 @@ can distinguish malformed-input bugs from supervision failures
 (defun network-apply-config ()
   "Walk `network-interface-config' and apply each entry.
 Errors per-entry are routed to `panic-handle' so one bad row does
-not abort the rest."
+not abort the rest.  We also catch `network-error' here: the per-
+entry function deliberately re-signals malformed-input bugs so a
+direct caller can distinguish them, but at the apply pass we still
+want every other interface to come up.  log and continue."
   (interactive)
   (dolist (entry network-interface-config)
-    (network--apply-entry (car entry) (cdr entry))))
+    (condition-case err
+        (network--apply-entry (car entry) (cdr entry))
+      (network-error
+       (panic-handle err (cons 'network-apply-config (car entry))))
+      (error
+       (panic-handle err (cons 'network-apply-config (car entry)))))))
 
 ;;;; /proc readers
 ;;
@@ -177,14 +185,22 @@ line does not have the expected column count."
   "Convert kernel little-endian HEX (8 chars) to dotted IPv4 string.
 /proc/net/route gives addresses as 32-bit hex in host (LE on x86)
 byte order. \"0101A8C0\" is 192.168.1.1. zero is rendered as
-\"0.0.0.0\" which is what we want for default-gateway rows."
-  (if (or (null hex) (not (= (length hex) 8)))
-      (signal 'network-error (list "bad hex ipv4" hex))
-    (format "%d.%d.%d.%d"
-            (string-to-number (substring hex 6 8) 16)
-            (string-to-number (substring hex 4 6) 16)
-            (string-to-number (substring hex 2 4) 16)
-            (string-to-number (substring hex 0 2) 16))))
+\"0.0.0.0\" which is what we want for default-gateway rows.
+
+Returns the literal string \"?\" on malformed input rather than
+signalling: this is called from inside a `dolist' over /proc rows
+and one corrupt row should not abort the rest of the parse.  the
+*network* buffer renders \"?\" as the address, the human notices,
+and the rest of the routing table still shows up."
+  (if (or (not (stringp hex)) (not (= (length hex) 8)))
+      "?"
+    (condition-case _
+        (format "%d.%d.%d.%d"
+                (string-to-number (substring hex 6 8) 16)
+                (string-to-number (substring hex 4 6) 16)
+                (string-to-number (substring hex 2 4) 16)
+                (string-to-number (substring hex 0 2) 16))
+      (error "?"))))
 
 (defun network-read-proc-net-route ()
   "Parse /proc/net/route into a list of plists.

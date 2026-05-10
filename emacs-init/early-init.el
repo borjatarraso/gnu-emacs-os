@@ -31,6 +31,18 @@ wiring. Plain `emacs -Q` invocations on a dev host see nil here.")
 ;; pid1-bring-up-lo. emacs-init passes the absolute store path of the
 ;; .so via PID1_MODULE_PATH; during dev or under plain `emacs -Q` the
 ;; env var is unset and we silently skip.
+;; (B1, audit round-5 2026-05-10) define `pid1-error' BEFORE module-load
+;; runs.  the C side can raise pid1-error during module init (e.g. from
+;; emacs_module_init's setup helpers), and condition-case can only catch
+;; it as `error' if the symbol is registered as an error-condition first.
+;; without this define, a module-init signal lands as a "peculiar error"
+;; and the surrounding condition-case below catches it as a generic
+;; `error', losing the type and triggering the wrong fallback path.
+;; declaring outside the `when' is fine: define-error is idempotent on a
+;; dev host where pid1-as-emacs-p is nil, and pid1-error existing in a
+;; non-OS emacs is harmless (no code raises it there).
+(define-error 'pid1-error "PID1 supervision error")
+
 (when pid1-as-emacs-p
   (let ((mod (getenv "PID1_MODULE_PATH")))
     (if (and mod (file-exists-p mod))
@@ -42,15 +54,7 @@ wiring. Plain `emacs -Q` invocations on a dev host see nil here.")
         (condition-case err
             (progn
               (message "early-init: loading pid1 module from %s" mod)
-              (module-load mod)
-              ;; the C side raises `pid1-error' via non_local_exit_signal
-              ;; but the symbol has no error-conditions property until
-              ;; we declare it here. without this, condition-case with
-              ;; `(error ...)` will not catch pid1-error and emacs
-              ;; prints "peculiar error" to *Messages*. register both
-              ;; the parent (`error`) and a usable docstring so M-x
-              ;; condition-case-and-friends can talk about it.
-              (define-error 'pid1-error "PID1 supervision error"))
+              (module-load mod))
           (error
            (message "early-init: module-load failed: %S, continuing without supervision primitives"
                     err)))
@@ -81,6 +85,47 @@ wiring. Plain `emacs -Q` invocations on a dev host see nil here.")
 ;; isn't disturbed.
 (when pid1-as-emacs-p
   (setq user-emacs-directory "/var/emacs/"))
+
+;; (B1, audit 2026-05-10) start the emacs server NOW so /bin/sh ->
+;; shstub -> emacsclient -> eshell-command works for every legacy
+;; invocation later in boot. without this line every `sh -c ...`
+;; in the system silently exits with "can't find socket". server
+;; default `server-socket-dir' is `(temporary-file-directory)/emacsN'
+;; for uid N; we are uid 0 so the socket lands at /tmp/emacs0/server,
+;; which matches shstub/sh.c's wait_for_emacs_server probe.
+;;
+;; only start the server when we are the OS userland.  on a dev-host
+;; emacs we leave the user's existing server (if any) alone.
+;;
+;; server-start is wrapped in condition-case so a transient failure
+;; (perm error on /tmp, stale socket from a previous boot) does not
+;; abort early-init and brick supervision; we degrade by leaving the
+;; bridge offline and let panic-handle log the failure once it loads.
+(when pid1-as-emacs-p
+  (condition-case err
+      (progn
+        (require 'server)
+        ;; server-start signals if a stale server-process exists; pass
+        ;; INHIBIT-PROMPT t so the boot does not block on a y-or-n
+        ;; nag, and pass nil for `leave-dead' so a stale socket is
+        ;; replaced rather than refused.
+        (server-start nil t))
+    (error
+     ;; (B2, audit round-5 2026-05-10) panic.el is not loaded yet at
+     ;; this point in early-init (it loads from init.el), so panic-handle
+     ;; is unbound.  also `*Messages*' alone is invisible at boot if the
+     ;; framebuffer never lights up.  write directly to /dev/console so
+     ;; the failure is captured on the serial log.  ignore write errors:
+     ;; if /dev/console itself is gone, we are already in a worse spot
+     ;; than a missing shstub bridge.
+     (message "early-init: server-start failed: %S, /bin/sh bridge offline" err)
+     (condition-case _
+         (let ((write-region-inhibit-fsync t))
+           (write-region
+            (format "early-init: server-start failed: %S, shstub bridge offline\n"
+                    err)
+            nil "/dev/console" 'append 'nomsg))
+       (error nil)))))
 
 (provide 'early-init)
 ;;; early-init.el ends here

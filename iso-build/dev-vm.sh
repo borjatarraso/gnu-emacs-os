@@ -79,8 +79,13 @@ if [ "$BUILD" = 1 ]; then
     make -C pid1 all
     make -C shstub
     echo "dev-vm.sh: building qcow2 from $REPO_ROOT/guix-system/system.scm"
+    # filter for the /gnu/store/... line.  guix prints status messages
+    # to stderr and the store path to stdout, but a deprecation warning
+    # or substituter notice can land on stdout too; bare `tail -n 1`
+    # would then return the wrong line.
     QCOW=$(guix time-machine -C guix-system/channels.scm -- \
         system image -t qcow2 -L "$REPO_ROOT" guix-system/system.scm \
+        | grep -E '^/gnu/store/[^[:space:]]+' \
         | tail -n 1)
     if [ -z "$QCOW" ] || [ ! -f "$QCOW" ]; then
         echo "dev-vm.sh: build did not return a qcow2 path" >&2
