@@ -23,7 +23,8 @@
 # (geos.mode=ui|console). this script does NOT pass an -append because
 # the qcow2 boots through GRUB, not direct kernel. to land in console
 # mode, hit `e` at the GRUB menu and append `geos.mode=console` to
-# the linux line. see console.txt at the repo root.
+# the linux line. full walkthrough in docs/INSTALL.md (search for
+# "geos.mode=").
 
 set -eu
 

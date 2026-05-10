@@ -29,5 +29,6 @@ boot-*.log
 # path and a manual git clone step, both of which are wrong for
 # anyone else.  the public bring-up path is iso-build/dev-vm.sh +
 # docs/INSTALL.md.
+/console.txt
 /quick_console.txt
 /quick_console_fish.txt
