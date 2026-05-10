@@ -22,48 +22,87 @@
 ;; on a dev host, no module loaded, etc) the writes are silently
 ;; skipped.  the markers exist for the smoke test, not for users.
 
-(defconst boot-marker--console "/dev/console"
-  "Where the smoke-test serial console lives during boot.")
+(defvar boot-marker--console "/dev/console"
+  "Where the smoke-test serial console lives during boot.
+defvar (not defconst) so a test harness can rebind it.")
+
+(defvar boot-marker--cmdline "/proc/cmdline"
+  "Where we look for the geos.mode= boot token.")
+
+(defun boot-marker--in-boot-emacs-p ()
+  "Return non-nil iff this emacs was spawned by GEOS PID 1.
+We probe /proc/cmdline for the geos.mode= token that pid1 itself
+parses. that token is unique to our boot path; a dev-host emacs
+loaded interactively will not match.  also handles the case where
+/proc/cmdline is unreadable (non-Linux dev host) by returning nil."
+  (and (file-readable-p boot-marker--cmdline)
+       (condition-case _
+           (with-temp-buffer
+             (insert-file-contents boot-marker--cmdline)
+             (goto-char (point-min))
+             (re-search-forward "\\bgeos\\.mode=" nil t))
+         (error nil))))
 
 (defun boot-marker--write (msg)
   "Append MSG and a newline to `boot-marker--console'.
-Returns t on success, nil on any error.  errors are swallowed on
-purpose: this code runs during boot and must never derail it."
-  (condition-case _
-      (when (file-writable-p boot-marker--console)
+Returns t on success, nil on any degraded path.  errors are caught
+and reported through `panic-handle' so a regression in `write-region'
+does not silently swallow the smoke-test signal, but never raise:
+this code runs during boot and must not derail it."
+  (cond
+   ;; dev-host gate. file-writable-p on /dev/console can return t for
+   ;; root or permissive perms, which would pollute the dev tty every
+   ;; time the file gets loaded interactively. instead probe
+   ;; /proc/cmdline for the geos.mode= token that only PID 1's boot
+   ;; sets. Guix's /run/booted-system would also work, but we have no
+   ;; activate.scm step (no shepherd) so that path never appears.
+   ((not (boot-marker--in-boot-emacs-p))
+    nil)
+   ((not (file-writable-p boot-marker--console))
+    nil)
+   (t
+    (condition-case err
         (let ((coding-system-for-write 'utf-8)
               (write-region-inhibit-fsync t))
           (write-region (concat msg "\n") nil boot-marker--console
-                        t 'silent))
-        t)
-    (error nil)))
+                        t 'silent)
+          t)
+      (error
+       ;; never raise from here, but leave a breadcrumb in *panic*
+       ;; so a regression in the write path does not silently kill
+       ;; the smoke-test signal.
+       (when (fboundp 'panic-handle)
+         (panic-handle err 'boot-marker--write))
+       nil)))))
 
-(defun boot-marker-emit-userland ()
-  "Emit the userland-up sentinel.  safe to call interactively."
-  (interactive)
+(defun boot-marker--emit-userland ()
+  "Emit the userland-up sentinel."
   (boot-marker--write "geos: emacs userland up"))
 
-(defun boot-marker-emit-exwm ()
-  "Emit the exwm-up sentinel.  safe to call interactively."
-  (interactive)
+(defun boot-marker--emit-exwm ()
+  "Emit the exwm-up sentinel."
   (boot-marker--write "geos: exwm up"))
 
 ;; load-time emit.  by the time this file is being loaded every
 ;; previous -l in the boot gexp has run; if any of them errored,
 ;; panic.el either rerouted to *panic* and continued or escalated.
-(boot-marker-emit-userland)
+(boot-marker--emit-userland)
 
 ;; arm the exwm marker.  with-eval-after-load does not fire if the
 ;; package is loaded BEFORE this hook is added; in our boot order
 ;; exwm-config.el (which requires exwm) runs earlier in the -l chain,
 ;; so we cannot rely on it.  add-hook directly: exwm-init-hook is
 ;; defvar'd inside exwm-core.el, which exwm-config.el has already
-;; loaded by the time we get here.  guard fboundp anyway so a future
-;; reorganization that loads boot-marker before exwm degrades to a
-;; message instead of a void-variable error.
+;; loaded by the time we get here.  guard boundp anyway: in console
+;; mode exwm-config skips (require 'exwm), so the hook is unbound
+;; and we silently move on (no exwm in console mode is by design).
 (if (boundp 'exwm-init-hook)
-    (add-hook 'exwm-init-hook #'boot-marker-emit-exwm)
-  (message "boot-marker: exwm-init-hook unbound, skipping exwm sentinel"))
+    (add-hook 'exwm-init-hook #'boot-marker--emit-exwm)
+  ;; route the skip notice through the same console writer so it
+  ;; lands somewhere greppable instead of being drowned in
+  ;; *Messages*.
+  (boot-marker--write
+   "boot-marker: exwm-init-hook unbound, skipping exwm sentinel"))
 
 (provide 'boot-marker)
 ;;; boot-marker.el ends here

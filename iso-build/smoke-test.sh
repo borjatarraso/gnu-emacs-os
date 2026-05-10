@@ -104,22 +104,29 @@ qemu-system-x86_64 \
     -drive "file=$QCOW,format=qcow2,if=virtio" &
 echo $! > "$PIDFILE"
 
-# two-layer success gate:
-#   PID1 marker (mode-specific): supervisor reached its main loop with
-#     the right mode active. catches Xorg-died-and-pid1-fell-back
-#     half-failures (because we require the mode-specific line, not
-#     just "entering supervisor loop").
+# two-layer success gate, mode-aware:
+#
+#   PID1 marker: supervisor reached its main loop with a known mode
+#     active. catches Xorg-died-and-pid1-fell-back half-failures
+#     (because we require the mode-specific line, not just "entering
+#     supervisor loop"). also tells us which mode this image boots in.
 #       UI mode:      "pid1: X server up on :0"
 #       console mode: "pid1: geos.mode=console"
+#
 #   USERLAND marker: emacs got past the entire -l chain and ran
 #     boot-marker.el. proves init.el, panic.el, all userland modules,
 #     all buffers actually loaded.
 #       both modes:   "geos: emacs userland up"
 #
-# pass = (any PID1 marker) AND (userland marker). a build that brings
-# Xorg up but trips a load-time error in any -l file will fail the
-# userland half, which is the whole point of adding it.
-SUCCESS_PID1_RE='pid1: X server up on :0|pid1: geos\.mode=console'
+# pass = (any pid1 marker) AND userland marker.
+#
+# we do NOT gate on "geos: exwm up" headlessly. exwm-init-hook only
+# fires once EXWM processes its first real X event, which depends on
+# user interaction; in a -display none QEMU there is no such event.
+# boot-marker.el still arms that hook so an interactive freeze-test
+# session can grep for it, but smoke-test does not require it.
+SUCCESS_PID1_UI_RE='pid1: X server up on :0'
+SUCCESS_PID1_CONSOLE_RE='pid1: geos\.mode=console'
 SUCCESS_USERLAND_RE='geos: emacs userland up'
 
 # failure markers (any one means hard fail, do not wait for timeout):
@@ -138,20 +145,27 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
         tail -n 30 "$LOG"
         exit 1
     fi
-    if [ -s "$LOG" ] \
-       && grep -Eq "$SUCCESS_PID1_RE" "$LOG" \
-       && grep -Eq "$SUCCESS_USERLAND_RE" "$LOG"; then
-        echo "smoke-test: PASS"
-        echo "--- matched pid1 markers ---"
-        grep -En "$SUCCESS_PID1_RE" "$LOG" || true
-        echo "--- matched userland markers ---"
-        grep -En "$SUCCESS_USERLAND_RE" "$LOG" || true
-        exit 0
+    if [ -s "$LOG" ] && grep -Eq "$SUCCESS_USERLAND_RE" "$LOG"; then
+        if grep -Eq "$SUCCESS_PID1_UI_RE" "$LOG"; then
+            echo "smoke-test: PASS (ui)"
+            echo "--- matched pid1 markers ---"
+            grep -En "$SUCCESS_PID1_UI_RE" "$LOG" || true
+            echo "--- matched userland markers ---"
+            grep -En "$SUCCESS_USERLAND_RE" "$LOG" || true
+            exit 0
+        elif grep -Eq "$SUCCESS_PID1_CONSOLE_RE" "$LOG"; then
+            echo "smoke-test: PASS (console)"
+            echo "--- matched pid1 markers ---"
+            grep -En "$SUCCESS_PID1_CONSOLE_RE" "$LOG" || true
+            echo "--- matched userland markers ---"
+            grep -En "$SUCCESS_USERLAND_RE" "$LOG" || true
+            exit 0
+        fi
     fi
     sleep 1
 done
 
-echo "smoke-test: TIMEOUT after ${TIMEOUT}s, neither marker appeared"
+echo "smoke-test: TIMEOUT after ${TIMEOUT}s, success markers never matched"
 echo "--- last 30 lines of serial log ---"
 if [ -s "$LOG" ]; then
     tail -n 30 "$LOG"
