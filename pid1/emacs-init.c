@@ -240,17 +240,22 @@ read_geos_mode(void)
 {
     int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        console("pid1: /proc/cmdline unreadable, defaulting to ui mode");
-        return GEOS_MODE_UI;
+        console("pid1: /proc/cmdline unreadable, defaulting to console mode");
+        return GEOS_MODE_CONSOLE;
     }
     char buf[4096];
     ssize_t n = read(fd, buf, sizeof buf - 1);
     (void)close(fd);
-    if (n <= 0) return GEOS_MODE_UI;
+    if (n <= 0) return GEOS_MODE_CONSOLE;
     buf[n] = '\0';
     const char *key = "geos.mode=";
     char *p = strstr(buf, key);
-    if (!p) return GEOS_MODE_UI;
+    /* default-on-absence flipped from ui to console for v0.3: GEOS is
+     * a console-first OS, the GUI is opt-in. the operating-system
+     * record bakes geos.mode=console into kernel-arguments anyway, so
+     * this fallback only fires on a hand-rolled boot or a corrupt
+     * cmdline. either way, console is the safer place to land. */
+    if (!p) return GEOS_MODE_CONSOLE;
     p += strlen(key);
     /* extract the token bound by whitespace/newline; we only care about
      * a small, fixed set of values so a 32-byte stack copy is plenty. */
@@ -275,10 +280,10 @@ read_geos_mode(void)
     {
         char msg[128];
         (void)snprintf(msg, sizeof msg,
-                       "pid1: unknown geos.mode=%s, defaulting to ui", val);
+                       "pid1: unknown geos.mode=%s, defaulting to console", val);
         console(msg);
     }
-    return GEOS_MODE_UI;
+    return GEOS_MODE_CONSOLE;
 }
 
 /* lays down /run/current-system as a symlink to the gnu.system= path.

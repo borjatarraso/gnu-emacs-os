@@ -2,20 +2,21 @@
 booting GEOS in console mode (fish shell)
 ================================================================================
 
-GEOS picks the boot mode at runtime from the kernel cmdline token
-`geos.mode=`. PID 1 reads /proc/cmdline before it spawns Xorg; if the
-token says `console`, Xorg never starts and Emacs runs directly on
-/dev/console with TERM=linux. No X, no EXWM, just Emacs filling the
-framebuffer.
+GEOS v0.3 boots in console mode by default. The image bakes
+`geos.mode=console` into kernel-arguments, and PID 1 also defaults to
+console if the token is missing or malformed. Both layers agree, so
+you can boot the qcow2 or the ISO straight from the wrapper scripts
+and you land in framebuffer Emacs.
 
-Default is `ui`. To boot console mode you change the cmdline.
+If you want the GUI session instead, change the cmdline at GRUB or
+edit system.scm and rebuild. Both paths are documented below.
 
 
 --------------------------------------------------------------------------------
-option A. one-shot boot via GRUB edit
+option A. just boot, you are already in console mode
 --------------------------------------------------------------------------------
 
-Cleanest path. Costs nothing. The choice does not survive a reboot.
+The default image bakes geos.mode=console. Build, boot, done.
 
   1. Build and start the dev VM:
 
@@ -26,21 +27,10 @@ Cleanest path. Costs nothing. The choice does not survive a reboot.
 
        ./iso-build/emacs-os.sh
 
-  2. The QEMU window opens on the GRUB menu. Highlight the GEOS entry
-     and press `e` (lowercase). GRUB drops you into a line editor.
+  2. The QEMU window opens on the GRUB menu. Let it auto-boot, or
+     press Enter to boot the highlighted entry.
 
-  3. Find the line that starts with:
-
-       linux /gnu/store/...-linux-libre-... root=...
-
-     Move to the END of that line (Ctrl-e in GRUB's editor) and append
-     a single space, then:
-
-       geos.mode=console
-
-  4. Press Ctrl-x (or F10) to boot.
-
-  5. On the serial console you should see:
+  3. On the serial console you should see:
 
        pid1: geos.mode=console, skipping Xorg, emacs on /dev/console
 
@@ -49,29 +39,52 @@ Cleanest path. Costs nothing. The choice does not survive a reboot.
 
 
 --------------------------------------------------------------------------------
-option B. permanent: bake the token into the image
+option B. one-shot UI boot via GRUB edit
 --------------------------------------------------------------------------------
 
-Edit the operating-system record so every boot lands in console mode.
+For one boot only, swap the baked token from console to ui.
+
+  1. Boot as in option A, but at the GRUB menu press `e` (lowercase)
+     to enter the line editor.
+
+  2. Find the line that starts with:
+
+       linux /gnu/store/...-linux-libre-... root=...
+
+     Locate the `geos.mode=console` token on that line and change
+     it to `geos.mode=ui`. (Or just append `geos.mode=ui` at the
+     end; the LAST occurrence wins because pid1 takes the first
+     match on a left-to-right scan and you should put the override
+     in front, not behind. Easier to just edit the existing token.)
+
+  3. Press Ctrl-x (or F10) to boot.
+
+  4. The serial console now shows:
+
+       pid1: geos.mode=ui, will spawn Xorg + EXWM
+
+     Xorg comes up, EXWM grabs the root window, you get the GUI
+     session. Reboot reverts to console.
+
+
+--------------------------------------------------------------------------------
+option C. permanent: flip the default in system.scm
+--------------------------------------------------------------------------------
+
+If you want UI as the new permanent default, edit the operating-
+system record.
 
   1. Open the system definition:
 
        nano guix-system/system.scm
 
   2. Find the kernel-arguments form (search for "kernel-arguments").
-     It currently reads:
+     Change the geos.mode=console string to "geos.mode=ui":
 
        (kernel-arguments
         (cons* "console=tty1"
                "console=ttyS0,115200"
-               %default-kernel-arguments))
-
-     Add "geos.mode=console" to the cons* list:
-
-       (kernel-arguments
-        (cons* "console=tty1"
-               "console=ttyS0,115200"
-               "geos.mode=console"
+               "geos.mode=ui"
                %default-kernel-arguments))
 
   3. Rebuild and boot. From the repo root:
@@ -79,35 +92,21 @@ Edit the operating-system record so every boot lands in console mode.
        ./iso-build/cleanup.sh
        ./iso-build/dev-vm.sh
 
-     Cleanup is optional but discards the previous overlay so you
-     definitely see the new cmdline.
-
-  4. The GRUB entry now bakes geos.mode=console. Every cold boot lands
-     in console mode without GRUB editing.
+     Cleanup discards the old overlay so you definitely see the new
+     cmdline.
 
 
 --------------------------------------------------------------------------------
-option C. one-shot via QEMU -append (advanced)
---------------------------------------------------------------------------------
-
-Only works with direct kernel boot (qemu -kernel ... -initrd ...). The
-default path through the qcow2 boots through GRUB, which ignores
-QEMU's -append. If you really want this, extract the kernel and
-initrd from /gnu/store and pass them with -kernel/-initrd plus
--append "... geos.mode=console". Most of the time option A is
-simpler.
-
-
---------------------------------------------------------------------------------
-verifying you are in console mode
+verifying which mode you are in
 --------------------------------------------------------------------------------
 
 Once Emacs is up, in the *scratch* (or any) buffer:
 
   M-: (with-temp-buffer (insert-file-contents "/proc/cmdline") (buffer-string))
 
-The string ends in `geos.mode=console`. Also, `(display-graphic-p)`
-returns nil in console mode and t in UI mode.
+Look for the geos.mode= token. Also, `(display-graphic-p)` returns
+nil in console mode and t in UI mode, which is the cheapest sanity
+check.
 
 
 --------------------------------------------------------------------------------
