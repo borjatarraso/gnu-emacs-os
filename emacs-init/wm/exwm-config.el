@@ -34,10 +34,13 @@
 (defun exwm-config--trace (msg)
   "Best-effort write MSG to /dev/console.
 Used to surface boot-time wm progress on the serial stdio. Errors
-swallowed: tracing is a debug aid, never the failure mode."
+swallowed: tracing is a debug aid, never the failure mode.
+write-region-inhibit-fsync is defensive: a no-op for character
+devices today but cheap to set in case a future emacs flushes ttys."
   (condition-case _
-      (write-region (format "exwm-trace: %s\n" msg)
-                    nil "/dev/console" 'append 'nomsg)
+      (let ((write-region-inhibit-fsync t))
+        (write-region (format "exwm-trace: %s\n" msg)
+                      nil "/dev/console" 'append 'nomsg))
     (error nil)))
 
 (exwm-config--trace "loading")
@@ -146,23 +149,19 @@ or nil when there was nothing to load."
       (exwm-workspace-switch-create 3)
     (error (panic-handle err '(exwm-workspace-switch . 3)))))
 
-;; before exwm-enable runs, pin the initial and default frame to fullboth
-;; so the first emacs frame spans the entire root window (fullscreen on
-;; both axes). without this, the initial frame respects whatever pixel
-;; geometry emacs computed from font metrics at startup, which leaves a
-;; black border between the emacs frame and the X root. this matters
-;; visually only on first boot or after a (delete-frame); EXWM's later
-;; reflow will resize subsequent frames to fit.
-;;
-;; safe under no-DISPLAY: setting frame parameters in alists here is
-;; just a setq on a list, with no I/O. the values are only consulted
-;; when emacs creates a graphical frame.
+;; (B-fullscreen-hang, 2026-05-10) earlier draft mutated
+;; initial-frame-alist and default-frame-alist with (fullscreen . fullboth)
+;; right here, BEFORE (exwm-enable). that hangs emacs hard on a real
+;; Xorg with no WM yet: emacs sends a NetWM _NET_WM_STATE_FULLSCREEN
+;; request and the X server has nobody to forward the hint to, so the
+;; frame parameter machinery loops waiting for the round-trip.
+;; symptom: serial log freezes after "should-enable=t" and userland
+;; never reaches boot-marker. fix: defer fullscreen until exwm-enable
+;; returns and exwm IS the WM, then call set-frame-parameter on the
+;; live frame (no alist mutation needed since exwm reflows everything
+;; once it grabs root). the cosmetic border on first boot is acceptable
+;; for the seconds it takes exwm to take over.
 (when exwm-config--should-enable
-  ;; alist semantics: first matching key wins on lookup. consing the
-  ;; new entry to the head shadows any earlier one without needing
-  ;; cl-remove, which would drag cl-lib into a load-time require.
-  (dolist (alist '(initial-frame-alist default-frame-alist))
-    (set alist (cons '(fullscreen . fullboth) (symbol-value alist))))
   (exwm-config--push-system-site-lisp)
   ;; use-package isn't bootstrapped by phase 5a (no package.el on the
   ;; image yet), but the project rule says "every package via
@@ -207,6 +206,20 @@ or nil when there was nothing to load."
         ;; this is the line that makes emacs into a window manager.
         (exwm-enable)
         (exwm-config--trace "exwm-enable returned")
+        ;; deferred fullscreen pin: now that exwm is the WM, the
+        ;; _NET_WM_STATE_FULLSCREEN hint has someone to forward it to.
+        ;; apply via set-frame-parameter to the live frame so the
+        ;; cosmetic border disappears once exwm processes its first
+        ;; event. errors swallowed: this is cosmetic, never load-bearing.
+        (when (boundp 'exwm-init-hook)
+          (add-hook
+           'exwm-init-hook
+           (lambda ()
+             (condition-case _
+                 (dolist (f (frame-list))
+                   (when (frame-parameter f 'display)
+                     (set-frame-parameter f 'fullscreen 'fullboth)))
+               (error nil)))))
         ;; phase 5c: bring up multi-monitor, fonts, input methods.
         ;; ordering matters here. exwm-randr-enable MUST come before
         ;; the first multimon-rescan because it installs the X event
@@ -294,14 +307,19 @@ or nil when there was nothing to load."
 
 (defun exwm-config--launch (cmd)
   "Read CMD and start-process it detached. No shell wrapper.
-This is the s-& launcher. CMD is the program plus optional args
-separated by whitespace. We split on whitespace once, no quoting
-fanciness, because phase 5a only needs to launch xterm. Errors
-route through panic-handle so a bogus binary name does not kill
-the wm."
+This is the s-& launcher. CMD is the program plus optional args.
+We use `split-string-and-unquote' so quoted args (like
+\"xterm -e 'echo hello world'\") tokenize correctly: a plain
+whitespace split would otherwise hand `start-process' the
+fragments [\"echo\" \"hello\" \"world'\"] and the user would see
+the shell-quote-removal-or-grouping behavior they expected drop
+on the floor.  Errors route through panic-handle so a bogus
+binary name does not kill the wm."
   (interactive (list (read-string "Run: ")))
   (condition-case err
-      (let* ((parts (split-string cmd "[ \t]+" t))
+      (let* ((parts (condition-case _
+                        (split-string-and-unquote cmd)
+                      (error (split-string cmd "[ \t]+" t))))
              (prog (car parts))
              (args (cdr parts)))
         (when prog
