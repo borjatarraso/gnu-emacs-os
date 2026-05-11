@@ -279,10 +279,14 @@ used for shadow's :lstchg field (last password change)."
 panics if /dev/urandom is unavailable: a random-failure boot
 should not silently fall back to a deterministic salt, that is
 exactly the way password databases get owned."
+  ;; BEG must be nil here, not 0.  `insert-file-contents-literally'
+  ;; rejects a non-nil BEG on a non-seekable file/device and
+  ;; /dev/urandom is non-seekable.  passing nil means "from the start",
+  ;; which is what we want, and END=n caps the read at n bytes.
   (with-temp-buffer
     (set-buffer-multibyte nil)
     (let ((coding-system-for-read 'binary))
-      (insert-file-contents-literally "/dev/urandom" nil 0 n))
+      (insert-file-contents-literally "/dev/urandom" nil nil n))
     (buffer-substring-no-properties (point-min)
                                     (+ (point-min) n))))
 
