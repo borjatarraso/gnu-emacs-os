@@ -273,6 +273,29 @@ what an operator actually wants and we'd rather force the prompt."
      (t
       (message "network-buffer: %s needs an address; press `s'" iface)))))
 
+(defun network-buffer-dhcp ()
+  "Request a DHCP lease for the iface at point.
+Bound to `d'. Refuses on lo (no DHCP server on loopback). Falls back
+to a free-form read of the iface name if point is not on an iface
+row. Delegates to `dhcp-request' which spawns dhcpcd; that function
+routes its own errors through panic-handle, so a missing dhcpcd
+binary surfaces in *panic*."
+  (interactive)
+  (let* ((p (network-buffer-iface-at-point))
+         (default-iface (and p (plist-get p :iface)))
+         (n (read-string (format "DHCP iface%s: "
+                                 (if default-iface
+                                     (format " (default %s)" default-iface)
+                                   ""))
+                         nil nil default-iface)))
+    (cond
+     ((string= n "lo")
+      (message "network-buffer: lo does not do DHCP"))
+     ((fboundp 'dhcp-request)
+      (dhcp-request n))
+     (t
+      (message "network-buffer: dhcp-request unbound; load services/dhcp.el")))))
+
 (defun network-buffer-quit ()
   "Bury *network*. Per project rules we do not kill it."
   (interactive)
@@ -284,6 +307,7 @@ what an operator actually wants and we'd rather force the prompt."
     (define-key m (kbd "RET") #'network-buffer-show-iface-details)
     (define-key m (kbd "s")   #'network-buffer-set-static)
     (define-key m (kbd "i")   #'network-buffer-bring-up)
+    (define-key m (kbd "d")   #'network-buffer-dhcp)
     (define-key m (kbd "q")   #'network-buffer-quit)
     m)
   "Keymap for `network-buffer-mode'.")

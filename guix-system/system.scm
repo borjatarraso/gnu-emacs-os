@@ -29,6 +29,7 @@
 (use-modules (gnu)
              (gnu bootloader)
              (gnu bootloader grub)
+             (gnu packages admin)
              (gnu packages emacs)
              (gnu packages emacs-xyz)
              (gnu packages fonts)
@@ -254,6 +255,15 @@
 ;; autostart afterwards.
 (define journal-tail-service-el
     (local-file "../emacs-init/services/journal-tail.el" "journal-tail.el"))
+
+(define dhcp-service-el
+    ;; v0.4 item 5 finisher.  on-demand DHCP via dhcpcd, triggered by
+    ;; `d' in the *network* buffer.  not a defservice (one-shot per
+    ;; operator action, not a long-running thing), but lives under
+    ;; services/ because it spawns and supervises an external binary.
+    ;; loaded after network-buffer-el so `network-buffer-refresh' is
+    ;; fbound when dhcp-request's sentinel calls it.
+    (local-file "../emacs-init/services/dhcp.el" "dhcp.el"))
 
 (define xorg-conf
     ;; phase-5c xorg config. picks the modesetting driver against
@@ -542,6 +552,7 @@
                                ;; supervise-finalize sees a complete
                                ;; registry.
                                "-l" #$journal-tail-service-el
+                               "-l" #$dhcp-service-el
                                ;; LAST.  boot-marker writes the
                                ;; userland-up sentinel at load time;
                                ;; reaching this -l proves every
@@ -786,6 +797,13 @@
                      ;; is the kernel API we already have.
                      alsa-utils
                      alsa-lib
+                     ;; v0.4 item 5 finisher.  dhcpcd is spawned by
+                     ;; services/dhcp.el on operator action (the `d'
+                     ;; key in the *network* buffer).  shell-out
+                     ;; exception documented in
+                     ;; guix-system/exceptions.scm; closure is a v0.5
+                     ;; native RFC2131 client.
+                     dhcpcd
                      %base-packages))
 
     ;; %base-services is kept because removing shepherd-root-service-type

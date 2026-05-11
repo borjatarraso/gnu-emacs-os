@@ -6,6 +6,27 @@
 ;; has a phase that closes it.  an exception that outlives its phase
 ;; is a bug.
 
+;; exception: dhcpcd-as-dhcp-client
+;; rule violated: GEOS hard rule 1, "no shell other than eshell" (we
+;;   shell out to an external binary, even though dhcpcd is itself a C
+;;   program and not a shell); also the spirit of "every system concept
+;;   is a buffer in elisp", since DHCP is a system concept and the
+;;   client is not in elisp.
+;; reason: a from-scratch RFC2131 client in elisp would need raw
+;;   socket support that emacs does not expose, plus DHCP option
+;;   parsing, plus lease-time bookkeeping.  not v0.4-sized.  dhcpcd
+;;   is the smallest C client in (gnu packages admin), we pin it via
+;;   system.scm and strip its non-IP-getter ambitions at spawn time:
+;;     services/dhcp.el passes -1 -q -B -K --nohook resolv.conf
+;;                            --nohook ntp.conf
+;;   so dhcpcd runs as a one-shot ioctl driver, exits after BOUND, and
+;;   never touches our resolv.conf.  the spawn itself is sentinel-
+;;   driven via make-process so the supervisor does not block on the
+;;   DHCP convergence window.
+;; closure: replace with a native elisp client once we have a pid1
+;;   raw-socket helper.  v0.5 work.
+;; tracked since: 2026-05-11.
+
 ;; exception: bash-in-system-profile
 ;; rule violated: GEOS hard rule 1, "no shell other than eshell".
 ;; reason: %base-packages still drops bash into the system profile.
