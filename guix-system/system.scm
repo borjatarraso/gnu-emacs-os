@@ -30,6 +30,8 @@
              (gnu bootloader)
              (gnu bootloader grub)
              (gnu packages admin)
+             (gnu packages bootloaders)
+             (gnu packages disk)
              (gnu packages emacs)
              (gnu packages emacs-xyz)
              (gnu packages fonts)
@@ -264,6 +266,25 @@
     ;; loaded after network-buffer-el so `network-buffer-refresh' is
     ;; fbound when dhcp-request's sentinel calls it.
     (local-file "../emacs-init/services/dhcp.el" "dhcp.el"))
+
+;; v0.4 item 3.  install wizard.  pure-elisp wrappers around mkfs,
+;; cp, pid1-mount, grub-install and grub-mkconfig, plus a
+;; *install* state-machine buffer that orchestrates them.  the
+;; wizard does NOT partition; the operator pre-partitions from a
+;; Guix live ISO and runs M-x install on a booted GEOS.  the four
+;; install/*.el files are pure-data; install.el is the buffer.
+;; loaded near the end of the chain because install.el requires
+;; the four install-* features by name.
+(define install-disk-el
+    (local-file "../emacs-init/install/disk.el" "install-disk.el"))
+(define install-mkfs-el
+    (local-file "../emacs-init/install/mkfs.el" "install-mkfs.el"))
+(define install-copy-el
+    (local-file "../emacs-init/install/copy.el" "install-copy.el"))
+(define install-grub-el
+    (local-file "../emacs-init/install/grub.el" "install-grub.el"))
+(define install-buffer-el
+    (local-file "../emacs-init/buffers/install.el" "install-buffer.el"))
 
 (define xorg-conf
     ;; phase-5c xorg config. picks the modesetting driver against
@@ -553,6 +574,18 @@
                                ;; registry.
                                "-l" #$journal-tail-service-el
                                "-l" #$dhcp-service-el
+                               ;; v0.4 item 3: the install wizard.
+                               ;; load the four install/*.el helpers
+                               ;; first (each (provide 's an
+                               ;; install-* feature), then the buffer
+                               ;; that (require)s them.  no side
+                               ;; effects at load time; M-x install
+                               ;; is the entry point.
+                               "-l" #$install-disk-el
+                               "-l" #$install-mkfs-el
+                               "-l" #$install-copy-el
+                               "-l" #$install-grub-el
+                               "-l" #$install-buffer-el
                                ;; LAST.  boot-marker writes the
                                ;; userland-up sentinel at load time;
                                ;; reaching this -l proves every
@@ -804,6 +837,26 @@
                      ;; guix-system/exceptions.scm; closure is a v0.5
                      ;; native RFC2131 client.
                      dhcpcd
+                     ;; v0.4 item 3 install wizard.  the wizard
+                     ;; spawns these four binaries via make-process
+                     ;; (no shell-out): mkfs.ext4 from e2fsprogs,
+                     ;; mkfs.fat from dosfstools (FAT32 reserved for
+                     ;; the v0.4.1 ESP), grub-install and
+                     ;; grub-mkconfig from grub.  parted is in the
+                     ;; manifest because v0.4.1 partition-from-
+                     ;; scratch will need it; keeping it now means
+                     ;; the same ISO covers both versions and an
+                     ;; operator who has not pre-partitioned can
+                     ;; eshell-out to parted manually for now.
+                     e2fsprogs
+                     dosfstools
+                     parted
+                     ;; grub-pc is the BIOS i386-pc variant.  it
+                     ;; ships grub-install + grub-mkconfig along
+                     ;; with the i386-pc modules used to write the
+                     ;; MBR stub.  v0.4.1 adds grub-efi to the
+                     ;; manifest when the wizard learns UEFI.
+                     grub-pc
                      %base-packages))
 
     ;; %base-services is kept because removing shepherd-root-service-type

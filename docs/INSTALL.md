@@ -169,6 +169,56 @@ Last good qcow2:
 Boot it the same way the harness boots the ISO, swap `-cdrom` for
 `-drive file=...,format=qcow2` and drop `-boot d`.
 
+## installing GEOS onto a real disk (the MVP wizard)
+
+GEOS now ships an in-Emacs install wizard. It is the v0.4 item 3 MVP:
+it does NOT partition disks. The operator is expected to pre-
+partition the target from a Guix live ISO (one ext4 partition is
+enough for a non-encrypted install), then boot GEOS from any working
+medium (qcow2, USB stick, network boot) and run the wizard.
+
+Pre-partitioning from a Guix live ISO:
+
+```
+parted /dev/sda mklabel msdos
+parted /dev/sda mkpart primary ext4 1MiB 100%
+parted /dev/sda set 1 boot on
+```
+
+Reboot into GEOS. Then:
+
+```
+M-x install
+```
+
+The `*install*` buffer walks five states:
+
+  1. `:welcome` — press `RET` to start, `q` to bail.
+  2. `:disk-pick` — `n`/`p` navigate, `g` refresh,
+     `RET` picks. Disks with a mounted partition are flagged `MNT`
+     and refused.
+  3. `:part-pick` — same navigation, `RET` picks a partition.
+     Mounted partitions are refused.
+  4. `:format-confirm` — `y` to format the partition as ext4 with
+     label `geos-root` and proceed, `n` to back up.
+  5. `:format` → `:mount` → `:copy` → `:grub` → `:done`. The wizard
+     spawns `mkfs.ext4`, `pid1-mount`s the new partition at
+     `/mnt/install`, copies `/gnu/store`, `/var/guix`, and
+     `/run/current-system` with `cp -a`, then runs `grub-install`
+     and `grub-mkconfig`. On `:done` press `r` to reboot.
+
+Total wall-clock time is dominated by the copy step. A ~6 GB closure
+takes a couple of minutes on SATA, half an hour on USB 2.
+
+Per-step output streams into hidden work buffers
+(`*install:mkfs:DEVICE`*, `*install:copy*`, `*install:grub*`) for
+debugging. On any failure the wizard moves to `:error`, names the
+failing step, and lets you press `RET` to restart at `:welcome`.
+
+The wizard does not partition. It does not write an ESP. It does
+not encrypt. Partition-from-scratch and the UEFI/ESP layout are
+v0.4.1. LUKS is a separate manual flow, documented next.
+
 ## installing with an encrypted root (LUKS)
 
 Bare-metal GEOS can boot from a LUKS-encrypted root. The flow piggy-
@@ -221,8 +271,11 @@ Caveats:
   - Unlocking additional LUKS volumes (data partitions, external
     drives) from inside running GEOS is a v0.5 follow-up. v0.4 only
     covers the root.
-  - The bare-metal install wizard (v0.4 item 3 in-flight) will
-    eventually automate steps 2-6. For now they are manual.
+  - The bare-metal install wizard (v0.4 item 3 MVP) handles the
+    non-encrypted flow now. LUKS layering on top of it is v0.5: the
+    wizard would need a passphrase prompt and a `cryptsetup
+    luksFormat` step before `mkfs.ext4`. For LUKS in v0.4, steps
+    2-6 above stay manual.
 
 QEMU smoke tests do NOT exercise this path. `system.scm` ships
 without `mapped-devices` so the headless test stays simple. The

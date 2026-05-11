@@ -47,10 +47,9 @@ docs/CONTRIBUTING.md, docs/USER_GUIDE.md.
 ## v0.4 in flight
 
 The detailed plan lives in [v04-plan.md](v04-plan.md). Eleven items
-ordered into four phases, with dependency notes per item. Nine items
-fully landed plus the in-place half of item 3 and the documented half
-of item 9; the first-install wizard, the user-login split (deferred
-to v0.5), and the Hurd spike remain. The top-level shape:
+ordered into four phases, with dependency notes per item. Ten items
+landed (item 3 in MVP form, item 9 documented); the user-login split
+(deferred to v0.5) and the Hurd spike remain. The top-level shape:
 
 ### Phase A (foundational, done)
 
@@ -90,10 +89,15 @@ to v0.5), and the Hurd spike remain. The top-level shape:
   `passwd.el` store under `/var/emacs/users/` and the `*users*` buffer
   shipped. The login flow and per-user emacs split (so each session
   gets its own process tree) is the v0.5 follow-up.
-- **3. real installer** (partial): the `*reconfigure*` buffer that
-  runs `guix system reconfigure` and streams the build log has
-  shipped. The bare-metal first-install wizard (partition, mkfs,
-  copy closure, install grub) is still in flight.
+- **3. real installer** (MVP shipped): the `*reconfigure*` buffer
+  that runs `guix system reconfigure` and streams the build log
+  shipped first. The bare-metal `*install*` wizard now ships as MVP:
+  the operator pre-partitions from a Guix live ISO (one ext4
+  partition is enough), boots GEOS, runs `M-x install`, picks a
+  disk + partition, the wizard does `mkfs.ext4` + `pid1-mount` +
+  `cp -a` of the system closure + `grub-install` +
+  `grub-mkconfig`, then offers `r` to reboot. Partition-from-
+  scratch (parted dance, ESP layout) is v0.4.1.
 - **9. disk encryption (LUKS at boot)** (documented): Guix's stock
   initrd already handles LUKS via `mapped-devices`, so this item
   shrinks to docs. The required edits to `system.scm` (mapped-devices,
