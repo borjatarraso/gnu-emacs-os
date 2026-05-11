@@ -1724,6 +1724,80 @@ raw_reboot(int cmd)
     return reboot(cmd);
 }
 
+/* (pid1-suspend STATE) -> t on resume, signals pid1-error on failure.
+ * STATE is one of "mem" (S3 suspend-to-RAM), "freeze" (S0 idle),
+ * "standby" (S1), or "disk" (S4 hibernate). writes the literal
+ * string + newline to /sys/power/state, which is the kernel's
+ * uniform suspend interface. write(2) returns when the kernel has
+ * finished resuming, so a t return means we are awake again on the
+ * other side. EPERM here means the kernel was built without
+ * CONFIG_SUSPEND or the requested state is not in
+ * /sys/power/state's valid list (read /sys/power/state to see what
+ * the running kernel actually supports). EBUSY means another
+ * suspend is already in flight. sync() up front so any pending
+ * /var/emacs writes hit ext4 before the platform stops the CPU;
+ * suspend-to-RAM should be safe but suspend-to-disk on a flaky
+ * battery is exactly the case where you find out you forgot. */
+static int
+raw_suspend(const char *state)
+{
+    sync();
+    int fd = open("/sys/power/state", O_WRONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    size_t len = strlen(state);
+    /* write the state string then a newline. the kernel parses up to
+     * the first newline or EOF and ignores trailing bytes, but the
+     * conventional userspace contract (see Documentation/admin-guide/
+     * pm/sleep-states.rst) is to write the bare token plus \n. */
+    ssize_t w = write(fd, state, len);
+    int err = errno;
+    if (w >= 0) {
+        ssize_t w2 = write(fd, "\n", 1);
+        if (w2 < 0) err = errno;
+        else if ((size_t)w != len) err = EIO;
+        else w = w2;
+    }
+    int c = close(fd);
+    if (w < 0) {
+        errno = err;
+        return -1;
+    }
+    if (c < 0)
+        return -1;
+    return 0;
+}
+
+static emacs_value
+Fpid1_suspend(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+              void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 1)
+        return pid1_signal_errno(env, "pid1: pid1-suspend needs 1 arg",
+                                 EINVAL);
+    char state[16];
+    if (extract_cstring_into(env, args[0], state, sizeof state) < 0)
+        return Qnil;
+    /* whitelist the four kernel-supported tokens to keep us from
+     * writing arbitrary bytes into a sysfs node.  the kernel itself
+     * rejects unknown tokens with EINVAL, but the whitelist gives us
+     * a cleaner *panic* message and protects against typos that
+     * could in theory match a future kernel knob added to
+     * /sys/power/state with a non-suspend semantic. */
+    int ok = (strcmp(state, "mem") == 0 ||
+              strcmp(state, "freeze") == 0 ||
+              strcmp(state, "standby") == 0 ||
+              strcmp(state, "disk") == 0);
+    if (!ok)
+        return pid1_signal_errno(env, "pid1: suspend: unknown state",
+                                 EINVAL);
+    if (raw_suspend(state) < 0)
+        return pid1_signal_errno(env, "pid1: suspend", errno);
+    return env->intern(env, "t");
+}
+
 /* (pid1-poweroff) -> never returns on success, signals pid1-error
  * on EPERM/ENOSYS. ACPI in QEMU translates RB_POWER_OFF into a
  * machine-shutdown event and qemu exits. on bare metal the firmware
@@ -1816,6 +1890,12 @@ emacs_module_init(struct emacs_runtime *ert)
         "Sync, then reboot(RB_AUTOBOOT). Does not return on success.",
         NULL);
     pid1_defalias(env, "pid1-reboot", rb);
+
+    emacs_value sus = env->make_function(env, 1, 1, Fpid1_suspend,
+        "Sync, then write STATE to /sys/power/state. Returns t on resume. "
+        "STATE is one of \"mem\", \"freeze\", \"standby\", \"disk\".",
+        NULL);
+    pid1_defalias(env, "pid1-suspend", sus);
 
     /* provide the feature so (require 'pid1-module) works after
      * (module-load ...) without a separate elisp wrapper. */
