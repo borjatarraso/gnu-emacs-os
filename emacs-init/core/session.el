@@ -8,6 +8,18 @@
 ;; owns the lifecycle of those children: spawn, register, persist,
 ;; rehydrate on reboot, end on logout.
 ;;
+;; maintenance escape hatch: the kernel cmdline token
+;; `geos.login=skip' suppresses the *login* presentation in
+;; `session--boot-rehydrate'.  the supervisor emacs is then reachable
+;; on /dev/console (or via the exwm session) as it was pre-v0.5.
+;; this is for DEBUGGING and RECOVERY only.  in production every boot
+;; that finishes rehydrate with no 'running session must land on the
+;; *login* buffer; the skip token bypasses the auth boundary entirely
+;; and must NEVER be set on a deployed image.  it exists so that a
+;; passwd store corruption or a wedged login-mode keymap does not
+;; brick the box: an operator with console access can boot the GRUB
+;; entry with `geos.login=skip' appended, repair, and reboot.
+;;
 ;; the privilege transition lives in the parent, between fork and
 ;; exec, inside the pid1 module.  no setuid binary, no helper, no
 ;; PAM, no nsswitch.  the parent emacs is already root because it is
@@ -58,6 +70,13 @@
    (if (fboundp 'panic-handle)
        (panic-handle err 'session-require-passwd)
      (message "session: passwd require failed: %S" err))))
+
+;; login.el (provides `login-buffer') requires session.el, so we
+;; cannot require it back without a load cycle.  declare the one
+;; symbol we call from `session--present-login' to silence the
+;; byte-compiler; at after-init-hook time the function is bound
+;; because the boot gexp loads login.el after session.el.
+(declare-function login-show "login" ())
 
 (defconst session--state-prefix "sessions/"
   "state-key prefix under which session records live.
@@ -362,6 +381,28 @@ returns t on success.  no-op if the user has no session record."
 ;; rehydrate (boot path)
 ;; --------------------------------------------------------------------
 
+(defun session--snapshot-valid-p (snap key)
+  "Return non-nil iff SNAP is a structurally sane persisted session.
+KEY is the state-key the snapshot was read from (\"sessions/<name>\");
+we cross-check that the snapshot's :name agrees with the basename of
+KEY so a renamed-on-disk file cannot smuggle a different identity
+back into the registry.  the checks are cheap and the cost of
+admitting a torn record is real: a 'running snapshot with garbage
+slots makes the boot path skip *login* presentation entirely."
+  (and (listp snap)
+       (let ((name   (plist-get snap :name))
+             (uid    (plist-get snap :uid))
+             (gid    (plist-get snap :gid))
+             (home   (plist-get snap :home))
+             (status (plist-get snap :status)))
+         (and (stringp name)
+              (string= name (file-name-nondirectory key))
+              (integerp uid) (>= uid 1000)
+              (integerp gid) (>= gid 1000)
+              (stringp home) (> (length home) 0)
+              (eq (aref home 0) ?/)
+              (memq status '(held running starting exited))))))
+
 (defun session--rehydrate-one (key)
   "Read the persisted record at KEY and re-create the in-memory entry.
 KEY is a state-key like \"sessions/borja\".  decides:
@@ -373,10 +414,20 @@ KEY is a state-key like \"sessions/borja\".  decides:
                                    operator to retry via login
   - status 'exited on disk      -> leave as 'exited; the *users*
                                    buffer will not show a live session
-panic-handles malformed entries (corrupted state file, wrong shape)."
+panic-handles malformed entries (corrupted state file, wrong shape).
+records that fail `session--snapshot-valid-p' are dropped entirely:
+they are NOT added to the registry and do NOT count toward the
+'running tally the boot path checks before presenting *login*."
   (condition-case err
       (let ((snap (state-read key nil)))
-        (when (and (listp snap) (stringp (plist-get snap :name)))
+        (cond
+         ((not (session--snapshot-valid-p snap key))
+          ;; malformed record.  surface it in *panic* so an operator
+          ;; can investigate, but do not let it influence boot.
+          (panic-handle (list 'session--rehydrate-malformed key snap)
+                        (cons 'session--rehydrate-malformed
+                              (file-name-nondirectory key))))
+         (t
           ;; persisted-status is what the previous boot left us with;
           ;; the in-memory struct's :status was mapped to 'held during
           ;; rehydrate construction so the struct represents
@@ -407,7 +458,7 @@ panic-handles malformed entries (corrupted state file, wrong shape)."
               (session--persist sess)
               (unless (session--spawn-child sess)
                 (setf (geos-session-status sess) 'exited)
-                (session--persist sess))))))
+                (session--persist sess)))))))
     (error
      (panic-handle err (cons 'session--rehydrate-one key)))))
 
@@ -432,6 +483,94 @@ re-register-safe."
 ;; boot wiring
 ;; --------------------------------------------------------------------
 
+(defconst session--cmdline-path "/proc/cmdline"
+  "Where we read the kernel command line.
+defvar-grade defconst so a test harness can `let'-bind it to a fixture
+file.  not user-tunable; the path is fixed by Linux.")
+
+(defun session--cmdline-has-token-p (token)
+  "Return non-nil iff TOKEN appears as a whitespace-delimited entry
+in `session--cmdline-path'.  TOKEN is matched as a literal string,
+anchored on the start of the line or a preceding tab/space, so
+`geos.login=skip' does NOT match `not-geos.login=skip'.  same
+anchoring as `boot-marker--in-boot-emacs-p' but inlined here so
+session.el does not require boot-marker (which loads later in the
+boot chain).  errors are swallowed and return nil so an unreadable
+/proc/cmdline (non-Linux dev host, sandbox) cannot trip the boot."
+  (and (file-readable-p session--cmdline-path)
+       (condition-case _
+           (let ((coding-system-for-read 'binary)
+                 (re (concat "\\(?:^\\|[ \t]\\)"
+                             (regexp-quote token)
+                             "\\(?:[ \t]\\|$\\)")))
+             (with-temp-buffer
+               (insert-file-contents session--cmdline-path)
+               (goto-char (point-min))
+               (re-search-forward re nil t)))
+         (error nil))))
+
+(defun session--login-skip-requested-p ()
+  "Return non-nil iff the operator asked to bypass the *login* buffer.
+v0.5 honors `geos.login=skip' on the kernel cmdline; see file
+commentary for why this exists and why it is not a production path."
+  (session--cmdline-has-token-p "geos.login=skip"))
+
+(defun session--present-login ()
+  "Present the *login* buffer on whatever surface this geos-mode uses.
+
+v0.5 MVP shape: console mode and UI mode use the same shape, a
+full-frame switch on the supervisor's current frame.  UI mode is
+expected to diverge in v0.5.x once per-user EXWM workspace routing
+lands; until then the `(getenv \"DISPLAY\")' probe is decoration and
+both modes do the same thing.  the probe stays so the branch point
+is visible (and grep-discoverable) for the future split.
+
+distinguishing console from UI: we check `(getenv \"DISPLAY\")', the
+same predicate `exwm-config--should-enable' uses at boot to decide
+whether to bring exwm up.  if DISPLAY is set this emacs is the X
+client of its own embedded X server (Xorg under pid1's supervision)
+and we are in UI mode.  if it is unset we are on a kernel
+framebuffer console.  no separate `geos-mode' variable: the
+authoritative answer is the env emacs was started with.
+
+never raises: `login-show' is wrapped in condition-case so a wedged
+buffer-show path routes through `panic-handle' rather than the boot
+default-handler.  this is the privilege boundary; an error here
+must NOT leave the supervisor running with no login surface.  if
+the error path itself trips before a buffer makes it to the frame,
+we synthesise a minimum *login* with a pointer to *panic*: better a
+visible breadcrumb than a blank tty."
+  (condition-case err
+      (let ((buf (login-show)))
+        (cond
+         ((not (bufferp buf))
+          (panic-handle (list 'session-present-login-no-buffer buf)
+                        'session--present-login))
+         (t
+          (let ((mode (if (getenv "DISPLAY") 'ui 'console)))
+            (message "session: presenting *login* in %s mode" mode)
+            (switch-to-buffer buf)
+            (delete-other-windows)))))
+    (error
+     (panic-handle err 'session--present-login)
+     ;; the supervisor must NOT continue with no login surface.  build
+     ;; a fallback buffer by hand; if even that fails, log to *Messages*
+     ;; and let the operator see a frozen frame rather than nothing.
+     (condition-case e2
+         (let* ((bname (or (bound-and-true-p login-buffer-name)
+                           "*login*"))
+                (buf (get-buffer-create bname)))
+           (with-current-buffer buf
+             (let ((inhibit-read-only t))
+               (erase-buffer)
+               (insert "*login* render failed.  see *panic*.\n")
+               (insert (format "error: %S\n" err))))
+           (switch-to-buffer buf)
+           (delete-other-windows))
+       (error
+        (message "session: present-login fallback also failed: %S"
+                 e2))))))
+
 ;; same gate the other core files use.  on a dev host pid1-as-emacs-p
 ;; is nil and rehydrate is skipped, so loading the file is side-effect
 ;; free outside the OS.
@@ -447,11 +586,33 @@ re-register-safe."
 ;; body so it is idempotent under repeated init-file loads.
 (defun session--boot-rehydrate ()
   "after-init-hook entry point.  gated on `pid1-as-emacs-p' and
-removes itself on first run."
+removes itself on first run.
+
+after rehydrate returns, if no session is `'running' we present the
+*login* buffer on whatever surface this geos-mode uses; if at least
+one session was rehydrated to `'running' we hand the screen to that
+session and skip the login presentation (the persisted state is
+the source of truth; an operator who wants out of the restored
+session uses the `q' binding in login-mode's :running state).
+
+the `geos.login=skip' kernel cmdline token short-circuits the login
+presentation; see file commentary for the rationale."
   (remove-hook 'after-init-hook #'session--boot-rehydrate)
   (when (and (boundp 'pid1-as-emacs-p) pid1-as-emacs-p)
     (condition-case err
-        (session-rehydrate)
+        (progn
+          (session-rehydrate)
+          (cond
+           ((session--login-skip-requested-p)
+            (message
+             "session: geos.login=skip honored, not presenting *login*"))
+           ((cl-some (lambda (s)
+                       (eq (geos-session-status s) 'running))
+                     (session-list))
+            (message
+             "session: rehydrated running session, skipping *login*"))
+           (t
+            (session--present-login))))
       (error
        (panic-handle err 'session-boot-rehydrate)))))
 
