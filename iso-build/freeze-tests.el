@@ -113,6 +113,44 @@
 ;;       regex/accepts (three valid NAMEs match and capture),
 ;;       regex/rejects (seven near-miss strings do not match).
 ;;
+;;   11. child-exit poller (v0.6 starter, 7f889c7)
+;;     pins session--child-alive-p and session--poll-children, the
+;;     interim SIGCHLD-via-polling path that lives until pid1 grows a
+;;     real reap callback.  the smoke-test boots the image but never
+;;     drives the poller; a regression that loses the /proc-missing
+;;     posture-split or fails to transition a vanished 'running entry
+;;     to 'held would still PASS the smoke gate while silently
+;;     breaking dead-child detection.  the most security-relevant
+;;     invariant is the posture-split itself: under pid1 the
+;;     /proc-missing branch MUST fail closed (return nil so vanished
+;;     children get caught), on a dev host it MUST fail open (return
+;;     t so loading session.el outside the OS does not false-positive
+;;     every recorded session as dead).  flipping that split either
+;;     direction is a bug we have to catch here.  sub-checks (each
+;;     under 'child-exit-poller/<name>):
+;;       alive/nil-pid (guard against nil pid argument),
+;;       alive/zero-pid (the <= 0 guard, 0 and -1),
+;;       alive/non-integer (string pid rejected),
+;;       alive/pid-1 (PID 1 is always alive on linux; skip if /proc
+;;                    absent),
+;;       alive/dead-pid (a high pid that does not exist; skip if
+;;                       /proc absent),
+;;       alive/proc-missing-fails-closed-under-pid1 (the posture-
+;;                       split, pid1 side: nil),
+;;       alive/proc-missing-fails-open-on-dev (the posture-split,
+;;                       dev side: t),
+;;       poll/transitions-vanished-running-to-held (the whole point
+;;                       of the poller, vanished -> held + child-pid
+;;                       cleared + persist called),
+;;       poll/does-not-touch-running-when-alive (must not transition
+;;                       a still-live child),
+;;       poll/calls-present-login-when-empty (last user logged out,
+;;                       supervisor surface must return to *login*),
+;;       poll/skips-present-login-when-others-running (do NOT yank
+;;                       the screen while another user is logged in),
+;;       arm/idempotent (a second arm cancels the prior timer),
+;;       arm/cancels-prior (the post-arm timer object is fresh).
+;;
 ;; reporting: each test pushes a result alist into `freeze-test-results'.
 ;; (freeze-test-report) prints a per-test PASS/FAIL summary to *Messages*
 ;; and to /dev/console (when boot-marker--write is available, so the
@@ -1242,6 +1280,472 @@ contract."
     (freeze-test--workspace-regex-rejects))))
 
 ;; --------------------------------------------------------------------
+;; test 11: child-exit poller (v0.6 starter, 7f889c7)
+;; --------------------------------------------------------------------
+
+(defun freeze-test--child-exit-poller-modules-loaded-p ()
+  "Return non-nil iff every poller symbol the sub-checks touch exists.
+matches the test-8/9/10 pattern: gate on the exact fbound/bound set
+rather than `featurep' on session, so a half-byte-compiled image
+records a clean 'module-not-loaded instead of crashing a sub-check."
+  (and (fboundp 'session--child-alive-p)
+       (fboundp 'session--poll-children)
+       (fboundp 'session--arm-poll-timer)
+       (boundp 'session-poll-interval)
+       (boundp 'session--poll-timer)))
+
+(defun freeze-test--make-fake-session (name pid status)
+  "Build a `geos-session' record for the poller fixtures.
+uid/gid pinned at 1000, home derived from NAME, supervise-key in the
+`session:NAME' namespace the real spawn path uses.  the record never
+talks to /etc/passwd or /var/emacs; it just has to satisfy the
+struct accessors the poller reads."
+  (make-geos-session
+   :name name
+   :uid 1000
+   :gid 1000
+   :home (concat "/home/" name)
+   :child-pid pid
+   :supervise-key (intern (concat "session:" name))
+   :status status))
+
+(defun freeze-test--alive-nil-pid ()
+  "Sub-check alive/nil-pid: (session--child-alive-p nil) -> nil.
+the guard against a session record whose :child-pid never got set
+(a 'starting record that never made it through spawn).  a regression
+that returns t on nil would mark every never-spawned record alive."
+  (let ((result 'fail))
+    (condition-case err
+        (setq result (if (null (session--child-alive-p nil))
+                         'pass
+                       "nil pid reported alive"))
+      (error
+       (panic-handle err 'freeze-test--alive-nil-pid)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'child-exit-poller/alive/nil-pid result)))
+
+(defun freeze-test--alive-zero-pid ()
+  "Sub-check alive/zero-pid: pid 0 and pid -1 both return nil.
+the <= 0 guard.  pid 0 is the scheduler thread, pid -1 is sentinel;
+neither is a real per-user emacs and treating either as alive would
+strand the registry."
+  (let ((result 'fail))
+    (condition-case err
+        (let ((zero-bad (session--child-alive-p 0))
+              (neg-bad  (session--child-alive-p -1)))
+          (setq result
+                (cond
+                 (zero-bad (format "pid 0 reported alive: %S" zero-bad))
+                 (neg-bad  (format "pid -1 reported alive: %S" neg-bad))
+                 (t 'pass))))
+      (error
+       (panic-handle err 'freeze-test--alive-zero-pid)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'child-exit-poller/alive/zero-pid result)))
+
+(defun freeze-test--alive-non-integer ()
+  "Sub-check alive/non-integer: (session--child-alive-p \"1\") -> nil.
+the integerp guard.  a torn record from disk could in principle hand
+the poller a string; the predicate must reject rather than coerce."
+  (let ((result 'fail))
+    (condition-case err
+        (setq result (if (null (session--child-alive-p "1"))
+                         'pass
+                       "string pid reported alive"))
+      (error
+       (panic-handle err 'freeze-test--alive-non-integer)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'child-exit-poller/alive/non-integer result)))
+
+(defun freeze-test--alive-pid-1 ()
+  "Sub-check alive/pid-1: PID 1 always exists on linux.
+conditional on /proc being mounted (it always is in the booted VM;
+this sub-check skips cleanly on dev hosts without /proc, e.g. macOS
+under emacs --batch)."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (file-directory-p "/proc"))
+          (setq result 'skipped-no-proc))
+         (t
+          (setq result (if (session--child-alive-p 1)
+                           'pass
+                         "PID 1 reported dead"))))
+      (error
+       (panic-handle err 'freeze-test--alive-pid-1)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'child-exit-poller/alive/pid-1 result)))
+
+(defun freeze-test--alive-dead-pid ()
+  "Sub-check alive/dead-pid: a high unused pid returns nil.
+scans /proc for the largest live pid and probes pid+1000, which is
+beyond the realistic active range on any single-user box.  if that
+pid happens to be in use (vanishingly unlikely on a freshly-booted
+geos image with two-digit process counts), the test reports the
+specific collision rather than a generic fail.  skipped if /proc is
+absent."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (file-directory-p "/proc"))
+          (setq result 'skipped-no-proc))
+         (t
+          (let* ((entries (directory-files "/proc" nil "\\`[0-9]+\\'"))
+                 (max-pid (apply #'max 0 (mapcar #'string-to-number
+                                                 entries)))
+                 (dead-pid (+ max-pid 1000)))
+            (setq result
+                  (cond
+                   ((file-directory-p (format "/proc/%d" dead-pid))
+                    (format "probe pid %d unexpectedly in use" dead-pid))
+                   ((session--child-alive-p dead-pid)
+                    (format "dead pid %d reported alive" dead-pid))
+                   (t 'pass))))))
+      (error
+       (panic-handle err 'freeze-test--alive-dead-pid)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'child-exit-poller/alive/dead-pid result)))
+
+(defun freeze-test--alive-proc-missing-fails-closed-under-pid1 ()
+  "Sub-check alive/proc-missing-fails-closed-under-pid1: posture-split.
+mock file-directory-p so the /proc path returns nil AND set
+pid1-as-emacs-p to t.  under those conditions the predicate must
+return nil (fail closed): on a deployed image a missing /proc means
+the poller cannot probe anyway, so the safe answer is `vanished',
+which transitions the session to 'held and presents *login*.
+returning t here would hide every dead child behind the /proc mount
+failure."
+  (let ((result 'fail)
+        (had-pid1 (boundp 'pid1-as-emacs-p))
+        (saved-pid1 (and (boundp 'pid1-as-emacs-p)
+                         (symbol-value 'pid1-as-emacs-p))))
+    (condition-case err
+        (unwind-protect
+            (progn
+              (set 'pid1-as-emacs-p t)
+              (cl-letf (((symbol-function 'file-directory-p)
+                         (lambda (path)
+                           (not (and (stringp path)
+                                     (string-prefix-p "/proc" path))))))
+                (let ((got (session--child-alive-p 1234)))
+                  (setq result
+                        (if (null got)
+                            'pass
+                          (format "expected nil under pid1, got %S" got))))))
+          (if had-pid1
+              (set 'pid1-as-emacs-p saved-pid1)
+            (makunbound 'pid1-as-emacs-p)))
+      (error
+       (panic-handle err
+                     'freeze-test--alive-proc-missing-fails-closed-under-pid1)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record
+     'child-exit-poller/alive/proc-missing-fails-closed-under-pid1
+     result)))
+
+(defun freeze-test--alive-proc-missing-fails-open-on-dev ()
+  "Sub-check alive/proc-missing-fails-open-on-dev: posture-split.
+same /proc mock but pid1-as-emacs-p nil.  the predicate must return
+t so loading session.el on a sandboxed dev host (no /proc, e.g.
+macOS) does not false-positive every recorded session as dead and
+spam *panic* with poller-driven transitions."
+  (let ((result 'fail)
+        (had-pid1 (boundp 'pid1-as-emacs-p))
+        (saved-pid1 (and (boundp 'pid1-as-emacs-p)
+                         (symbol-value 'pid1-as-emacs-p))))
+    (condition-case err
+        (unwind-protect
+            (progn
+              (set 'pid1-as-emacs-p nil)
+              (cl-letf (((symbol-function 'file-directory-p)
+                         (lambda (path)
+                           (not (and (stringp path)
+                                     (string-prefix-p "/proc" path))))))
+                (let ((got (session--child-alive-p 1234)))
+                  (setq result
+                        (if got
+                            'pass
+                          (format "expected t on dev, got %S" got))))))
+          (if had-pid1
+              (set 'pid1-as-emacs-p saved-pid1)
+            (makunbound 'pid1-as-emacs-p)))
+      (error
+       (panic-handle err
+                     'freeze-test--alive-proc-missing-fails-open-on-dev)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record
+     'child-exit-poller/alive/proc-missing-fails-open-on-dev result)))
+
+(defmacro freeze-test--with-registry-fixture (&rest body)
+  "Run BODY with `session--registry' replaced by a fresh empty hash.
+the registry is a defvar holding a hash table; cl-letf on the
+binding does not compose with `puthash' across all emacs versions
+(the hash mutation can leak out, or the restore can re-bind a
+disconnected table).  direct save/clobber/restore via setq is the
+safer pattern and matches what the rehydrate code already does
+internally.  unwind-protect ensures the prior registry survives a
+sub-check that errors mid-body."
+  (declare (indent 0))
+  `(let ((saved-registry session--registry))
+     (unwind-protect
+         (progn
+           (setq session--registry (make-hash-table :test 'equal))
+           ,@body)
+       (setq session--registry saved-registry))))
+
+(defun freeze-test--poll-transitions-vanished-running-to-held ()
+  "Sub-check poll/transitions-vanished-running-to-held: the core poll.
+fake a 'running session with a dead pid, stub alive-p to nil, stub
+persist/present-login to no-ops (we do not want the test touching
+/var/emacs or yanking the screen).  after one sweep the registry
+entry must be 'held with child-pid cleared.  this is the entire
+reason the poller exists; if it regresses, dead children pile up
+as 'running forever."
+  (let ((result 'fail))
+    (condition-case err
+        (freeze-test--with-registry-fixture
+          (let ((fake (freeze-test--make-fake-session
+                       "ghost" 999999 'running)))
+            (puthash "ghost" fake session--registry)
+            (cl-letf (((symbol-function 'session--child-alive-p)
+                       (lambda (_pid) nil))
+                      ((symbol-function 'session--persist)
+                       (lambda (_sess) t))
+                      ((symbol-function 'session--present-login)
+                       (lambda () nil)))
+              (session--poll-children))
+            (let ((after (gethash "ghost" session--registry)))
+              (setq result
+                    (cond
+                     ((null after) "registry entry vanished")
+                     ((not (eq (geos-session-status after) 'held))
+                      (format "status not held: %S"
+                              (geos-session-status after)))
+                     ((not (null (geos-session-child-pid after)))
+                      (format "child-pid not cleared: %S"
+                              (geos-session-child-pid after)))
+                     (t 'pass))))))
+      (error
+       (panic-handle err
+                     'freeze-test--poll-transitions-vanished-running-to-held)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record
+     'child-exit-poller/poll/transitions-vanished-running-to-held result)))
+
+(defun freeze-test--poll-does-not-touch-running-when-alive ()
+  "Sub-check poll/does-not-touch-running-when-alive: liveness honored.
+same fixture but alive-p stubbed to t.  the entry must stay
+'running and keep its child-pid.  a regression that transitions
+live sessions on a quirk of the alive-p result would log every
+real user out on each tick."
+  (let ((result 'fail))
+    (condition-case err
+        (freeze-test--with-registry-fixture
+          (let ((fake (freeze-test--make-fake-session
+                       "live" 12345 'running)))
+            (puthash "live" fake session--registry)
+            (cl-letf (((symbol-function 'session--child-alive-p)
+                       (lambda (_pid) t))
+                      ((symbol-function 'session--persist)
+                       (lambda (_sess) t))
+                      ((symbol-function 'session--present-login)
+                       (lambda () nil)))
+              (session--poll-children))
+            (let ((after (gethash "live" session--registry)))
+              (setq result
+                    (cond
+                     ((null after) "registry entry vanished")
+                     ((not (eq (geos-session-status after) 'running))
+                      (format "status drifted from running to %S"
+                              (geos-session-status after)))
+                     ((not (eq (geos-session-child-pid after) 12345))
+                      (format "child-pid drifted: %S"
+                              (geos-session-child-pid after)))
+                     (t 'pass))))))
+      (error
+       (panic-handle err
+                     'freeze-test--poll-does-not-touch-running-when-alive)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record
+     'child-exit-poller/poll/does-not-touch-running-when-alive result)))
+
+(defun freeze-test--poll-calls-present-login-when-empty ()
+  "Sub-check poll/calls-present-login-when-empty: surface returns.
+one 'running session, alive-p stubbed to nil so it transitions.
+afterward zero sessions remain 'running, so the poller must call
+present-login.  the regression to catch: a poll that drops the
+present-login call leaves the operator staring at the dead user's
+last frame with no obvious way to log back in."
+  (let ((result 'fail)
+        (called nil))
+    (condition-case err
+        (freeze-test--with-registry-fixture
+          (let ((fake (freeze-test--make-fake-session
+                       "solo" 999999 'running)))
+            (puthash "solo" fake session--registry)
+            (cl-letf (((symbol-function 'session--child-alive-p)
+                       (lambda (_pid) nil))
+                      ((symbol-function 'session--persist)
+                       (lambda (_sess) t))
+                      ((symbol-function 'session--present-login)
+                       (lambda () (setq called t))))
+              (session--poll-children))
+            (setq result
+                  (if called
+                      'pass
+                    "present-login was not called after last logout"))))
+      (error
+       (panic-handle err
+                     'freeze-test--poll-calls-present-login-when-empty)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record
+     'child-exit-poller/poll/calls-present-login-when-empty result)))
+
+(defun freeze-test--poll-skips-present-login-when-others-running ()
+  "Sub-check poll/skips-present-login-when-others-running: no screen-yank.
+two sessions, both 'running.  alice's pid is dead, bob's pid is
+alive.  after the sweep alice is 'held and bob is still 'running.
+present-login MUST NOT have been called: yanking the screen while
+bob is still logged in is the multi-user equivalent of forcing a
+logout on another user."
+  (let ((result 'fail)
+        (called nil))
+    (condition-case err
+        (freeze-test--with-registry-fixture
+          (let ((alice (freeze-test--make-fake-session
+                        "alice" 999999 'running))
+                (bob   (freeze-test--make-fake-session
+                        "bob" 999998 'running)))
+            (puthash "alice" alice session--registry)
+            (puthash "bob"   bob   session--registry)
+            (cl-letf (((symbol-function 'session--child-alive-p)
+                       (lambda (pid)
+                         ;; alice's pid is dead, bob's pid is alive.
+                         (not (eq pid 999999))))
+                      ((symbol-function 'session--persist)
+                       (lambda (_sess) t))
+                      ((symbol-function 'session--present-login)
+                       (lambda () (setq called t))))
+              (session--poll-children))
+            (let ((after-bob (gethash "bob" session--registry)))
+              (setq result
+                    (cond
+                     (called "present-login fired with bob still running")
+                     ((not (eq (geos-session-status after-bob) 'running))
+                      (format "bob drifted off running: %S"
+                              (geos-session-status after-bob)))
+                     (t 'pass))))))
+      (error
+       (panic-handle err
+                     'freeze-test--poll-skips-present-login-when-others-running)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record
+     'child-exit-poller/poll/skips-present-login-when-others-running
+     result)))
+
+(defun freeze-test--arm-idempotent ()
+  "Sub-check arm/idempotent: a second arm cancels the prior timer.
+arm twice in a row.  after each call session--poll-timer must be a
+timerp.  the second call must not error (a regression that forgets
+to cancel could leave an old handle in an invalid state).  the
+unwind-protect tears the live timer down so the test does not leave
+a 3-second tick running against the freeze-test process."
+  (let ((result 'fail)
+        (saved-timer session--poll-timer))
+    (condition-case err
+        (unwind-protect
+            (let ((interval-saved session-poll-interval))
+              (unwind-protect
+                  (progn
+                    ;; tighten the interval so a leaked timer would not
+                    ;; fire mid-test; cl-letf would do, but session-poll-
+                    ;; interval is a plain defcustom so setq is simpler.
+                    (setq session-poll-interval 3600)
+                    (setq session--poll-timer nil)
+                    (session--arm-poll-timer)
+                    (let ((first (timerp session--poll-timer)))
+                      (session--arm-poll-timer)
+                      (let ((second (timerp session--poll-timer)))
+                        (setq result
+                              (cond
+                               ((not first) "first arm did not install timer")
+                               ((not second)
+                                "second arm did not install timer")
+                               (t 'pass))))))
+                (setq session-poll-interval interval-saved)))
+          (when (timerp session--poll-timer)
+            (cancel-timer session--poll-timer))
+          (setq session--poll-timer saved-timer))
+      (error
+       (panic-handle err 'freeze-test--arm-idempotent)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'child-exit-poller/arm/idempotent result)))
+
+(defun freeze-test--arm-cancels-prior ()
+  "Sub-check arm/cancels-prior: post-arm handle is a fresh object.
+capture the timer after the first arm, arm again, capture again.
+the two handles must NOT be `eq'.  a regression that re-uses the
+same timer object on re-arm could mean run-at-time stacked multiple
+fires onto one handle and we never noticed."
+  (let ((result 'fail)
+        (saved-timer session--poll-timer))
+    (condition-case err
+        (unwind-protect
+            (let ((interval-saved session-poll-interval))
+              (unwind-protect
+                  (progn
+                    (setq session-poll-interval 3600)
+                    (setq session--poll-timer nil)
+                    (session--arm-poll-timer)
+                    (let ((first session--poll-timer))
+                      (session--arm-poll-timer)
+                      (let ((second session--poll-timer))
+                        (setq result
+                              (cond
+                               ((not (timerp first))
+                                "first handle not a timer")
+                               ((not (timerp second))
+                                "second handle not a timer")
+                               ((eq first second)
+                                "re-arm reused the same timer object")
+                               (t 'pass))))))
+                (setq session-poll-interval interval-saved)))
+          (when (timerp session--poll-timer)
+            (cancel-timer session--poll-timer))
+          (setq session--poll-timer saved-timer))
+      (error
+       (panic-handle err 'freeze-test--arm-cancels-prior)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'child-exit-poller/arm/cancels-prior result)))
+
+(defun freeze-test-child-exit-poller ()
+  "Run all child-exit-poller sub-checks.  each records its own result.
+v0.6 starter (7f889c7) wired the interim /proc-poll path for SIGCHLD;
+the smoke-test only proves session.el loaded.  these sub-checks pin
+the predicate's posture-split, the sweep's transition shape, and
+the timer arming's idempotence.  the posture-split is the most
+security-relevant of the lot: a regression that fails open under
+pid1 would mask every dead child on a deployed image."
+  (interactive)
+  (cond
+   ((not (freeze-test--child-exit-poller-modules-loaded-p))
+    (freeze-test--record 'child-exit-poller 'module-not-loaded))
+   (t
+    (freeze-test--alive-nil-pid)
+    (freeze-test--alive-zero-pid)
+    (freeze-test--alive-non-integer)
+    (freeze-test--alive-pid-1)
+    (freeze-test--alive-dead-pid)
+    (freeze-test--alive-proc-missing-fails-closed-under-pid1)
+    (freeze-test--alive-proc-missing-fails-open-on-dev)
+    (freeze-test--poll-transitions-vanished-running-to-held)
+    (freeze-test--poll-does-not-touch-running-when-alive)
+    (freeze-test--poll-calls-present-login-when-empty)
+    (freeze-test--poll-skips-present-login-when-others-running)
+    (freeze-test--arm-idempotent)
+    (freeze-test--arm-cancels-prior))))
+
+;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
 
@@ -1263,6 +1767,7 @@ contract."
   (freeze-test-login-abuse)
   (freeze-test-spawn-shape)
   (freeze-test-workspace-routing)
+  (freeze-test-child-exit-poller)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
