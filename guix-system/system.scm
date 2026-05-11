@@ -222,6 +222,8 @@
     (local-file "../emacs-init/buffers/disks.el" "disks-buffer.el"))
 (define packages-buffer-el
     (local-file "../emacs-init/buffers/packages.el" "packages-buffer.el"))
+(define reconfigure-buffer-el
+    (local-file "../emacs-init/buffers/reconfigure.el" "reconfigure-buffer.el"))
 
 ;; v0.4 item 2 service definitions.  each one calls (defservice ...)
 ;; at top level, which registers with supervise.el's hash-table.  load
@@ -505,6 +507,7 @@
                                "-l" #$services-buffer-el
                                "-l" #$disks-buffer-el
                                "-l" #$packages-buffer-el
+                               "-l" #$reconfigure-buffer-el
                                ;; v0.4 item 2 services.  each defservice
                                ;; form runs at load time and populates
                                ;; supervise.el's registry.  loaded after
