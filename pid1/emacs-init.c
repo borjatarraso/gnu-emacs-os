@@ -48,6 +48,7 @@
 #include <unistd.h>
 
 #ifdef PID1_MODULE
+#include <crypt.h>
 #include <emacs-module.h>
 #include <stdint.h>
 /* required by the emacs module ABI; presence of this symbol is how
@@ -1080,17 +1081,19 @@ spawn_emacs(void)
          * via extras; for raw QEMU smoke tests with no extras we
          * still want -Q so a stale ~/.emacs.d does not derail us.
          * stack array bounded by extra_argc + 3 so no malloc here.
-         * cap is 64 so a runaway argv from a buggy gexp does not
-         * blow the stack. */
-        if (extra_argc > 64) {
+         * cap is 128 so a runaway argv from a buggy gexp does not
+         * blow the stack but we have room for the userland chain to
+         * grow as v0.4 lands more buffers.  bumped from 64 once we
+         * crossed 60+ -l files. */
+        if (extra_argc > 128) {
             char buf[96];
             snprintf(buf, sizeof buf,
-                     "pid1: extra argv truncated to 64 (was %d), check boot gexp",
+                     "pid1: extra argv truncated to 128 (was %d), check boot gexp",
                      extra_argc);
             console(buf);
-            extra_argc = 64;
+            extra_argc = 128;
         }
-        char *argv[64 + 3];
+        char *argv[128 + 3];
         int ai = 0;
         argv[ai++] = (char *)emacs_path;
         for (int i = 0; i < extra_argc; i++) argv[ai++] = extra_argv[i];
@@ -1841,6 +1844,45 @@ Fpid1_set_route_default(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
+/* (pid1-crypt PLAINTEXT SALT) -> hash string, or signal pid1-error.
+ * wraps crypt_r(3) from libxcrypt.  SALT is the full salt string
+ * (e.g. "$y$j9T$AbCdEfGhIjKlMnOp") that selects the algorithm and
+ * supplies the per-user salt bytes; the elisp side generates it.
+ * we use crypt_r to avoid the static-buffer hazard of crypt(3); on
+ * single-threaded emacs it doesn't matter for re-entrancy but the
+ * struct-on-stack pattern keeps us tidy.  errno=EINVAL on a
+ * malformed salt; crypt_r itself returns NULL and sets errno.
+ * the returned hash is owned by the crypt_data struct on our stack;
+ * we copy into a lisp string before the struct goes out of scope. */
+static emacs_value
+Fpid1_crypt(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 2)
+        return pid1_signal_errno(env, "pid1: pid1-crypt needs 2 args",
+                                 EINVAL);
+    /* crypt_data is large (~32 KiB).  module runs on emacs's main
+     * thread which has the full 8 MiB stack, so this is fine; doing
+     * it on stack avoids a malloc per call. */
+    static struct crypt_data cd;  /* zero-init via BSS, reused */
+    char plain[256];
+    char salt[128];
+    if (extract_cstring_into(env, args[0], plain, sizeof plain) < 0)
+        return Qnil;
+    if (extract_cstring_into(env, args[1], salt, sizeof salt) < 0)
+        return Qnil;
+    /* zero the struct on entry: crypt_r reuses internal state across
+     * calls if not zeroed, which would leak the previous password's
+     * salt-prefix into the next call's output on some libxcrypt
+     * builds. cheap insurance. */
+    memset(&cd, 0, sizeof cd);
+    char *out = crypt_r(plain, salt, &cd);
+    if (!out || out[0] == '*')
+        return pid1_signal_errno(env, "pid1: crypt", errno ? errno : EINVAL);
+    return env->make_string(env, out, (ptrdiff_t)strlen(out));
+}
+
 /* (pid1-fsync-dir PATH) -> t or signal pid1-error.
  * opens the directory at PATH, fsync()s it, closes. used by elisp
  * state writers (see core/state.el) after rename(.tmp, final) to make
@@ -2047,6 +2089,11 @@ emacs_module_init(struct emacs_runtime *ert)
         "Install default route via GATEWAY through IFNAME. Return t.",
         NULL);
     pid1_defalias(env, "pid1-set-route-default", srd);
+
+    emacs_value cr = env->make_function(env, 2, 2, Fpid1_crypt,
+        "Hash PLAINTEXT with SALT via crypt_r(3). Returns the encoded hash.",
+        NULL);
+    pid1_defalias(env, "pid1-crypt", cr);
 
     emacs_value fsd = env->make_function(env, 1, 1, Fpid1_fsync_dir,
         "fsync the directory at PATH. Return t. Use after rename to commit durably.",

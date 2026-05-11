@@ -136,6 +136,13 @@
     ;; sethostname(2).  must load after panic.el.
     (local-file "../emacs-init/core/hostname.el" "hostname.el"))
 
+(define passwd-el
+    ;; phase-4 item-4 core. reads /etc/passwd, /etc/shadow, /etc/group
+    ;; and atomically rewrites them via pid1-fsync-dir; hashes
+    ;; passwords through the pid1-crypt module function. must load
+    ;; after panic.el and state.el (atomic-write mirrors state-write).
+    (local-file "../emacs-init/core/passwd.el" "passwd.el"))
+
 (define boot-marker-el
     ;; smoke-test gate.  writes "geos: emacs userland up" to
     ;; /dev/console at load time and arms an exwm-init-hook that
@@ -224,6 +231,11 @@
     (local-file "../emacs-init/buffers/packages.el" "packages-buffer.el"))
 (define reconfigure-buffer-el
     (local-file "../emacs-init/buffers/reconfigure.el" "reconfigure-buffer.el"))
+(define users-buffer-el
+    ;; v0.4 item 4 buffer.  *users* mirrors /etc/passwd and offers
+    ;; a/d/p keys backed by core/passwd.el's atomic writers.  must
+    ;; load after passwd-el.
+    (local-file "../emacs-init/buffers/users.el" "users-buffer.el"))
 
 ;; v0.4 item 2 service definitions.  each one calls (defservice ...)
 ;; at top level, which registers with supervise.el's hash-table.  load
@@ -467,6 +479,7 @@
                                "-l" #$use-package-shim-el
                                "-l" #$network-el
                                "-l" #$hostname-el
+                               "-l" #$passwd-el
                                "-l" #$network-buffer-el
                                ;; phase 5c modules -l'd BEFORE
                                ;; exwm-config so the (require 'multimon)
@@ -508,6 +521,7 @@
                                "-l" #$disks-buffer-el
                                "-l" #$packages-buffer-el
                                "-l" #$reconfigure-buffer-el
+                               "-l" #$users-buffer-el
                                ;; v0.4 item 2 services.  each defservice
                                ;; form runs at load time and populates
                                ;; supervise.el's registry.  loaded after

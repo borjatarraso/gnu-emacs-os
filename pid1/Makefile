@@ -65,7 +65,10 @@ MODULE_CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
                  -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
                  -fno-strict-aliasing \
                  -fPIC -DPID1_MODULE $(EMACS_MODULE_INC)
+# -lcrypt is libxcrypt on guix; needed by Fpid1_crypt.  module-only,
+# the standalone PID 1 has no crypt path.
 MODULE_LDFLAGS := -shared
+MODULE_LIBS    := -lcrypt
 
 .PHONY: all default module clean install
 
@@ -81,7 +84,7 @@ emacs-init: emacs-init.c
 # the module is loaded into a running emacs; do not pass -static, do
 # not link any helper objects, just one translation unit -> .so.
 pid1-module.so: emacs-init.c
-	$(CC) $(MODULE_CFLAGS) $(MODULE_LDFLAGS) -o $@ $<
+	$(CC) $(MODULE_CFLAGS) $(MODULE_LDFLAGS) -o $@ $< $(MODULE_LIBS)
 
 install: emacs-init
 	install -d $(DESTDIR)$(SBINDIR)
