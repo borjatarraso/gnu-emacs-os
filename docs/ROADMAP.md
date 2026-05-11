@@ -47,10 +47,10 @@ docs/CONTRIBUTING.md, docs/USER_GUIDE.md.
 ## v0.4 in flight
 
 The detailed plan lives in [v04-plan.md](v04-plan.md). Eleven items
-ordered into four phases, with dependency notes per item. Eight items
-fully landed plus the in-place half of item 3; the first-install
-wizard, LUKS, the user-login split (deferred to v0.5), and the Hurd
-spike remain. The top-level shape:
+ordered into four phases, with dependency notes per item. Nine items
+fully landed plus the in-place half of item 3 and the documented half
+of item 9; the first-install wizard, the user-login split (deferred
+to v0.5), and the Hurd spike remain. The top-level shape:
 
 ### Phase A (foundational, done)
 
@@ -74,8 +74,9 @@ spike remain. The top-level shape:
 
 - **5. network configuration UI** (done): static IPv4 via
   `pid1-set-address` and `pid1-set-route-default` ioctls, bound to `s`
-  in `*network*`. DHCP and DNS UI deferred to v0.5; the kernel-side
-  primitives are in.
+  in `*network*`. DHCP via `services/dhcp.el` (sentinel-driven dhcpcd
+  in one-shot mode), bound to `d` in `*network*`. DNS UI deferred to
+  v0.5.
 - **6. package management buffer** (done): `*packages*` with install
   and remove driven by `guix package` via `make-process`, output
   streamed into the buffer so the user sees the build log.
@@ -93,8 +94,15 @@ spike remain. The top-level shape:
   runs `guix system reconfigure` and streams the build log has
   shipped. The bare-metal first-install wizard (partition, mkfs,
   copy closure, install grub) is still in flight.
-- **9. disk encryption (LUKS at boot)** (not done): cryptsetup into
-  the initrd, passphrase prompt before pid1 takes over. Deferred.
+- **9. disk encryption (LUKS at boot)** (documented): Guix's stock
+  initrd already handles LUKS via `mapped-devices`, so this item
+  shrinks to docs. The required edits to `system.scm` (mapped-devices,
+  file-systems pointing at `/dev/mapper/geos-root`, initrd-modules
+  extended with dm-crypt+aes+xts) live in
+  [system-luks-snippet.scm](../guix-system/system-luks-snippet.scm).
+  The install workflow is in [INSTALL.md](INSTALL.md#installing-with-an-encrypted-root-luks).
+  QEMU smoke-test does not exercise the LUKS path; integration test
+  on real hardware lives with the bare-metal install wizard.
 
 ### Phase D (long tail)
 

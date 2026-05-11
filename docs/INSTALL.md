@@ -169,6 +169,65 @@ Last good qcow2:
 Boot it the same way the harness boots the ISO, swap `-cdrom` for
 `-drive file=...,format=qcow2` and drop `-boot d`.
 
+## installing with an encrypted root (LUKS)
+
+Bare-metal GEOS can boot from a LUKS-encrypted root. The flow piggy-
+backs on Guix's stock initrd, which already knows how to prompt on
+`/dev/console` for a passphrase and unlock a `mapped-device`. No
+custom initrd helper is required.
+
+The exact edits to `guix-system/system.scm` live in
+`guix-system/system-luks-snippet.scm`. The high-level steps:
+
+1. Boot a Guix live ISO on the target hardware.
+
+2. Format the target partition as LUKS2 and record its UUID:
+
+   ```
+   cryptsetup luksFormat --type luks2 /dev/sdaN
+   cryptsetup luksUUID /dev/sdaN
+   ```
+
+3. Open it once so you can put a filesystem inside:
+
+   ```
+   cryptsetup open /dev/sdaN geos-root
+   mkfs.ext4 -L geos-root /dev/mapper/geos-root
+   ```
+
+4. Mount `/dev/mapper/geos-root` at `/mnt`. Copy your edited
+   `system.scm` (with the three edits from
+   `system-luks-snippet.scm`: `mapped-devices`, `file-systems`
+   pointing at `/dev/mapper/geos-root`, and `initrd-modules`
+   extended with `dm-crypt aes aes_generic xts sha256_generic`).
+
+5. Replace `LUKS-UUID-HERE` in `mapped-devices` with the UUID you
+   captured in step 2.
+
+6. Run `guix system init /mnt/etc/system.scm /mnt`. This populates
+   `/gnu/store` on the new root, writes the bootloader, and exits.
+
+7. Reboot. GRUB hands off to the kernel, the initrd prompts you for
+   the LUKS passphrase on `/dev/console`, the mapper device opens,
+   root mounts, PID 1 (`emacs-init`) takes over.
+
+Caveats:
+
+  - Detached headers are out of scope for v0.4. The header stays on
+    the encrypted partition.
+  - Passphrase only. No key-file, no escrow, no TPM-sealed unlock.
+  - On a libre-only laptop with no AES-NI the boot is slower but
+    workable. XTS-AES at 256 bits is the default.
+  - Unlocking additional LUKS volumes (data partitions, external
+    drives) from inside running GEOS is a v0.5 follow-up. v0.4 only
+    covers the root.
+  - The bare-metal install wizard (v0.4 item 3 in-flight) will
+    eventually automate steps 2-6. For now they are manual.
+
+QEMU smoke tests do NOT exercise this path. `system.scm` ships
+without `mapped-devices` so the headless test stays simple. The
+LUKS path is opt-in by edit.
+
 ## what to do once it boots
 
 You land in EXWM with a single Emacs frame, four virtual workspaces,
