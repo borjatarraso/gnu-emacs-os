@@ -300,13 +300,13 @@ session.el present."
     (error
      (panic-handle err 'exwm-config--maybe-route-user-window))))
 
-;; wire the hook at top level so a re-load of this file re-installs it.
-;; add-hook is idempotent on eq function symbols, so re-loading does not
-;; stack duplicates. guard with boundp so this file still loads cleanly
-;; on a dev host where exwm has never been required.
-(when (boundp 'exwm-manage-finish-hook)
-  (add-hook 'exwm-manage-finish-hook
-            #'exwm-config--maybe-route-user-window))
+;; the hook attachment lives down inside the (require 'exwm) branch
+;; below (search "exwm-manage-finish-hook"). an earlier draft wired it
+;; here at top level under a (boundp ...) guard, but exwm-config.el is
+;; loaded BEFORE (require 'exwm) runs, so the boundp check returned nil
+;; and the hook was silently never installed. caught 2026-05-12 after
+;; a fresh-boot test showed `geos-user-tester' windows landing on
+;; workspace 0 with no routing trace.
 
 ;; (B-fullscreen-hang, 2026-05-10) earlier draft mutated
 ;; initial-frame-alist and default-frame-alist with (fullscreen . fullboth)
@@ -360,6 +360,13 @@ session.el present."
                 (,(kbd "s-2") . exwm-config-switch-workspace-2)
                 (,(kbd "s-3") . exwm-config-switch-workspace-3)
                 ([?\s-&] . exwm-config--launch)))
+        ;; install the per-user routing hook NOW, after (require 'exwm)
+        ;; has defined `exwm-manage-finish-hook' but before (exwm-enable)
+        ;; starts managing windows. add-hook is idempotent on eq function
+        ;; symbols so re-running this branch (e.g. on a manual reload)
+        ;; does not stack duplicates.
+        (add-hook 'exwm-manage-finish-hook
+                  #'exwm-config--maybe-route-user-window)
         (exwm-config--trace "calling exwm-enable")
         ;; finally hand the keyboard and root window over to exwm.
         ;; this is the line that makes emacs into a window manager.
