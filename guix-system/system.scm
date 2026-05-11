@@ -27,6 +27,8 @@
 ;; image, the shepherd gexp at the tail is dead code.
 
 (use-modules (gnu)
+             (gnu bootloader)
+             (gnu bootloader grub)
              (gnu packages emacs)
              (gnu packages emacs-xyz)
              (gnu packages fonts)
@@ -35,7 +37,23 @@
              (gnu packages xorg)
              (gnu services)
              (gnu services base)
+             (gnu system)
              (guix gexp))
+
+;; v0.4 item 10: bootable-kernel-arguments is what builds the
+;; root=<dev> + gnu.system=$out + gnu.load=$out/boot triple that
+;; every Linux entry in /boot/grub/grub.cfg has to carry.  it is not
+;; exported from (gnu system) (the public API is
+;; operating-system-kernel-arguments, which also splices in the user
+;; kernel-arguments field), but the console-mode menu-entry below has
+;; to splice the SAME bootable triple in front of a DIFFERENT user
+;; kernel-arguments list.  using the public getter would either
+;; double-count the user args or force a second os derivation just to
+;; get a clean bootable triple.  upstream itself reaches in via @@ in
+;; gnu/machine/ssh.scm for exactly this reason, so the precedent is
+;; there.
+(define geos-bootable-kernel-arguments
+    (@@ (gnu system) bootable-kernel-arguments))
 
 (define emacs-init-binary
     ;; phase-1 PID 1 binary as a store object. referenced both by the
@@ -525,166 +543,320 @@
                           (sleep 60)
                           (loop)))))
 
+;; v0.4 item 10: ONE binding, two GRUB menu entries.
+;;
+;; geos-user-kernel-arguments is the user-facing slice of the kernel
+;; cmdline: console wiring, geos.mode token, panic/oops behaviour,
+;; %default-kernel-arguments.  it is a procedure of one symbol (the
+;; mode), so the operating-system record below can call it with 'ui
+;; (the default boot) and the console-mode menu-entry below can call
+;; it with 'console without either side drifting from the other.
+;;
+;; previously this list was inlined in the operating-system's
+;; kernel-arguments field with "geos.mode=ui" hard-coded, and the
+;; only way to land in console mode was to press `e' at GRUB and
+;; surgically swap the token.  now the GRUB menu carries both modes
+;; as first-class entries, sharing this binding so a future change
+;; to (for example) panic= shows up in both menu entries instead of
+;; only in the auto-generated UI one.
+;;
+;; on the trailing `console=' precedence: linux uses the LAST
+;; console= as the primary /dev/console, so serial is last to make
+;; -serial mon:stdio capture PID 1 output.  on real hardware we will
+;; flip these so tty1 wins.
+;;
+;; phase 5c update: nomodeset and vga=0x317 are gone.  with
+;; virtio_gpu loaded from initrd-modules we WANT KMS up so Xorg's
+;; modesetting driver has a /dev/dri/card0 to bind.  vesafb is no
+;; longer the rendering surface; virtio-gpu's drm fbcon is.
+(define (geos-user-kernel-arguments mode)
+    (cons* "console=tty1"
+           "console=ttyS0,115200"
+           (string-append "geos.mode=" (symbol->string mode))
+           ;; (B3, audit round-5 2026-05-10) emacs-init.c documents
+           ;; reliance on `panic=10' so the kernel reboots after a
+           ;; supervisor-side _exit(127).  without panic= the kernel
+           ;; locks indefinitely on the "init exited" panic and the
+           ;; VM/host needs an external power cycle.  oops=panic
+           ;; promotes a kernel oops to a panic so the same recovery
+           ;; path catches both.
+           "panic=10"
+           "oops=panic"
+           %default-kernel-arguments))
+
+;; phase 5c: load virtio_gpu in the initrd so /dev/dri/card0 exists
+;; before pid1 spawns Xorg. virtio_pci is needed because virtio_gpu
+;; rides PCI; drm is pulled in transitively but listing it explicitly
+;; documents intent. without these, modesetting would log
+;; "no devices detected" and Xorg would die at AddScreen.
+;;
+;; psmouse + usbhid: the boot dump showed the kernel only enumerated
+;; the AT keyboard (channel 0 of i8042) and not the PS/2 mouse
+;; (channel 1). that is because psmouse is built as a module in the
+;; default linux-libre and we have no udev to modprobe it on demand.
+;; pulling it into the initrd forces the mouse to appear at
+;; /dev/input/eventN by the time pid1 spawns Xorg. usbhid covers the
+;; -device usb-tablet route from the qemu side, which is the more
+;; reliable VM mouse path long term.
+;;
+;; v0.4 item 10: hoisted to a top-level binding so the
+;; operating-system's initrd-modules field and the console-mode
+;; menu-entry's initrd reference cannot drift.  the auto-generated
+;; UI entry pulls the initrd via operating-system-initrd-file (which
+;; bakes in this list); the explicit console entry references the
+;; SAME initrd derivation by reading it back off base-os, so Guix
+;; produces ONE initrd derivation that both grub.cfg lines point at.
+(define %geos-initrd-modules
+    (cons* "virtio_pci"
+           "virtio_gpu"
+           "drm"
+           "psmouse"
+           "usbhid"
+           %base-initrd-modules))
+
+;; v0.4 item 10: shared root-file-system declaration so base-os/skeleton
+;; below and the final base-os agree byte-for-byte on every field
+;; except `device'.  if these drift, operating-system-uuid hashes a
+;; different file-system-digest than what `operating-system-for-image'
+;; sees, the predicted UUID stops matching the image's actual UUID, and
+;; the console-mode menu entry boots with the wrong root= and lands in
+;; the initrd's emergency shell.
+(define %geos-root-mount-point "/")
+(define %geos-root-fs-type "ext4")
+
+;; base-os/skeleton mirrors the os that `operating-system-for-image'
+;; constructs internally as the input to root-uuid: same hostname,
+;; same services, same file-systems EXCEPT the root device, which is
+;; "/dev/placeholder" (the literal string upstream uses).  that lets us
+;; pre-compute the same deterministic UUID upstream will compute and
+;; bake it into the real base-os below as the root device, so the
+;; auto-generated UI entry's initrd derivation is identical to the
+;; explicit console entry's initrd derivation: ONE initrd in the
+;; closure, both menu entries point at it, the v0.4 item 10 spec's
+;; "same initrd" constraint holds.  base-os/skeleton is NEVER fed to
+;; `guix system image' on its own; it exists only so we can hash it.
+(define base-os/skeleton
+  (operating-system
+    (host-name "lambda")
+    (timezone "Europe/Madrid")
+    (locale "en_US.utf8")
+
+    ;; v0.4 item 10: this label is what the auto-generated GRUB entry
+    ;; shows.  match the explicit console entry's label style so the
+    ;; menu reads as a coherent pair.
+    (label "GNU/Emacs OS (UI mode, Xorg + EXWM)")
+
+    (kernel linux-libre)
+
+    ;; no init= here on purpose. guix's initrd ignores the kernel
+    ;; cmdline init= and execs gnu.load=...boot, so any value we put
+    ;; here would be a lie. the real handover happens in
+    ;; emacs-init-boot-service above.
+    ;;
+    ;; geos.mode=ui is the default.  PID 1 reads this from /proc/cmdline
+    ;; before deciding whether to spawn Xorg.  UI mode brings up Xorg +
+    ;; EXWM and runs Emacs as an X client; the GRUB menu now exposes a
+    ;; console-mode entry one arrow-key + Enter away that flips this token.
+    (kernel-arguments (geos-user-kernel-arguments 'ui))
+
+    (initrd-modules %geos-initrd-modules)
+
+    ;; placeholder bootloader.  the inherited form below replaces this
+    ;; with a bootloader-configuration that adds the console-mode
+    ;; menu-entry on top of the auto-generated UI entry.  we cannot put
+    ;; the real menu-entries here because they need to reference base-os
+    ;; itself for kernel-file / initrd-file.
+    (bootloader (bootloader-configuration
+                  (bootloader grub-bootloader)
+                  (targets '("/dev/sda"))))
+
+    ;; root device is the literal "/dev/placeholder" because that is
+    ;; exactly what `operating-system-for-image' substitutes before
+    ;; calling operating-system-uuid.  matching the substitution here
+    ;; means the deterministic UUID we compute below = the one upstream
+    ;; computes.  the real base-os swaps this string for the UUID.
+    (file-systems
+     (cons (file-system
+             (mount-point %geos-root-mount-point)
+             (device "/dev/placeholder")
+             (type %geos-root-fs-type))
+           %base-file-systems))
+
+    ;; %base-user-accounts already includes root and the system service
+    ;; users (daemon, nobody, etc.). adding our own root-account record
+    ;; on top of that triggers `accounts appear more than once: root'
+    ;; from guix system, so we just inherit the base set verbatim.
+    (users %base-user-accounts)
+
+    ;; emacs is required, base packages are kept for the install-time
+    ;; coreutils and bash (bash provides /bin/sh until phase 3 ships the
+    ;; shstub binary; see exceptions.scm when that lands). nothing in
+    ;; this list is meant to be a "user" package, the whole user
+    ;; environment is emacs.
+    ;;
+    ;; phase 5a adds:
+    ;;   xorg-server         the X server we fork in pid1 before emacs.
+    ;;                       phase 5c uses the modesetting driver (built
+    ;;                       into xorg-server) against virtio-gpu KMS, so
+    ;;                       no separate xf86-video-* package is needed.
+    ;;   xf86-input-evdev    input driver. opens /dev/input/event* via
+    ;;                       raw ioctl, no udev required. xorg.conf
+    ;;                       lists explicit InputDevice sections with
+    ;;                       static device paths.
+    ;;   xkbcomp             Xorg shells out to this at startup to compile
+    ;;                       the keymap. without it, Xorg dies during
+    ;;                       initial keymap load with "Couldn't load XKB
+    ;;                       keymap, falling back to pre-XKB keymap".
+    ;;   xkeyboard-config    keymap data files xkbcomp reads.
+    ;;   xterm               the canary client. start-process'd from exwm
+    ;;                       at the M-x prompt to verify wm is alive.
+    ;;   emacs-exwm          the wm itself.
+    ;; phase 5b adds:
+    ;;   emacs-magit         git porcelain. magit talks to git via
+    ;;                       process-file, so no shell-out from our code.
+    ;;   notmuch             the C indexer + notmuch(1) cli. emacs-notmuch
+    ;;                       hard-depends on the binary being on PATH.
+    ;;   emacs-notmuch       the elisp UI that fronts the indexer.
+    ;;   emacs-pdf-tools     PDF reader. ships the epdfinfo helper that
+    ;;                       talks to poppler; Guix builds it at package
+    ;;                       time so we get a working binary out of the box.
+    ;; dired, eshell, eww, erc and org are in-tree on emacs 30 and need
+    ;; no extra package.
+    ;; phase 5c adds:
+    ;;   font-google-noto             monospace + Latin coverage. the
+    ;;                                emacs-init/wm/fonts.el default family
+    ;;                                falls back to DejaVu, which Guix
+    ;;                                ships via the noto closure's deps,
+    ;;                                so this package gives us both at
+    ;;                                once.
+    ;;   font-google-noto-emoji       emoji glyphs (color, COLR/CPAL).
+    ;;                                without harfbuzz on the emacs build
+    ;;                                they render as outlines, but they
+    ;;                                resolve to a glyph either way.
+    ;;   font-google-noto-sans-cjk    pan-CJK coverage (SC/TC/JP/KR in
+    ;;                                one closure).
+    (packages (cons* emacs
+                     xorg-server
+                     xf86-input-evdev
+                     xkbcomp
+                     xkeyboard-config
+                     xterm
+                     emacs-exwm
+                     emacs-magit
+                     notmuch
+                     emacs-notmuch
+                     emacs-pdf-tools
+                     font-google-noto
+                     font-google-noto-emoji
+                     font-google-noto-sans-cjk
+                     %base-packages))
+
+    ;; %base-services is kept because removing shepherd-root-service-type
+    ;; outright breaks any service that extends it (login, mingetty,
+    ;; nscd, guix-daemon, ...). we leave the whole shepherd graph in the
+    ;; store and simply never reach it: emacs-init-boot-service execs
+    ;; /sbin/emacs-init before the shepherd exec gexp runs. shepherd
+    ;; lives in the store as inert bits.
+    ;;
+    ;; extra-special-file is a service-producing procedure in guix, not
+    ;; a record field, so the wiring is done here. it places the
+    ;; phase-1 binary at /sbin/emacs-init via a symlink into the store.
+    ;;
+    ;; build order: the local-file below references ../pid1/emacs-init,
+    ;; which means `make -C pid1` MUST run before `guix system image
+    ;; system.scm`. if you skip the make, guix errors with "no such
+    ;; file" and the boot image is never produced. that is the intended
+    ;; failure mode for phase 1; phase 2 replaces this with a real
+    ;; package definition so the bits are produced by guix.
+    (services
+     (cons* emacs-init-boot-service
+            (extra-special-file "/sbin/emacs-init" emacs-init-binary)
+            %base-services))
+
+    (name-service-switch %mdns-host-lookup-nss)))
+
+;; v0.4 item 10: the deterministic root-device UUID upstream's
+;; operating-system-for-image will compute.  the inputs to
+;; operating-system-uuid are the file-systems digest list, hostname,
+;; and service-type names.  base-os/skeleton is byte-equal to the
+;; intermediate os upstream constructs (same hostname, same services,
+;; same file-systems, root device = "/dev/placeholder"), so the hash
+;; matches.  if upstream ever changes the hash recipe, the smoke test
+;; will catch it: the kernel cmdline's root= UUID will not match the
+;; partition UUID and mount will fail.
+(define %geos-root-uuid
+  (operating-system-uuid base-os/skeleton 'dce))
+
+;; base-os is what the rest of the file (bootloader menu-entries) and
+;; what `guix system image' both consume.  the only difference from
+;; base-os/skeleton is the root file-system's device, which is now the
+;; predicted UUID instead of the placeholder string.  consequence:
+;;   - operating-system-initrd-file base-os bakes a mount table that
+;;     looks for the root partition by uuid.
+;;   - image-with-os* reads (file-system-device root-file-system) to
+;;     stamp the partition's uuid field, so the on-disk partition
+;;     header carries the same uuid the initrd will look for.
+;;   - operating-system-for-image runs its own placeholder-then-uuid
+;;     dance, computes the SAME uuid (because the intermediate os it
+;;     builds is identical to base-os/skeleton), and ends up returning
+;;     an os equivalent to base-os.  net effect: one initrd derivation,
+;;     one system derivation, both menu entries point at them.
+(define base-os
+  (operating-system
+    (inherit base-os/skeleton)
+    (file-systems
+     (cons (file-system
+             (mount-point %geos-root-mount-point)
+             (device %geos-root-uuid)
+             (type %geos-root-fs-type))
+           %base-file-systems))))
+
+;; v0.4 item 10: the final value of this file.  inherits everything
+;; from base-os and only overrides the bootloader so the
+;; menu-entries field can reference base-os itself for kernel and
+;; initrd files.  what GRUB ends up writing:
+;;
+;;   menuentry "GNU/Emacs OS (UI mode, Xorg + EXWM)" { ...ui args... }     [default]
+;;   menuentry "GNU/Emacs OS (Console mode, framebuffer Emacs)" { ...console args... }
+;;
+;; the auto-generated UI entry comes from operating-system-bootcfg's
+;; boot-parameters->menu-entry pass; the console entry below is
+;; appended afterwards by grub-configuration-file (it concatenates
+;; system entries and bootloader-configuration menu-entries in that
+;; order).  default-entry stays at 0 so an unattended boot lands on
+;; UI as it always has.
+;;
+;; both entries reference (operating-system-kernel-file base-os) and
+;; (operating-system-initrd-file base-os): one kernel binary, one
+;; initrd derivation, two cmdlines.  if a future reconfigure picks
+;; up a newer linux-libre or adds an initrd module, both entries
+;; follow.
+;;
+;; the bootable triple (root=, gnu.system=, gnu.load=) is what
+;; Guix's boot script needs to find /run/booted-system.  for the
+;; auto-entry, operating-system-bootcfg builds this triple itself;
+;; for the console entry we have to splice it in front of the user
+;; args by hand, which is what geos-bootable-kernel-arguments at the
+;; top of this file is for.  version is hard-coded to 1 to match
+;; %boot-parameters-version (the version where gnu.load/gnu.system
+;; replaced --load/--system); bumping requires a coordinated change
+;; on the upstream side anyway.
 (operating-system
-  (host-name "lambda")
-  (timezone "Europe/Madrid")
-  (locale "en_US.utf8")
-
-  (kernel linux-libre)
-
-  ;; no init= here on purpose. guix's initrd ignores the kernel
-  ;; cmdline init= and execs gnu.load=...boot, so any value we put
-  ;; here would be a lie. the real handover happens in
-  ;; emacs-init-boot-service above. linux uses the LAST console= as
-  ;; the primary /dev/console; serial last so /boot-vm captures PID 1
-  ;; output over -serial mon:stdio. on real hardware we will flip
-  ;; these so tty1 wins.
-  ;;
-  ;; phase 5c update: nomodeset and vga=0x317 are gone. with virtio_gpu
-  ;; loaded from initrd-modules, we WANT KMS up so Xorg's modesetting
-  ;; driver has a /dev/dri/card0 to bind. vesafb is no longer the
-  ;; rendering surface; virtio-gpu's drm fbcon is.
-  ;; geos.mode=ui is the default. PID 1 reads this from /proc/cmdline
-  ;; before deciding whether to spawn Xorg. UI mode brings up Xorg +
-  ;; EXWM and runs Emacs as an X client; pass geos.mode=console at
-  ;; the GRUB editor (or swap the token here and rebuild) to land
-  ;; straight on /dev/console instead.
-  (kernel-arguments
-   (cons* "console=tty1"
-          "console=ttyS0,115200"
-          "geos.mode=ui"
-          ;; (B3, audit round-5 2026-05-10) emacs-init.c documents
-          ;; reliance on `panic=10' so the kernel reboots after a
-          ;; supervisor-side _exit(127).  without panic= the kernel
-          ;; locks indefinitely on the "init exited" panic and the
-          ;; VM/host needs an external power cycle.  oops=panic
-          ;; promotes a kernel oops to a panic so the same recovery
-          ;; path catches both.
-          "panic=10"
-          "oops=panic"
-          %default-kernel-arguments))
-
-  ;; phase 5c: load virtio_gpu in the initrd so /dev/dri/card0 exists
-  ;; before pid1 spawns Xorg. virtio_pci is needed because virtio_gpu
-  ;; rides PCI; drm is pulled in transitively but listing it explicitly
-  ;; documents intent. without these, modesetting would log
-  ;; "no devices detected" and Xorg would die at AddScreen.
-  ;;
-  ;; psmouse + usbhid: the boot dump showed the kernel only enumerated
-  ;; the AT keyboard (channel 0 of i8042) and not the PS/2 mouse
-  ;; (channel 1). that is because psmouse is built as a module in the
-  ;; default linux-libre and we have no udev to modprobe it on demand.
-  ;; pulling it into the initrd forces the mouse to appear at
-  ;; /dev/input/eventN by the time pid1 spawns Xorg. usbhid covers the
-  ;; -device usb-tablet route from the qemu side, which is the more
-  ;; reliable VM mouse path long term.
-  (initrd-modules (cons* "virtio_pci"
-                         "virtio_gpu"
-                         "drm"
-                         "psmouse"
-                         "usbhid"
-                         %base-initrd-modules))
-
-  (bootloader (bootloader-configuration
-                (bootloader grub-bootloader)
-                (targets '("/dev/sda"))))
-
-  (file-systems
-   (cons (file-system
-           (mount-point "/")
-           (device "/dev/sda1")
-           (type "ext4"))
-         %base-file-systems))
-
-  ;; %base-user-accounts already includes root and the system service
-  ;; users (daemon, nobody, etc.). adding our own root-account record
-  ;; on top of that triggers `accounts appear more than once: root'
-  ;; from guix system, so we just inherit the base set verbatim.
-  (users %base-user-accounts)
-
-  ;; emacs is required, base packages are kept for the install-time
-  ;; coreutils and bash (bash provides /bin/sh until phase 3 ships the
-  ;; shstub binary; see exceptions.scm when that lands). nothing in
-  ;; this list is meant to be a "user" package, the whole user
-  ;; environment is emacs.
-  ;;
-  ;; phase 5a adds:
-  ;;   xorg-server         the X server we fork in pid1 before emacs.
-  ;;                       phase 5c uses the modesetting driver (built
-  ;;                       into xorg-server) against virtio-gpu KMS, so
-  ;;                       no separate xf86-video-* package is needed.
-  ;;   xf86-input-evdev    input driver. opens /dev/input/event* via
-  ;;                       raw ioctl, no udev required. xorg.conf
-  ;;                       lists explicit InputDevice sections with
-  ;;                       static device paths.
-  ;;   xkbcomp             Xorg shells out to this at startup to compile
-  ;;                       the keymap. without it, Xorg dies during
-  ;;                       initial keymap load with "Couldn't load XKB
-  ;;                       keymap, falling back to pre-XKB keymap".
-  ;;   xkeyboard-config    keymap data files xkbcomp reads.
-  ;;   xterm               the canary client. start-process'd from exwm
-  ;;                       at the M-x prompt to verify wm is alive.
-  ;;   emacs-exwm          the wm itself.
-  ;; phase 5b adds:
-  ;;   emacs-magit         git porcelain. magit talks to git via
-  ;;                       process-file, so no shell-out from our code.
-  ;;   notmuch             the C indexer + notmuch(1) cli. emacs-notmuch
-  ;;                       hard-depends on the binary being on PATH.
-  ;;   emacs-notmuch       the elisp UI that fronts the indexer.
-  ;;   emacs-pdf-tools     PDF reader. ships the epdfinfo helper that
-  ;;                       talks to poppler; Guix builds it at package
-  ;;                       time so we get a working binary out of the box.
-  ;; dired, eshell, eww, erc and org are in-tree on emacs 30 and need
-  ;; no extra package.
-  ;; phase 5c adds:
-  ;;   font-google-noto             monospace + Latin coverage. the
-  ;;                                emacs-init/wm/fonts.el default family
-  ;;                                falls back to DejaVu, which Guix
-  ;;                                ships via the noto closure's deps,
-  ;;                                so this package gives us both at
-  ;;                                once.
-  ;;   font-google-noto-emoji       emoji glyphs (color, COLR/CPAL).
-  ;;                                without harfbuzz on the emacs build
-  ;;                                they render as outlines, but they
-  ;;                                resolve to a glyph either way.
-  ;;   font-google-noto-sans-cjk    pan-CJK coverage (SC/TC/JP/KR in
-  ;;                                one closure).
-  (packages (cons* emacs
-                   xorg-server
-                   xf86-input-evdev
-                   xkbcomp
-                   xkeyboard-config
-                   xterm
-                   emacs-exwm
-                   emacs-magit
-                   notmuch
-                   emacs-notmuch
-                   emacs-pdf-tools
-                   font-google-noto
-                   font-google-noto-emoji
-                   font-google-noto-sans-cjk
-                   %base-packages))
-
-  ;; %base-services is kept because removing shepherd-root-service-type
-  ;; outright breaks any service that extends it (login, mingetty,
-  ;; nscd, guix-daemon, ...). we leave the whole shepherd graph in the
-  ;; store and simply never reach it: emacs-init-boot-service execs
-  ;; /sbin/emacs-init before the shepherd exec gexp runs. shepherd
-  ;; lives in the store as inert bits.
-  ;;
-  ;; extra-special-file is a service-producing procedure in guix, not
-  ;; a record field, so the wiring is done here. it places the
-  ;; phase-1 binary at /sbin/emacs-init via a symlink into the store.
-  ;;
-  ;; build order: the local-file below references ../pid1/emacs-init,
-  ;; which means `make -C pid1` MUST run before `guix system image
-  ;; system.scm`. if you skip the make, guix errors with "no such
-  ;; file" and the boot image is never produced. that is the intended
-  ;; failure mode for phase 1; phase 2 replaces this with a real
-  ;; package definition so the bits are produced by guix.
-  (services
-   (cons* emacs-init-boot-service
-          (extra-special-file "/sbin/emacs-init" emacs-init-binary)
-          %base-services))
-
-  (name-service-switch %mdns-host-lookup-nss))
+  (inherit base-os)
+  (bootloader
+    (bootloader-configuration
+      (bootloader grub-bootloader)
+      (targets '("/dev/sda"))
+      (menu-entries
+        (let* ((root-fs (operating-system-root-file-system base-os))
+               (root-dev (file-system-device root-fs))
+               (bootable (geos-bootable-kernel-arguments
+                          base-os root-dev 1)))
+          (list
+            (menu-entry
+              (label "GNU/Emacs OS (Console mode, framebuffer Emacs)")
+              (linux (operating-system-kernel-file base-os))
+              (initrd (operating-system-initrd-file base-os))
+              (linux-arguments
+                (append bootable
+                        (geos-user-kernel-arguments 'console))))))))))
