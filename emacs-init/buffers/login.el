@@ -185,11 +185,52 @@ also trims `login--bad-attempts' to the window as a side effect."
                       login--throttle-cap))
       (insert "  press r to retry from the username prompt.\n")))))
 
+(defun login--format-error (reason)
+  "Render REASON as a one-line human sentence.
+REASON is whatever ended up in `login--last-error'.  the structured
+shapes come from `session--last-spawn-error' (set in core/session.el)
+plus a legacy fallback for pre-W5 images.  unknown shapes fall
+through to a generic `internal failure:' line so an operator still
+sees something printable.  this helper MUST NOT raise: a malformed
+reason is itself a symptom we want rendered, not a second crash."
+  (condition-case _
+      (pcase reason
+        (`(unknown-user ,name)
+         (format "no account for %s" name))
+        (`(home-bad ,name ,home not-absolute)
+         (format "home path for %s is not absolute: %s" name home))
+        (`(home-bad ,name ,home missing)
+         (format "home directory for %s is missing: %s" name home))
+        (`(home-bad ,name ,home not-a-directory)
+         (format "home path for %s exists but is not a directory: %s"
+                 name home))
+        (`(home-bad ,name ,home unreadable)
+         (format "home directory for %s is unreadable: %s" name home))
+        (`(home-bad ,name ,home ,other)
+         ;; defensive default: if session--home-ok-p grows a new
+         ;; failure symbol we still print something useful.
+         (format "home directory for %s failed sanity check (%s): %s"
+                 name other home))
+        (`(spawn-child-failed ,name)
+         (format (concat "spawn failed for %s (parent reject or child "
+                         "execve failed); see *panic* for the exit signal")
+                 name))
+        (`(session-spawn-returned-nil ,name)
+         (format (concat "spawn for %s returned nil with no structured "
+                         "reason; this image predates W5")
+                 name))
+        (_
+         (format "internal failure: %S" reason)))
+    ;; pcase itself raising would be a bug, but if it does we still
+    ;; want a printable string rather than blowing up the renderer.
+    (error (format "internal failure: %S" reason))))
+
 (defun login--render-error ()
   "Spawn-or-other internal failure."
   (insert "  r retry    q quit\n\n")
   (insert "=== login error ===\n\n")
-  (insert (format "  reason: %S\n\n" login--last-error))
+  (insert "  " (login--format-error login--last-error) "\n\n")
+  (insert (format "  reason: %S\n" login--last-error))
   (insert "  this is not a bad-password error; see *panic* for detail.\n")
   (insert "  press r to retry.\n"))
 
