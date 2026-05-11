@@ -482,6 +482,63 @@
                            ((zero? (logand (stat:perms st) #o111))
                             (console-write
                              "pid1: /bin/sh post-swap check failed (no executable bit)\n"))))
+                        ;; lay down /etc/geos/user-init.el -> store path.
+                        ;; same activation-bypass reason as the /bin/sh
+                        ;; swap above: extra-special-file in the system
+                        ;; record never materialises because Guix's
+                        ;; activate.scm does not run.  the per-user
+                        ;; emacs is spawned with `-l /etc/geos/user-init.el'
+                        ;; from session--child-argv; if that file is
+                        ;; missing emacs exits and the spawn becomes a
+                        ;; zombie.  same crash-safe pattern: mkdir -p
+                        ;; the parent, swap via temp + rename, log on
+                        ;; failure.  /etc must exist (Guix's rootfs
+                        ;; layout includes it) but /etc/geos is created
+                        ;; here.
+                        (catch 'system-error
+                          (lambda () (mkdir "/etc/geos"))
+                          (lambda _ #t))
+                        (let ((tmp "/etc/geos/user-init.el.geos-new"))
+                          (catch 'system-error
+                            (lambda ()
+                              (when (file-exists? tmp)
+                                (delete-file tmp))
+                              (symlink #$user-init-el tmp)
+                              (rename-file tmp "/etc/geos/user-init.el"))
+                            (lambda (key . args)
+                              (console-write
+                               (string-append
+                                "pid1: /etc/geos/user-init.el swap failed: "
+                                (object->string args) "\n")))))
+                        ;; lay down /usr/bin/emacs -> emacs/bin/emacs.
+                        ;; same activation-bypass: session--child-program
+                        ;; in core/session.el hard-codes /usr/bin/emacs as
+                        ;; the absolute path passed to pid1-spawn-as-uid;
+                        ;; without this swap execve(2) in the child fails
+                        ;; ENOENT and the per-user emacs never starts
+                        ;; (login UI shows "child pid: (stubbed)" because
+                        ;; the poller clears the pid on early exit).
+                        ;; mkdir -p /usr and /usr/bin first because the
+                        ;; rootfs Guix lays down does not include them.
+                        (catch 'system-error
+                          (lambda () (mkdir "/usr"))
+                          (lambda _ #t))
+                        (catch 'system-error
+                          (lambda () (mkdir "/usr/bin"))
+                          (lambda _ #t))
+                        (let ((tmp "/usr/bin/emacs.geos-new"))
+                          (catch 'system-error
+                            (lambda ()
+                              (when (file-exists? tmp)
+                                (delete-file tmp))
+                              (symlink #$(file-append emacs "/bin/emacs")
+                                       tmp)
+                              (rename-file tmp "/usr/bin/emacs"))
+                            (lambda (key . args)
+                              (console-write
+                               (string-append
+                                "pid1: /usr/bin/emacs swap failed: "
+                                (object->string args) "\n")))))
                         ;; execl replaces this process.  if it returns
                         ;; or raises, the binary is missing or not
                         ;; executable, and falling through would let
