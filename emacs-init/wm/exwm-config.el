@@ -19,6 +19,7 @@
 ;;     would be bad.
 
 (require 'panic)
+(require 'cl-lib)  ; cl-incf in the B1 bounded grow loop
 
 ;; phase 5a debug crutch: scribble every load-time event to /dev/console
 ;; so the serial log on -serial mon:stdio captures it. removed once the
@@ -148,6 +149,153 @@ or nil when there was nothing to load."
   (condition-case err
       (exwm-workspace-switch-create 3)
     (error (panic-handle err '(exwm-workspace-switch . 3)))))
+
+;; v0.6 sub-feature (B): per-user emacs windows arrive with
+;; WM_CLASS first field "geos-user-NAME" because session--child-argv
+;; passes --name geos-user-NAME on the per-user emacs command line.
+;; exwm exposes that as `exwm-instance-name' inside the X buffer.
+;; route each distinct NAME to its own workspace so the supervisor's
+;; root view (workspace 0) stays uncluttered and switching users is
+;; one `s-N' away.
+;;
+;; design note: i deliberately do NOT bump the default
+;; `exwm-workspace-number' (still 4 from phase 5a). instead the
+;; allocator calls `exwm-workspace-add' on demand to grow past the
+;; current count. rationale: setting a large default workspace count
+;; up front allocates frames i may never use, and changing
+;; exwm-workspace-number after exwm-enable is the part of the api
+;; the docstring tells you not to touch. grow-on-first-sighting is
+;; the cheaper move and matches how a typical session unfolds (one
+;; user logs in, gets workspace 1, second user shows up later).
+(defvar exwm-config--user-workspace (make-hash-table :test 'equal)
+  "Map NAME (string) to workspace index (integer).
+Workspace 0 is reserved for the supervisor emacs that owns the
+root window. Per-user emacses with `exwm-instance-name' matching
+`geos-user-NAME' get workspaces 1, 2, 3, ... in order of first
+appearance. Populated lazily by
+`exwm-config--user-workspace-for'.")
+
+(defvar exwm-config--user-workspace-next 1
+  "Next workspace index to hand out to a new per-user emacs.
+Starts at 1 because 0 is the supervisor. Bumped by
+`exwm-config--user-workspace-for' on every fresh allocation. Not
+recycled on user logout: if borja logs in, gets ws 1, logs out,
+and alice logs in, alice gets ws 2. Cheap to leave a hole, and
+sticky indices keep muscle-memory of `s-1 = borja' intact across
+a re-login.")
+
+(defun exwm-config--user-workspace-for (name)
+  "Return the workspace index assigned to NAME, allocating if needed.
+NAME is the user shortname captured from `geos-user-NAME' in
+`exwm-instance-name'. If NAME has been seen before AND the cached
+index is still in range of `exwm-workspace--list', return the
+cached slot. If the cache is stale (workspace deleted out from
+under us, B2 skeptic 2026-05-11), fall through to the allocator
+which will re-grow the pool under the same slot, preserving
+muscle-memory of `s-N = NAME'. Returns nil when the live workspace
+list is not introspectable (W3, fall-back: skip the move and let
+exwm leave the window wherever it landed) or when the bounded
+grow loop (B1, skeptic 2026-05-11) fails to advance after 8
+tries (broken display, RANDR-less env, future emacs-exwm cap).
+The caller MUST tolerate nil."
+  (condition-case err
+      (if (not (boundp 'exwm-workspace--list))
+          ;; W3 explicit degradation: no live list to validate against,
+          ;; so we cannot honestly allocate. Caller skips the move.
+          nil
+        (let* ((cached (gethash name exwm-config--user-workspace))
+               (live-len (length exwm-workspace--list)))
+          (if (and cached (< cached live-len))
+              cached
+            (let ((idx (or cached exwm-config--user-workspace-next)))
+              ;; B1: bounded grow loop. exwm-workspace-add SHOULD append
+              ;; one workspace per call, but a future emacs-exwm (or a
+              ;; RANDR-less display, or an internal cap) might return
+              ;; without growing the list. an unbounded while inside
+              ;; exwm-manage-finish-hook freezes PID 1's main thread.
+              ;; bail after 8 no-progress iterations and return nil.
+              (when (fboundp 'exwm-workspace-add)
+                (let ((tries 0)
+                      (last-len live-len))
+                  (while (and (>= idx (length exwm-workspace--list))
+                              (< tries 8))
+                    (exwm-workspace-add)
+                    (when (= (length exwm-workspace--list) last-len)
+                      (cl-incf tries))
+                    (setq last-len (length exwm-workspace--list)))))
+              (if (< idx (length exwm-workspace--list))
+                  (progn
+                    (puthash name idx exwm-config--user-workspace)
+                    ;; only advance the next-pointer when we minted a
+                    ;; brand-new slot. a cache-rebuild reuses idx and
+                    ;; must not nudge the counter forward.
+                    (when (or (null cached) (>= idx
+                                                exwm-config--user-workspace-next))
+                      (setq exwm-config--user-workspace-next (1+ idx)))
+                    idx)
+                ;; grow loop bailed, idx still OOB. caller skips.
+                nil)))))
+    (error
+     (panic-handle err (cons 'exwm-config--user-workspace-for name))
+     nil)))
+
+(defun exwm-config--maybe-route-user-window ()
+  "Route a freshly managed per-user emacs window to its workspace.
+Hook body for `exwm-manage-finish-hook'. Reads the buffer-local
+`exwm-instance-name' that exwm sets on the managed buffer before
+running this hook. On a match against `geos-user-NAME', looks up
+or allocates a workspace index for NAME and moves the window
+there via `exwm-workspace-move-window'. No-op on no match (so a
+plain xterm or a non-user-tagged emacs frame stays where exwm
+put it). All errors are caught and routed to panic-handle: a
+wedge in routing must not crash exwm's manage path, which would
+leave the window unmanaged and possibly the keyboard grabbed.
+
+The match-data is saved (W4 skeptic 2026-05-11) so we do not
+clobber whatever other entries on the same hook were inspecting.
+The capture group is tightened (N4) to the same character class
+`passwd-add-user' accepts for usernames: cache keys are read from
+the X protocol, which the C-side username validator never sees,
+so we re-validate on the elisp side.
+
+When the captured NAME has no row in session.el's registry, we
+leave an audit breadcrumb via `panic-handle' (W1 skeptic
+2026-05-11) and STILL route the window: the breadcrumb is for
+forensics on a spoofed instance-name, not enforcement. Gated on
+`fboundp' so this file loads on a pre-v0.5 image with no
+session.el present."
+  (condition-case err
+      (when (and (boundp 'exwm-instance-name)
+                 (stringp exwm-instance-name))
+        (save-match-data
+          (when (string-match
+                 "\\`geos-user-\\([a-zA-Z0-9_-]+\\)\\'"
+                 exwm-instance-name)
+            (let* ((name (match-string 1 exwm-instance-name))
+                   (idx (exwm-config--user-workspace-for name)))
+              ;; W1 audit: log unknown-user breadcrumbs but do not
+              ;; block the move. session-get returns nil for an
+              ;; unregistered name; an attacker who guesses a valid
+              ;; username still ends up routed, just with a trace.
+              (when (fboundp 'session-get)
+                (unless (session-get name)
+                  (panic-handle (list 'exwm-route-unknown-user name)
+                                'exwm-config--maybe-route-user-window)))
+              (when (and idx (fboundp 'exwm-workspace-move-window))
+                (exwm-workspace-move-window idx)
+                (exwm-config--trace
+                 (format "routed user=%s instance=%s -> ws %d"
+                         name exwm-instance-name idx)))))))
+    (error
+     (panic-handle err 'exwm-config--maybe-route-user-window))))
+
+;; wire the hook at top level so a re-load of this file re-installs it.
+;; add-hook is idempotent on eq function symbols, so re-loading does not
+;; stack duplicates. guard with boundp so this file still loads cleanly
+;; on a dev host where exwm has never been required.
+(when (boundp 'exwm-manage-finish-hook)
+  (add-hook 'exwm-manage-finish-hook
+            #'exwm-config--maybe-route-user-window))
 
 ;; (B-fullscreen-hang, 2026-05-10) earlier draft mutated
 ;; initial-frame-alist and default-frame-alist with (fullscreen . fullboth)

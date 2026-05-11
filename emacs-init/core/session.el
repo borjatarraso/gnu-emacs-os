@@ -236,12 +236,43 @@ canonical one here and the boot wiring keeps it in sync.")
 
 (defun session--child-argv (name)
   "argv the child emacs sees.  -Q so we inherit nothing from PID 1's
-init tree; -l the per-user init.el iff it exists.  the file is
-optional by design: v0.5 has no per-user dotfile story, since there
-is no bash and no .bashrc.  if /var/emacs/users/NAME/init.el exists
-it loads; otherwise the child gets a clean -Q environment."
+init tree; --name stamps the X resource name as `geos-user-NAME' so
+the supervisor's EXWM can identify which logged-in user owns a new
+X client window; -l the per-user init.el iff it exists.
+
+argv shape:
+  (\"emacs\" \"-Q\" \"--name\" \"geos-user-NAME\")
+  (\"emacs\" \"-Q\" \"--name\" \"geos-user-NAME\" \"-l\" \"/var/emacs/users/NAME/init.el\")
+
+--name placement: after -Q (so -Q's purge of init paths does not
+also swallow the resource-name argument) and before -l (argv order
+is not load-bearing for emacs, but keeping the X-side switches
+together before any -l makes the call site readable).
+
+the supervisor's `exwm-manage-finish-hook' matches on the
+`geos-user-' prefix of `exwm-instance-name' to route the window to
+the right per-user workspace.  the prefix is the contract.
+
+NAME safety: `passwd-add-user' constrains usernames to [a-zA-Z0-9_-]
+on the way into /etc/passwd, so the `geos-user-NAME' concatenation
+here cannot inject shell metacharacters, spaces, or anything Xlib
+would reject as a resource name.  the upstream gate is what makes
+this safe; we deliberately do not re-validate.
+
+per-user init file is optional by design: v0.5 has no per-user
+dotfile story, since there is no bash and no .bashrc.  if
+/var/emacs/users/NAME/init.el exists it loads; otherwise the child
+gets a clean -Q environment plus the --name stamp.
+
+runtime-override caveat: the child is a full emacs, so a per-user
+init.el can mutate `x-resource-name' (or set the frame `name'
+parameter) before the first frame is mapped and defeat the
+`geos-user-' stamp.  the supervisor's EXWM routing degrades
+gracefully: the window stays on whatever workspace EXWM places it
+on.  no security implication; a UX/audit gotcha to keep in mind
+when per-user dotfiles become a real thing in v0.6+."
   (let* ((init (format "/var/emacs/users/%s/init.el" name))
-         (base (list "emacs" "-Q")))
+         (base (list "emacs" "-Q" "--name" (concat "geos-user-" name))))
     (if (file-readable-p init)
         (append base (list "-l" init))
       base)))
