@@ -47,9 +47,10 @@ docs/CONTRIBUTING.md, docs/USER_GUIDE.md.
 ## v0.4 in flight
 
 The detailed plan lives in [v04-plan.md](v04-plan.md). Eleven items
-ordered into four phases, with dependency notes per item. Ten items
-landed (item 3 in MVP form, item 9 documented); the user-login split
-(deferred to v0.5) and the Hurd spike remain. The top-level shape:
+ordered into four phases, with dependency notes per item. Eleven
+items closed (item 3 in MVP form, items 9 and 11 as documented
+deliverables); the user-login split is the one remaining piece,
+deferred to v0.5. The top-level shape:
 
 ### Phase A (foundational, done)
 
@@ -114,9 +115,14 @@ landed (item 3 in MVP form, item 9 documented); the user-login split
   `aplay` via `make-process`, surfaced as the `*audio*` buffer. Ships
   as preview per the v0.4 plan; pid1-side audio module is a v0.5
   question.
-- **11. Hurd kernel variant** (not done): spike on whether the same
-  userland builds against gnumach, or whether pid1 needs a Hurd-side
-  rewrite. Lives on a separate branch.
+- **11. Hurd kernel variant** (spike done): the feasibility report
+  in [v04-item11-hurd-spike.md](v04-item11-hurd-spike.md) answers
+  the spike's one question: yes, the userland can port, with a
+  console-only Hurd profile and a `port_layer.h` abstraction in C.
+  The report inventories every Linux-coupled syscall in pid1 and
+  every Linux-only data source in elisp, and lays out the 6-8 week
+  work order. The actual port lives on a side branch (per the v0.4
+  plan), not main.
 
 ## explicitly punted to v0.5 or later
 

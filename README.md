@@ -105,9 +105,10 @@ document I would actually rather you read first.
 
 ## what does not work yet
 
-The Hurd variant. Real hardware (only QEMU is exercised). The login
-flow (account store is in, per-user emacs split is not). Bluetooth.
-Wayland. DNS UI (static IPv4 and DHCP land packets but the resolver
+The Hurd variant in code (the spike report is in; the actual port
+lives on a side branch and is 6-8 weeks of work). Real hardware
+(only QEMU is exercised). The login flow (account store is in,
+per-user emacs split is not). Bluetooth. Wayland. DNS UI (static IPv4 and DHCP land packets but the resolver
 configuration is manual). Partition-from-scratch in the install
 wizard (MVP requires pre-partitioned disk; full parted-driven
 partitioning is v0.4.1). LUKS-rooted boot is documented as a
@@ -135,15 +136,16 @@ you, this is not your OS, and I will not be offended.
     fullscreen-pre-WM hang in `exwm-config.el` fixed (was making
     headless smoke-tests time out). Freeze-test suite, AUTHORS,
     contributor docs, user guide.
-  - v0.4: in flight. Ten of eleven items shipped (item 3 in MVP
-    form), plus a documented LUKS path: persistent state,
+  - v0.4: in flight. All eleven items closed (item 3 in MVP form,
+    items 9 and 11 as documented deliverables): persistent state,
     `core/supervise.el`, network UI (static IPv4 + DHCP),
     `*packages*`, suspend/resume, `passwd.el` + `*users*`, audio
     preview, the three-way GRUB boot menu (ui / console / recovery),
     LUKS-rooted boot as a config-edit path (see
-    [docs/INSTALL.md](docs/INSTALL.md)), and the `*install*` wizard
-    (MVP: assumes pre-partitioned disk). Remaining: the login flow
-    (deferred to v0.5) and the Hurd spike. Plan in
+    [docs/INSTALL.md](docs/INSTALL.md)), the `*install*` wizard
+    (MVP: assumes pre-partitioned disk), and the Hurd feasibility
+    spike (see [docs/v04-item11-hurd-spike.md](docs/v04-item11-hurd-spike.md)).
+    Remaining: the login flow, deferred to v0.5. Plan in
     [docs/v04-plan.md](docs/v04-plan.md).
 
 I am the only contributor. If you want to send a patch, read the
