@@ -249,13 +249,54 @@ it loads; otherwise the child gets a clean -Q environment."
 (defun session--child-env (name home)
   "Minimal environment for the child emacs.
 scrubs PID 1's environment by REPLACING rather than augmenting.
-the spawn ABI takes this list and discards everything else."
-  (list (concat "USER=" name)
-        (concat "LOGNAME=" name)
-        (concat "HOME=" home)
-        "SHELL=/bin/sh"
-        "PATH=/run/current-system/profile/bin:/usr/bin:/bin"
-        "TERM=linux"))
+the spawn ABI takes this list and discards everything else.
+
+DISPLAY is passed through from the supervisor when set AND when it
+matches the strict shape Xorg actually produces, omitted otherwise.
+in console mode PID 1 has no DISPLAY and the child gets none either;
+an empty DISPLAY string would be worse than absent (getenv returns
+\"\" for set-but-empty, not nil, so the predicate guards the
+length explicitly).  the child connects to Xorg via the abstract
+UNIX socket at /tmp/.X11-unix/X0; no XAUTHORITY is needed because
+the v0.5 Xorg launch passes no -auth flag and the server is
+permissive on local connections.  this is a property of how pid1
+currently spawns Xorg, not a design promise; if Xorg auth ever gets
+added the env list grows to thread XAUTHORITY too.
+
+trust model: the only producer of the supervisor's DISPLAY is
+pid1's hard-coded `DISPLAY=:0' (see pid1/emacs-init.c).  the C-side
+env validator checks structural well-formedness only (non-empty
+KEY, no embedded NUL, presence of `='); it does NOT police newlines,
+spaces, or control chars inside the VALUE.  that validation lives
+HERE.  if pid1 ever grows an operator-tainted source for DISPLAY
+(e.g. a `--display=' argv flag or an /etc/X11/display file) the
+regex below is the choke point that must be re-audited before that
+source is allowed to reach the child.
+
+the regex is intentionally strict: `:N' or `:N.M' with N and M
+digits, nothing else.  no host part, no transport, no shell
+metacharacters.  loosen ONLY when a concrete remote/forwarded-
+display use case lands; until then stricter is the right default
+since the only producer is pid1's `:0'.
+
+a malformed DISPLAY is dropped silently rather than panic-handled:
+a panic here would brick login over a config error elsewhere.
+failing closed by omission is the right posture, the child just
+gets the console-equivalent env."
+  (let* ((display (getenv "DISPLAY"))
+         (display-ok (and (stringp display)
+                          (> (length display) 0)
+                          (string-match-p
+                           "\\`:[0-9]+\\(\\.[0-9]+\\)?\\'" display)))
+         (base (list (concat "USER=" name)
+                     (concat "LOGNAME=" name)
+                     (concat "HOME=" home)
+                     "SHELL=/bin/sh"
+                     "PATH=/run/current-system/profile/bin:/usr/bin:/bin"
+                     "TERM=linux")))
+    (if display-ok
+        (append base (list (concat "DISPLAY=" display)))
+      base)))
 
 (defun session--spawn-child (sess)
   "Call `pid1-spawn-as-uid' for SESS and stash the returned pid.
