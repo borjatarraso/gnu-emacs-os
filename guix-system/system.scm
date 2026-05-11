@@ -164,6 +164,17 @@
     ;; soft-requires it, login.el hard-requires it.
     (local-file "../emacs-init/core/session.el" "session.el"))
 
+(define user-init-el
+    ;; v0.6 starter: per-user emacs userland.  this file runs INSIDE
+    ;; the per-user emacs (the supervisor's child), not in the
+    ;; supervisor itself.  defines geos-logout (C-c e q) for now.
+    ;; future v0.6+ work moves more user-side defuns here.
+    ;; session--child-argv loads it via -l /etc/geos/user-init.el;
+    ;; the extra-special-file below resolves that path to this
+    ;; store entry.  do NOT add to the supervisor's -l chain: the
+    ;; supervisor is root and the bindings here are user-scope.
+    (local-file "../emacs-init/user/user-init.el" "user-init.el"))
+
 (define boot-marker-el
     ;; smoke-test gate.  writes "geos: emacs userland up" to
     ;; /dev/console at load time and arms an exwm-init-hook that
@@ -905,6 +916,7 @@
     (services
      (cons* emacs-init-boot-service
             (extra-special-file "/sbin/emacs-init" emacs-init-binary)
+            (extra-special-file "/etc/geos/user-init.el" user-init-el)
             %base-services))
 
     (name-service-switch %mdns-host-lookup-nss)))

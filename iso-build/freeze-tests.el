@@ -82,12 +82,21 @@
 ;;       env/display-malformed (four malformed strings, per-case
 ;;                              mismatches reported),
 ;;       env/base (USER/LOGNAME/HOME/SHELL/PATH/TERM all present),
-;;       argv/no-init (no per-user init.el -> 4-element argv),
-;;       argv/with-init (per-user init.el readable -> argv ends
-;;                       with -l <path>, --name still at index 2-3),
+;;       argv/no-init (no per-user init.el -> system init only,
+;;                     6-element argv ending -l /etc/geos/user-init.el),
+;;       argv/with-init (per-user init.el readable -> system init
+;;                       FIRST then per-user, --name still at index
+;;                       2-3),
 ;;       argv/name-injection (contract-pin: this function does NOT
 ;;                            re-validate NAME; passwd-add-user is
-;;                            the upstream gate per the docstring).
+;;                            the upstream gate per the docstring),
+;;       argv/user-init-unconditional (the system init path is in
+;;                                     argv regardless of disk state;
+;;                                     a missing file is a LOUD
+;;                                     failure, not silent-skip),
+;;       argv/user-init-path (the `session--user-init-path' defconst
+;;                            pin, guards against rename or path
+;;                            drift away from /etc/geos/user-init.el).
 ;;
 ;;   10. workspace routing (v0.6 starter, aa2917a)
 ;;     pins exwm-config--user-workspace-for: the per-user EXWM
@@ -695,11 +704,16 @@ regress, and a regression in any one of them is a privilege bug."
 (defun freeze-test--spawn-shape-modules-loaded-p ()
   "Return non-nil iff both spawn-shape functions are bound.
 the umbrella records 'module-not-loaded if either is missing.  I
-check the exact two symbols the sub-checks call rather than just
+check the exact symbols the sub-checks call rather than just
 `featurep' on session, because session.el can be half-byte-compiled
-on a partial image and slip through `featurep'."
+on a partial image and slip through `featurep'.  the
+`session--user-init-path' defconst is part of the surface as of
+the unconditional system-init injection; pin it here too so the
+umbrella refuses to run sub-checks against a session.el that pre-
+dates the constant."
   (and (fboundp 'session--child-env)
-       (fboundp 'session--child-argv)))
+       (fboundp 'session--child-argv)
+       (boundp 'session--user-init-path)))
 
 (defun freeze-test--spawn-env-with-display (display-value expect-present)
   "Helper: call session--child-env with DISPLAY-VALUE set in the
@@ -889,17 +903,21 @@ base list, not the appended DISPLAY tail."
     (freeze-test--record 'spawn-shape/env/base result)))
 
 (defun freeze-test--spawn-argv-no-init ()
-  "Sub-check argv/no-init: returns the 4-element form with --name.
-mocks file-readable-p to nil for every call so we do not depend on
-what /var/emacs/users/ looks like on the booted image.  pass iff
-the return is exactly (\"emacs\" \"-Q\" \"--name\" \"geos-user-u\")."
+  "Sub-check argv/no-init: no per-user init -> system init only.
+mocks file-readable-p to nil for every call so the per-user
+init.el branch is skipped; the system init at
+`session--user-init-path' is unconditional and still appears.
+pass iff the return is exactly
+  (\"emacs\" \"-Q\" \"--name\" \"geos-user-u\"
+   \"-l\" \"/etc/geos/user-init.el\")."
   (let ((result 'fail))
     (condition-case err
         (cl-letf (((symbol-function 'file-readable-p) (lambda (_) nil)))
           (let ((argv (session--child-argv "u")))
             (setq result
                   (if (equal argv
-                             '("emacs" "-Q" "--name" "geos-user-u"))
+                             '("emacs" "-Q" "--name" "geos-user-u"
+                               "-l" "/etc/geos/user-init.el"))
                       'pass
                     (format "argv shape wrong: %S" argv)))))
       (error
@@ -908,14 +926,16 @@ the return is exactly (\"emacs\" \"-Q\" \"--name\" \"geos-user-u\")."
     (freeze-test--record 'spawn-shape/argv/no-init result)))
 
 (defun freeze-test--spawn-argv-with-init ()
-  "Sub-check argv/with-init: per-user init.el path tacked on at end.
+  "Sub-check argv/with-init: per-user init.el tacked on after system init.
 mock file-readable-p to t.  must still have --name geos-user-u at
-indices 2-3 and -l /var/emacs/users/u/init.el at the tail."
+indices 2-3, the system init at /etc/geos/user-init.el before the
+per-user file, and -l /var/emacs/users/u/init.el at the tail."
   (let ((result 'fail))
     (condition-case err
         (cl-letf (((symbol-function 'file-readable-p) (lambda (_) t)))
           (let* ((argv (session--child-argv "u"))
                  (expected '("emacs" "-Q" "--name" "geos-user-u"
+                             "-l" "/etc/geos/user-init.el"
                              "-l" "/var/emacs/users/u/init.el")))
             (setq result
                   (cond
@@ -949,13 +969,62 @@ not that there is a real attack."
           (let ((argv (session--child-argv "a;b c")))
             (setq result
                   (if (equal argv
-                             '("emacs" "-Q" "--name" "geos-user-a;b c"))
+                             '("emacs" "-Q" "--name" "geos-user-a;b c"
+                               "-l" "/etc/geos/user-init.el"))
                       'pass
                     (format "contract drift: %S" argv)))))
       (error
        (panic-handle err 'freeze-test--spawn-argv-name-injection)
        (setq result (format "raised: %S" err))))
     (freeze-test--record 'spawn-shape/argv/name-injection result)))
+
+(defun freeze-test--spawn-argv-user-init-unconditional ()
+  "Sub-check argv/user-init-unconditional: system init is in argv
+regardless of disk state.  mocks file-readable-p to nil for every
+call so NEITHER /var/emacs/users/u/init.el NOR
+/etc/geos/user-init.el is reported as readable; the argv MUST
+still carry `-l /etc/geos/user-init.el'.  the contract is loud
+failure when the file vanishes (emacs exits non-zero, supervise
+sees a crashloop), not silent skip.  a regression that gates the
+system init on file-readable-p would let a missing system file go
+unobserved until a user tried to call geos-logout."
+  (let ((result 'fail))
+    (condition-case err
+        (cl-letf (((symbol-function 'file-readable-p) (lambda (_) nil)))
+          (let ((argv (session--child-argv "u")))
+            (setq result
+                  (if (member "/etc/geos/user-init.el" argv)
+                      'pass
+                    (format
+                     "system init dropped from argv when unreadable: %S"
+                     argv)))))
+      (error
+       (panic-handle err 'freeze-test--spawn-argv-user-init-unconditional)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/argv/user-init-unconditional
+                         result)))
+
+(defun freeze-test--spawn-argv-user-init-path ()
+  "Sub-check argv/user-init-path: the defconst pin.
+guards against an accidental rename of `session--user-init-path'
+or a silent path drift away from /etc/geos/user-init.el (the
+extra-special-file symlink target in guix-system/system.scm).  if
+this trips, either the constant moved and the boot wiring must
+follow, or the path was changed without updating the system gexp."
+  (let ((result 'fail))
+    (condition-case err
+        (setq result
+              (cond
+               ((not (boundp 'session--user-init-path))
+                "session--user-init-path is unbound")
+               ((not (string= session--user-init-path
+                              "/etc/geos/user-init.el"))
+                (format "path drift: %S" session--user-init-path))
+               (t 'pass)))
+      (error
+       (panic-handle err 'freeze-test--spawn-argv-user-init-path)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/argv/user-init-path result)))
 
 (defun freeze-test-spawn-shape ()
   "Run all spawn-shape sub-checks.  each records its own result.
@@ -975,7 +1044,9 @@ are what catches a regression in the functions themselves."
     (freeze-test--spawn-env-base)
     (freeze-test--spawn-argv-no-init)
     (freeze-test--spawn-argv-with-init)
-    (freeze-test--spawn-argv-name-injection))))
+    (freeze-test--spawn-argv-name-injection)
+    (freeze-test--spawn-argv-user-init-unconditional)
+    (freeze-test--spawn-argv-user-init-path))))
 
 ;; --------------------------------------------------------------------
 ;; test 10: workspace routing (v0.6 starter, aa2917a)

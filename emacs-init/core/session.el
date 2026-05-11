@@ -241,15 +241,46 @@ the child without a cwd."
 symlink.  the spawn ABI accepts an absolute path; we hard-code the
 canonical one here and the boot wiring keeps it in sync.")
 
+(defconst session--user-init-path "/etc/geos/user-init.el"
+  "Absolute path to the system-shipped per-user emacs init.
+extra-special-file in guix-system/system.scm symlinks this path to
+the local-file for emacs-init/user/user-init.el.  the per-user
+emacs is invoked with `-l SESSION--USER-INIT-PATH' so the geos-
+logout command and any other v0.6+ system-supplied user-side
+defuns are available before the optional /var/emacs/users/<name>/
+init.el loads.
+
+load order matters: system init FIRST, then user-specific init.
+a per-user init.el can override the system defaults, but the system
+defaults are always available even when the user has no per-user
+init.el at all.")
+
 (defun session--child-argv (name)
   "argv the child emacs sees.  -Q so we inherit nothing from PID 1's
 init tree; --name stamps the X resource name as `geos-user-NAME' so
 the supervisor's EXWM can identify which logged-in user owns a new
-X client window; -l the per-user init.el iff it exists.
+X client window; -l the system-shipped user-init unconditionally,
+then -l the per-user init.el iff it exists.
 
 argv shape:
-  (\"emacs\" \"-Q\" \"--name\" \"geos-user-NAME\")
-  (\"emacs\" \"-Q\" \"--name\" \"geos-user-NAME\" \"-l\" \"/var/emacs/users/NAME/init.el\")
+  (\"emacs\" \"-Q\" \"--name\" \"geos-user-NAME\"
+   \"-l\" \"/etc/geos/user-init.el\")
+  (\"emacs\" \"-Q\" \"--name\" \"geos-user-NAME\"
+   \"-l\" \"/etc/geos/user-init.el\"
+   \"-l\" \"/var/emacs/users/NAME/init.el\")
+
+the system user-init at `session--user-init-path' is UNCONDITIONAL.
+extra-special-file in guix-system/system.scm guarantees the path
+exists on every deployed image.  i deliberately do not gate it on
+`file-readable-p': if it ever doesn't exist (degraded boot, broken
+image) the child's `-l' fails and emacs exits non-zero, the poller
+sees a crashed session, and supervise treats it like any other
+crashloop.  loud failure is the correct response.
+
+load order: system init FIRST, per-user init SECOND.  a per-user
+init.el can override system defaults (rebind C-c e q, redefine
+`geos-logout', etc.) but the system defaults are always available
+even when the per-user file is absent.
 
 --name placement: after -Q (so -Q's purge of init paths does not
 also swallow the resource-name argument) and before -l (argv order
@@ -268,8 +299,9 @@ this safe; we deliberately do not re-validate.
 
 per-user init file is optional by design: v0.5 has no per-user
 dotfile story, since there is no bash and no .bashrc.  if
-/var/emacs/users/NAME/init.el exists it loads; otherwise the child
-gets a clean -Q environment plus the --name stamp.
+/var/emacs/users/NAME/init.el exists it loads on top of the system
+init; otherwise the child gets `-Q' plus the system init plus the
+--name stamp.
 
 runtime-override caveat: the child is a full emacs, so a per-user
 init.el can mutate `x-resource-name' (or set the frame `name'
@@ -279,7 +311,8 @@ gracefully: the window stays on whatever workspace EXWM places it
 on.  no security implication; a UX/audit gotcha to keep in mind
 when per-user dotfiles become a real thing in v0.6+."
   (let* ((init (format "/var/emacs/users/%s/init.el" name))
-         (base (list "emacs" "-Q" "--name" (concat "geos-user-" name))))
+         (base (list "emacs" "-Q" "--name" (concat "geos-user-" name)
+                     "-l" session--user-init-path)))
     (if (file-readable-p init)
         (append base (list "-l" init))
       base)))
