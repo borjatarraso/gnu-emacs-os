@@ -60,6 +60,7 @@
 ;; (stringp (car cmd))) guard in supervise.el's spawn.
 
 (require 'cl-lib)
+(require 'cmdline)
 (require 'panic)
 (require 'state)
 (require 'supervise)
@@ -533,37 +534,14 @@ re-register-safe."
 ;; boot wiring
 ;; --------------------------------------------------------------------
 
-(defconst session--cmdline-path "/proc/cmdline"
-  "Where we read the kernel command line.
-defvar-grade defconst so a test harness can `let'-bind it to a fixture
-file.  not user-tunable; the path is fixed by Linux.")
-
-(defun session--cmdline-has-token-p (token)
-  "Return non-nil iff TOKEN appears as a whitespace-delimited entry
-in `session--cmdline-path'.  TOKEN is matched as a literal string,
-anchored on the start of the line or a preceding tab/space, so
-`geos.login=skip' does NOT match `not-geos.login=skip'.  same
-anchoring as `boot-marker--in-boot-emacs-p' but inlined here so
-session.el does not require boot-marker (which loads later in the
-boot chain).  errors are swallowed and return nil so an unreadable
-/proc/cmdline (non-Linux dev host, sandbox) cannot trip the boot."
-  (and (file-readable-p session--cmdline-path)
-       (condition-case _
-           (let ((coding-system-for-read 'binary)
-                 (re (concat "\\(?:^\\|[ \t]\\)"
-                             (regexp-quote token)
-                             "\\(?:[ \t]\\|$\\)")))
-             (with-temp-buffer
-               (insert-file-contents session--cmdline-path)
-               (goto-char (point-min))
-               (re-search-forward re nil t)))
-         (error nil))))
-
 (defun session--login-skip-requested-p ()
   "Return non-nil iff the operator asked to bypass the *login* buffer.
 v0.5 honors `geos.login=skip' on the kernel cmdline; see file
-commentary for why this exists and why it is not a production path."
-  (session--cmdline-has-token-p "geos.login=skip"))
+commentary for why this exists and why it is not a production path.
+the literal whole-token match lives in `geos-cmdline-token-p' under
+core/cmdline.el, the single source of truth for /proc/cmdline
+parsing; this function is now a thin alias around it."
+  (geos-cmdline-token-p "geos.login=skip"))
 
 (defun session--present-login ()
   "Present the *login* buffer on whatever surface this geos-mode uses.

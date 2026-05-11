@@ -23,32 +23,22 @@
 ;; skipped.  the markers exist for the smoke test, not for users.
 
 (require 'panic)
+(require 'cmdline)
 
 (defvar boot-marker--console "/dev/console"
   "Where the smoke-test serial console lives during boot.
 defvar (not defconst) so a test harness can rebind it.")
 
-(defvar boot-marker--cmdline "/proc/cmdline"
-  "Where we look for the geos.mode= boot token.")
-
 (defun boot-marker--in-boot-emacs-p ()
   "Return non-nil iff this emacs was spawned by GEOS PID 1.
 We probe /proc/cmdline for the geos.mode= token that pid1 itself
 parses. that token is unique to our boot path; a dev-host emacs
-loaded interactively will not match.  also handles the case where
-/proc/cmdline is unreadable (non-Linux dev host) by returning nil."
-  (and (file-readable-p boot-marker--cmdline)
-       (condition-case _
-           (let ((coding-system-for-read 'binary))
-             (with-temp-buffer
-               (insert-file-contents boot-marker--cmdline)
-               (goto-char (point-min))
-               ;; anchor on the start of cmdline or a literal space.
-               ;; \b alone misfires on tokens like "not-geos.mode="
-               ;; because the dash-to-letter is also a word boundary.
-               (re-search-forward
-                "\\(?:^\\|[ \t]\\)geos\\.mode=" nil t)))
-         (error nil))))
+loaded interactively will not match.  delegates to
+`geos-cmdline-key-present-p' so the same prefix-match rule is used
+by every caller in core/; that helper also handles the unreadable
+/proc/cmdline case (non-Linux dev host, sandbox) by returning nil
+without raising."
+  (geos-cmdline-key-present-p "geos.mode="))
 
 (defun boot-marker--write (msg)
   "Append MSG and a newline to `boot-marker--console'.
@@ -59,10 +49,12 @@ this code runs during boot and must not derail it."
   (cond
    ;; dev-host gate. file-writable-p on /dev/console can return t for
    ;; root or permissive perms, which would pollute the dev tty every
-   ;; time the file gets loaded interactively. instead probe
-   ;; /proc/cmdline for the geos.mode= token that only PID 1's boot
-   ;; sets. Guix's /run/booted-system would also work, but we have no
-   ;; activate.scm step (no shepherd) so that path never appears.
+   ;; time the file gets loaded interactively. instead probe the
+   ;; cmdline for the geos.mode= token that only PID 1's boot sets
+   ;; (via `boot-marker--in-boot-emacs-p', which in turn delegates to
+   ;; `geos-cmdline-key-present-p' from core/cmdline.el).  Guix's
+   ;; /run/booted-system would also work, but we have no activate.scm
+   ;; step (no shepherd) so that path never appears.
    ((not (boot-marker--in-boot-emacs-p))
     nil)
    ((not (file-writable-p boot-marker--console))

@@ -86,6 +86,13 @@
     ;; killing the user-facing emacs.
     (local-file "../emacs-init/core/panic.el" "panic.el"))
 
+(define cmdline-el
+    ;; /proc/cmdline parser shared by boot-marker.el and session.el.
+    ;; tiny, no deps beyond what emacs gives us; load early so any
+    ;; later core file can (require 'cmdline) without ordering
+    ;; anxiety. must sit between panic.el and state.el.
+    (local-file "../emacs-init/core/cmdline.el" "cmdline.el"))
+
 (define use-package-shim-el
     ;; bootstraps use-package and registers the project's :comment
     ;; keyword as a no-op so the userland files do not raise
@@ -529,6 +536,7 @@
                                ;; replace that crutch with use-package.
                                "-l" #$early-init-el
                                "-l" #$panic-el
+                               "-l" #$cmdline-el
                                "-l" #$state-el
                                "-l" #$supervise-el
                                "-l" #$power-el

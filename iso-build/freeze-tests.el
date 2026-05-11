@@ -385,7 +385,7 @@ returns t when every symbol the test calls exists; nil otherwise."
        (boundp 'login--throttle-window)
        (boundp 'login--state)
        (boundp 'login--user)
-       (boundp 'session--cmdline-path)
+       (boundp 'geos-cmdline-path)
        (fboundp 'login--throttle-trips-p)
        (fboundp 'login--note-bad-attempt)
        (fboundp 'session--snapshot-valid-p)
@@ -495,10 +495,11 @@ would happily honor `foo.geos.login=skipped' or `geos.login=skip2',
 silently bypassing the auth boundary on a deployed image.  the
 matcher must only fire on the exact whitespace-delimited token.
 
-the matcher reads `session--cmdline-path' literally, so we rebind
-that defconst to point at a tmpfile we write per case.  we use a
-single reusable path (deleted on exit) rather than make-temp-file
-per case so the test does not leak inodes if it errors midway."
+the matcher reads `geos-cmdline-path' (from core/cmdline.el, the
+shared /proc/cmdline parser) literally, so we rebind that defvar to
+point at a tmpfile we write per case.  we use a single reusable
+path (deleted on exit) rather than make-temp-file per case so the
+test does not leak inodes if it errors midway."
   (let ((result 'fail)
         (tmp (expand-file-name "freeze-cmdline.txt"
                                temporary-file-directory))
@@ -519,9 +520,9 @@ per case so the test does not leak inodes if it errors midway."
         (let ((mismatches nil))
           (unwind-protect
               (progn
-                ;; rebind the path to our fixture.  the defconst's own
+                ;; rebind the path to our fixture.  the defvar's own
                 ;; docstring says a test harness may do this.
-                (cl-letf (((symbol-value 'session--cmdline-path) tmp))
+                (cl-letf (((symbol-value 'geos-cmdline-path) tmp))
                   (dolist (line must-not)
                     (with-temp-file tmp (insert line))
                     (when (session--login-skip-requested-p)
