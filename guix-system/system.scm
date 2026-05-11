@@ -207,6 +207,11 @@
     (local-file "../emacs-init/userland/notes.el" "userland-notes.el"))
 (define userland-pdf-el
     (local-file "../emacs-init/userland/pdf.el" "userland-pdf.el"))
+(define userland-audio-el
+    ;; v0.4 item 8 userland.  ALSA wrappers via amixer/aplay through
+    ;; make-process.  must load before userland-init.el verifies the
+    ;; manifest.
+    (local-file "../emacs-init/userland/audio.el" "userland-audio.el"))
 (define userland-init-el
     ;; thin entry point that requires each of the above. loaded LAST so
     ;; exwm has already claimed the root frame.
@@ -236,6 +241,10 @@
     ;; a/d/p keys backed by core/passwd.el's atomic writers.  must
     ;; load after passwd-el.
     (local-file "../emacs-init/buffers/users.el" "users-buffer.el"))
+(define audio-buffer-el
+    ;; v0.4 item 8 buffer.  *audio* lists ALSA cards and exposes
+    ;; volume keys; depends on userland-audio.el.
+    (local-file "../emacs-init/buffers/audio.el" "audio-buffer.el"))
 
 ;; v0.4 item 2 service definitions.  each one calls (defservice ...)
 ;; at top level, which registers with supervise.el's hash-table.  load
@@ -509,6 +518,7 @@
                                "-l" #$userland-chat-el
                                "-l" #$userland-notes-el
                                "-l" #$userland-pdf-el
+                               "-l" #$userland-audio-el
                                "-l" #$userland-init-el
                                ;; phase 6 buffers. lazy-loaded entry
                                ;; points; touching any of these via M-x
@@ -522,6 +532,7 @@
                                "-l" #$packages-buffer-el
                                "-l" #$reconfigure-buffer-el
                                "-l" #$users-buffer-el
+                               "-l" #$audio-buffer-el
                                ;; v0.4 item 2 services.  each defservice
                                ;; form runs at load time and populates
                                ;; supervise.el's registry.  loaded after
@@ -766,6 +777,15 @@
                      font-google-noto
                      font-google-noto-emoji
                      font-google-noto-sans-cjk
+                     ;; v0.4 item 8: ALSA userland.  alsa-utils ships
+                     ;; amixer (volume) and aplay (sample playback);
+                     ;; alsa-lib is pulled in transitively but listed
+                     ;; explicitly so a future native pid1-alsa.so
+                     ;; module compiles against headers from the same
+                     ;; pinned channel.  no PipeWire, no daemon: ALSA
+                     ;; is the kernel API we already have.
+                     alsa-utils
+                     alsa-lib
                      %base-packages))
 
     ;; %base-services is kept because removing shepherd-root-service-type

@@ -38,7 +38,8 @@ raise during boot."
     userland-mail
     userland-chat
     userland-notes
-    userland-pdf)
+    userland-pdf
+    userland-audio)
   "Ordered list of userland feature symbols that should be loaded.
 Each one corresponds to a file in this directory: e.g.
 `userland-files' lives in files.el. The boot gexp -l's each one
