@@ -47,10 +47,11 @@ docs/CONTRIBUTING.md, docs/USER_GUIDE.md.
 ## v0.4 in flight
 
 The detailed plan lives in [v04-plan.md](v04-plan.md). Eleven items
-ordered into four phases, with dependency notes per item. The
+ordered into four phases, with dependency notes per item. Eight items
+have landed; three remain (one in flight, two deferred). The
 top-level shape:
 
-### Phase A (foundational, items 1+2 done)
+### Phase A (foundational, done)
 
 - **1. persistent state under `/var/emacs/`** (done): `state-read` /
   `state-write` / `state-delete` with rename(2) + `pid1-fsync-dir`,
@@ -63,34 +64,44 @@ top-level shape:
   `:buffer`/`:filter`/`:autostart` passthrough. The `*journal*`
   follower migrated first; rest of the long-running processes follow
   as the userland gains them.
-- **10. kernel-cmdline boot menu in GRUB**: GRUB editor entries for
-  `geos.mode=ui` and `geos.mode=console` so the operator picks at
-  boot instead of having to rebuild.
+- **10. kernel-cmdline boot menu in GRUB** (done): three GRUB entries,
+  `geos.mode=ui` (default), `geos.mode=console`, and a recovery entry
+  that skips Xorg and drops the userland `-l` chain via `early-init.el`
+  mutating `command-line-args-left`. Pick the mode at boot, no rebuild.
 
-### Phase B (user-visible utility)
+### Phase B (user-visible utility, done)
 
-- **5. network configuration UI** (DHCP, DNS, real interface bring-up
-  via SIOCS\* through a `pid1-set-address` module call)
-- **6. package management buffer** (`*packages*` with install / remove
-  driven by `guix package` via `make-process`)
-- **7. suspend / resume** through `/sys/power/state` with a
-  `pid1-suspend` wrapper so the supervisor can quiesce timers
+- **5. network configuration UI** (done): static IPv4 via
+  `pid1-set-address` and `pid1-set-route-default` ioctls, bound to `s`
+  in `*network*`. DHCP and DNS UI deferred to v0.5; the kernel-side
+  primitives are in.
+- **6. package management buffer** (done): `*packages*` with install
+  and remove driven by `guix package` via `make-process`, output
+  streamed into the buffer so the user sees the build log.
+- **7. suspend / resume** (done): `pid1-suspend` writes `mem` to
+  `/sys/power/state` after the supervisor quiesces timers. Resume
+  picks up where it left off.
 
 ### Phase C (multi-user, install)
 
-- **4. user accounts + login** (passwd / shadow under `/var/emacs/users/`,
-  setuid helper for service `:user`/`:group` enforcement)
-- **9. disk encryption (LUKS at boot)** (cryptsetup wired into the
-  initrd, passphrase prompt before pid1 takes over)
-- **3. real installer** (a `*reconfigure*` buffer that runs
-  `guix system reconfigure` and surfaces the build log)
+- **4. user accounts** (part 1 done, part 2 deferred to v0.5): the
+  `passwd.el` store under `/var/emacs/users/` and the `*users*` buffer
+  shipped. The login flow and per-user emacs split (so each session
+  gets its own process tree) is the v0.5 follow-up.
+- **3. real installer** (in flight): a `*reconfigure*` buffer that
+  runs `guix system reconfigure` and surfaces the build log. Not done.
+- **9. disk encryption (LUKS at boot)** (not done): cryptsetup into
+  the initrd, passphrase prompt before pid1 takes over. Deferred.
 
 ### Phase D (long tail)
 
-- **8. audio**: ALSA via a small `pid1-audio.so` companion module,
-  mpv-as-backend for media
-- **11. Hurd kernel variant**: spike on whether the same userland
-  builds against gnumach, or whether pid1 needs a Hurd-side rewrite
+- **8. audio** (done, preview): ALSA wrappers around `amixer` and
+  `aplay` via `make-process`, surfaced as the `*audio*` buffer. Ships
+  as preview per the v0.4 plan; pid1-side audio module is a v0.5
+  question.
+- **11. Hurd kernel variant** (not done): spike on whether the same
+  userland builds against gnumach, or whether pid1 needs a Hurd-side
+  rewrite. Lives on a separate branch.
 
 ## explicitly punted to v0.5 or later
 

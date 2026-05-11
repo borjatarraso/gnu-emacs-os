@@ -60,15 +60,31 @@ document I would actually rather you read first.
   - `M-x geos-poweroff` and `M-x geos-reboot` go through `reboot(2)`
     via the pid1 module. No `/sbin/poweroff`, no socket, no sudo.
   - `*processes*`, `*network*`, `*journal*`, `*services*`, `*disks*`,
-    `*packages*` are all live buffers with sensible keybindings.
+    `*packages*`, `*users*`, `*audio*` are all live buffers with
+    sensible keybindings.
   - `/etc/hostname` is read and applied at boot via `pid1-set-hostname`
     (no Shepherd hostname service to depend on).
   - GRUB picks the boot mode from `geos.mode=`; `ui` is the default,
-    `geos.mode=console` lands on a raw `/dev/console` Emacs without Xorg.
+    `geos.mode=console` lands on a raw `/dev/console` Emacs without
+    Xorg, `geos.mode=recovery` does the same and also skips the
+    userland load chain via `early-init.el`.
   - Persistent state under `/var/emacs/`: pid1 mounts an ext4 partition
     labelled `geos-var` if present, falls back to tmpfs otherwise.
     Crash-safe `state-write` (rename + parent fsync via `pid1-fsync-dir`).
     See [docs/STATE_LAYOUT.md](docs/STATE_LAYOUT.md).
+  - Static IPv4 from `*network*`: `s` prompts for address and gateway
+    and goes through `pid1-set-address` + `pid1-set-route-default`
+    ioctls. No `ip` binary involved.
+  - Package install and remove from `*packages*`, driven by
+    `guix package` via `make-process` with the build log streamed
+    into the buffer.
+  - User accounts: `passwd.el` store under `/var/emacs/users/` and a
+    `*users*` buffer. The login flow itself is v0.5; right now this is
+    the account store and the UI on top of it.
+  - Suspend to RAM via `M-x geos-suspend`. pid1 writes `mem` to
+    `/sys/power/state` after the supervisor quiesces timers.
+  - Audio (preview): `*audio*` buffer wraps `amixer` and `aplay`
+    through `make-process`. No pid1-side audio module yet.
   - `iso-build/freeze-tests.el` is an in-VM abuse suite that asserts
     the panic buffer survives runaway loops, catastrophic regex, slow
     network, bad tramp, `kill-emacs`, and a state-write round trip.
@@ -78,14 +94,13 @@ document I would actually rather you read first.
 
 ## what does not work yet
 
-The Hurd variant. Real hardware (only QEMU is exercised). Multi-user.
-Audio. Bluetooth. Wayland. Real networking beyond `lo`. Real service
-supervisor (the registry is wired but the engine is the next item to
-land). Disk encryption at boot. The list lives in
+The Hurd variant. Real hardware (only QEMU is exercised). The login
+flow (account store is in, per-user emacs split is not). Bluetooth.
+Wayland. DHCP and DNS UI (static IPv4 lands packets but the resolver
+side is manual). Disk encryption at boot. A real `*reconfigure*`
+buffer for `guix system reconfigure`. The list lives in
 [docs/ROADMAP.md](docs/ROADMAP.md), with the detailed v0.4 plan in
-[docs/v04-plan.md](docs/v04-plan.md). v0.3.1 is about "I can boot it,
-type into it, see the screen, save state across reboots, and shut it
-down without a host kill", which works.
+[docs/v04-plan.md](docs/v04-plan.md).
 
 ## the failure mode I have accepted
 
@@ -106,9 +121,12 @@ you, this is not your OS, and I will not be offended.
     fullscreen-pre-WM hang in `exwm-config.el` fixed (was making
     headless smoke-tests time out). Freeze-test suite, AUTHORS,
     contributor docs, user guide.
-  - v0.4: in flight. Persistent state under `/var/emacs/` is landed
-    (item 1 of 11). Plan in [docs/v04-plan.md](docs/v04-plan.md);
-    next up is the real service supervisor.
+  - v0.4: in flight. Eight of eleven items shipped: persistent state,
+    `core/supervise.el`, static IPv4, `*packages*`, suspend/resume,
+    `passwd.el` + `*users*`, audio preview, and the three-way GRUB
+    boot menu (ui / console / recovery). Remaining: the real
+    installer, the login flow (deferred to v0.5), LUKS at boot, and
+    the Hurd spike. Plan in [docs/v04-plan.md](docs/v04-plan.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
