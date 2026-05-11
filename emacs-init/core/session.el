@@ -6,7 +6,14 @@
 ;; logged-in user runs in a CHILD emacs spawned via `pid1-spawn-as-uid'
 ;; (see docs/v05-session-spawn-abi.md for the binding).  this file
 ;; owns the lifecycle of those children: spawn, register, persist,
-;; rehydrate on reboot, end on logout.
+;; rehydrate on reboot, POLL liveness, end on logout.
+;;
+;; poll: a repeating `run-at-time' timer (see `session--arm-poll-timer')
+;; walks the registry every `session-poll-interval' seconds and probes
+;; /proc/<pid> for each 'running session.  a vanished child transitions
+;; the record to 'held and, if no session remains 'running, brings the
+;; *login* surface back.  this is the cheap-and-correct interim until
+;; pid1 grows a SIGCHLD callback hook.
 ;;
 ;; maintenance escape hatch: the kernel cmdline token
 ;; `geos.login=skip' suppresses the *login* presentation in
@@ -603,6 +610,140 @@ re-register-safe."
      (panic-handle err 'session-rehydrate))))
 
 ;; --------------------------------------------------------------------
+;; auto-teardown poller
+;; --------------------------------------------------------------------
+;;
+;; the supervisor has no SIGCHLD path yet; pid1's child-reaper exists
+;; but does not call back into elisp.  until that lands, the only way
+;; to notice a per-user emacs that quit or crashed is to look.  this
+;; poller is the look.  it is intentionally dumb: probe /proc/<pid>
+;; for each 'running session every few seconds, transition the
+;; vanished ones to 'held, and if nothing is running anymore present
+;; *login* again.  cost: one `file-exists-p' syscall per running
+;; session per tick; on a single-user box that is one syscall every
+;; three seconds.  when pid1 grows the callback the poller goes away.
+
+(defcustom session-poll-interval 3.0
+  "Seconds between liveness probes of running per-user emacs children.
+the timer installed by `session--arm-poll-timer' fires at this
+cadence and calls `session--poll-children'.  three seconds is fast
+enough that the *login* surface comes back promptly when a user
+quits their emacs, slow enough that the per-tick cost is invisible
+even with a few dozen sessions.  rebind via `cl-letf' to something
+tiny (0.01) inside freeze-tests; the timer arming honors the bound
+value at arm time."
+  :type 'number)
+
+(defvar session--poll-timer nil
+  "Timer handle for the auto-teardown poller, or nil when not armed.
+held in a defvar so `session--arm-poll-timer' is idempotent across
+repeated init-file loads: a second arm cancels the prior timer
+before installing the new one.")
+
+(defun session--child-alive-p (pid)
+  "Return non-nil iff PID names a live process under /proc.
+defensive against nil PID and non-integer PID (returns nil for
+both: a session with no recorded child cannot be alive).
+
+/proc-missing fallback diverges by deployment posture, deliberately:
+
+  - under PID 1 (`pid1-as-emacs-p' non-nil) a missing /proc is a
+    degraded boot, not a normal state.  we fail closed and return
+    nil so the poller observes vanished children and transitions
+    them to 'held.  hiding dead-child detection behind a /proc
+    mount failure on a deployed image would be exactly the wrong
+    posture: the operator needs to SEE the breakage, not have the
+    supervisor paper over it by reporting every session alive.
+
+  - on a dev host (`pid1-as-emacs-p' nil or unbound) /proc may
+    legitimately be absent (think `emacs --batch' on macOS, or a
+    sandbox).  we return t there so loading session.el outside the
+    OS does not false-positive every recorded session as dead.
+
+pid-reuse race: in the window between the child's death and the
+next poll tick another process could in principle be assigned the
+same pid by the kernel.  on a vanilla linux PID_MAX is 32768 (4M
+with the bigger-pids sysctl), the poll interval defaults to 3s,
+and a single-user geos box has a handful of processes; the
+probability of recycling a freshly-killed emacs's pid inside one
+window is small enough to ignore for v0.5.  a future hardening
+would cross-check /proc/<pid>/comm reads back as `emacs' before
+declaring alive, one extra file read per tick per running
+session.  worth revisiting if pid recycling on busy boxes ever
+shows up as a real concern."
+  (cond
+   ((not (integerp pid)) nil)
+   ((<= pid 0) nil)
+   ((not (file-directory-p "/proc"))
+    (not (and (boundp 'pid1-as-emacs-p) pid1-as-emacs-p)))
+   (t (file-directory-p (format "/proc/%d" pid)))))
+
+(defun session--poll-children ()
+  "Sweep the registry, transition vanished 'running children to 'held.
+if at least one session transitioned and no session remains
+'running, present *login* again so the operator is not left
+staring at the buffer the dead session happened to have on
+screen.
+
+deliberately does NOT call `session-end' on a miss: the child is
+already gone, SIGTERM to a nonexistent pid is a no-op or races
+with pid reuse.  inline the held-transition (status, clear
+child-pid, persist) instead.
+
+skips 'starting records: the window between `setf' of the pid
+and `setf' of the status inside `session--spawn-child' is single-
+threaded and effectively zero-width; polling 'starting would race
+with a legitimate in-flight spawn.
+
+whole body wrapped in condition-case: a wedged poll iteration
+must not take down the supervisor."
+  (condition-case err
+      (let ((any-transitioned nil))
+        (dolist (sess (session-list))
+          (when (eq (geos-session-status sess) 'running)
+            (let ((pid (geos-session-child-pid sess)))
+              (unless (session--child-alive-p pid)
+                (setf (geos-session-status sess) 'held)
+                (setf (geos-session-child-pid sess) nil)
+                (session--persist sess)
+                (setq any-transitioned t)
+                (message
+                 "session: %s child pid %S vanished, marking held"
+                 (geos-session-name sess) pid)))))
+        (when (and any-transitioned
+                   (not (cl-some
+                         (lambda (s)
+                           (eq (geos-session-status s) 'running))
+                         (session-list))))
+          (session--present-login)))
+    (error
+     (panic-handle err 'session--poll-children))))
+
+(defun session--arm-poll-timer ()
+  "Install the auto-teardown poll timer, cancelling any prior handle.
+idempotent: safe to call multiple times.  reads
+`session-poll-interval' at arm time, so a rebind only takes
+effect after the next arm (a freeze-test that wants a fast tick
+should `cl-letf' the var and re-call this).  the timer fires
+through `session--poll-children', which is itself wrapped in
+panic-handle, so a poll iteration cannot wedge the supervisor.
+
+LOAD-BEARING: the only caller is `session--boot-rehydrate', which
+self-removes from `after-init-hook' on first run; that hook's
+self-removal is what actually prevents stacked pollers across
+repeated init loads.  cancel-then-rearm here is the second line
+of defense, not the first.  if the self-remove in
+`session--boot-rehydrate' ever regresses, every after-init pass
+will land here and the cancel-then-rearm is all that stops a
+runaway timer stack."
+  (when (timerp session--poll-timer)
+    (cancel-timer session--poll-timer))
+  (setq session--poll-timer
+        (run-at-time session-poll-interval
+                     session-poll-interval
+                     #'session--poll-children)))
+
+;; --------------------------------------------------------------------
 ;; boot wiring
 ;; --------------------------------------------------------------------
 
@@ -617,6 +758,19 @@ parsing; this function is now a thin alias around it."
 
 (defun session--present-login ()
   "Present the *login* buffer on whatever surface this geos-mode uses.
+
+callers: originally just `session--boot-rehydrate' (boot-tail), as
+of the auto-teardown poller this is ALSO called from
+`session--poll-children' on a timer tick when the last 'running
+session has vanished.  implication: the buffer/window switch can
+now happen at any moment the operator might be doing something
+else in the supervisor frame (reading *messages*, poking at
+*processes*, whatever).  that is jarring (the screen yanks out
+from under them) but defensible: when no user session is
+'running, the supervisor frame's job IS to present *login*.
+returning to a stale buffer would be worse, because the operator
+would have no obvious affordance to start a session.  revisit if
+the warp turns out to be more disruptive than expected.
 
 v0.5 MVP shape: console mode and UI mode use the same shape, a
 full-frame switch on the supervisor's current frame.  UI mode is
@@ -712,7 +866,13 @@ presentation; see file commentary for the rationale."
             (message
              "session: rehydrated running session, skipping *login*"))
            (t
-            (session--present-login))))
+            (session--present-login)))
+          ;; arm the auto-teardown poller AFTER rehydrate so the first
+          ;; tick sees a stable registry.  same pid1-as-emacs-p gate
+          ;; as rehydrate; on a dev host this never fires.  idempotent
+          ;; because the hook self-removes on first run and
+          ;; `session--arm-poll-timer' cancels any prior handle.
+          (session--arm-poll-timer))
       (error
        (panic-handle err 'session-boot-rehydrate)))))
 
