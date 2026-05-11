@@ -89,6 +89,14 @@ the single source of truth for who is logged in right now.
 mutated by `session-spawn', `session-end', and the sentinel; mirrored
 to disk on every change so a PID-1 restart can rehydrate.")
 
+(defvar session--last-spawn-error nil
+  "Structured reason for the most recent `session-spawn' failure.
+nil after a successful spawn or before the first attempt.  callers
+(notably login.el) may read this immediately after a nil return
+from `session-spawn' to render a specific error to the operator
+instead of a generic 'spawn returned nil' message.  not persisted;
+ephemeral by design.")
+
 (cl-defstruct geos-session
   ;; identity, taken from /etc/passwd at spawn time and frozen
   ;; thereafter.  if the operator changes a user's uid we will only
@@ -197,6 +205,29 @@ used by the *users* buffer's per-row login column."
 ;; spawn
 ;; --------------------------------------------------------------------
 
+(defun session--home-ok-p (home)
+  "Return t if HOME is safe to chdir into, or a symbol describing why not.
+returned symbols: \\='not-absolute, \\='missing, \\='not-a-directory,
+\\='unreadable.  the `file-readable-p' check runs as root and so
+confirms the directory's mode bits permit root access.  it catches
+mode 000 directories and filesystems where even root is denied, but
+it does NOT validate that the target user has read access.
+defense-in-depth, not a substitute for per-user access checks.
+symlinks are followed, deliberately: an operator may legitimately
+symlink HOME entries onto a different mount, and a user-controlled
+symlink swap between this check and the C-side chdir does not cross
+a privilege boundary.  this is defense-in-depth in the parent before
+calling `pid1-spawn-as-uid'; the C child still has its silent
+fallback to / so a race between this check and exec cannot strand
+the child without a cwd."
+  (cond
+   ((not (and (stringp home) (> (length home) 0) (eq (aref home 0) ?/)))
+    'not-absolute)
+   ((not (file-exists-p home))    'missing)
+   ((not (file-directory-p home)) 'not-a-directory)
+   ((not (file-readable-p home))  'unreadable)
+   (t t)))
+
 (defconst session--child-program "/usr/bin/emacs"
   "Where the per-user emacs lives.  matches the guix profile's emacs
 symlink.  the spawn ABI accepts an absolute path; we hard-code the
@@ -281,43 +312,62 @@ steps:
   5. call `pid1-spawn-as-uid' via `session--spawn-child'.
   6. on success, persist again with status=running and the child pid.
   7. on failure, mark the record 'exited and persist."
+  (setq session--last-spawn-error nil)
   (cond
    ((not (stringp name)) nil)
    (t
     (let ((pw (session--passwd-entry name)))
       (cond
        ((null pw)
+        (setq session--last-spawn-error (list 'unknown-user name))
         (panic-handle (list 'session-spawn-unknown-user name)
                       'session-spawn)
         nil)
        (t
-        (let* ((existing (gethash name session--registry))
-               (sess (or existing
-                         (make-geos-session
-                          :name name
-                          :uid (plist-get pw :uid)
-                          :gid (plist-get pw :gid)
-                          :home (plist-get pw :home)
-                          :supervise-key (session--supervise-key name)
-                          :status 'starting))))
-          ;; refresh uid/gid/home from passwd in case the operator
-          ;; changed them between sessions.  identity in the struct
-          ;; is "name"; the rest are cached lookups.
-          (setf (geos-session-uid sess) (plist-get pw :uid))
-          (setf (geos-session-gid sess) (plist-get pw :gid))
-          (setf (geos-session-home sess) (plist-get pw :home))
-          (setf (geos-session-status sess) 'starting)
-          (puthash name sess session--registry)
-          (session--register-with-supervise sess)
-          (session--persist sess)
+        (let* ((home (plist-get pw :home))
+               (home-check (session--home-ok-p home)))
           (cond
-           ((session--spawn-child sess)
-            (session--persist sess)
-            sess)
+           ((not (eq home-check t))
+            ;; fail BEFORE allocating the struct, registering with
+            ;; supervise, or persisting a 'starting record.  otherwise
+            ;; a missing $HOME leaves a stale 'starting breadcrumb on
+            ;; disk that rehydrate would treat as a mid-spawn crash.
+            (setq session--last-spawn-error
+                  (list 'home-bad name home home-check))
+            (panic-handle (list 'session-spawn-home-bad
+                                name home home-check)
+                          'session-spawn)
+            nil)
            (t
-            (setf (geos-session-status sess) 'exited)
-            (session--persist sess)
-            nil)))))))))
+            (let* ((existing (gethash name session--registry))
+                   (sess (or existing
+                             (make-geos-session
+                              :name name
+                              :uid (plist-get pw :uid)
+                              :gid (plist-get pw :gid)
+                              :home (plist-get pw :home)
+                              :supervise-key (session--supervise-key name)
+                              :status 'starting))))
+              ;; refresh uid/gid/home from passwd in case the operator
+              ;; changed them between sessions.  identity in the struct
+              ;; is "name"; the rest are cached lookups.
+              (setf (geos-session-uid sess) (plist-get pw :uid))
+              (setf (geos-session-gid sess) (plist-get pw :gid))
+              (setf (geos-session-home sess) (plist-get pw :home))
+              (setf (geos-session-status sess) 'starting)
+              (puthash name sess session--registry)
+              (session--register-with-supervise sess)
+              (session--persist sess)
+              (cond
+               ((session--spawn-child sess)
+                (session--persist sess)
+                sess)
+               (t
+                (setq session--last-spawn-error
+                      (list 'spawn-child-failed name))
+                (setf (geos-session-status sess) 'exited)
+                (session--persist sess)
+                nil))))))))))))
 
 (defun session--register-with-supervise (sess)
   "Register SESS under supervise.el.

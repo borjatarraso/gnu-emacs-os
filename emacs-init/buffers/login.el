@@ -253,7 +253,9 @@ function; clears it before returning regardless of outcome."
         (cond
          ((null sess)
           (setq login--last-error
-                (list 'session-spawn-returned-nil login--user)
+                (or (and (boundp 'session--last-spawn-error)
+                         session--last-spawn-error)
+                    (list 'session-spawn-returned-nil login--user))
                 login--state :error)
           (login--repaint))
          (t
