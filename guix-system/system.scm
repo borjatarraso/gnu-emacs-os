@@ -896,4 +896,19 @@
               (initrd (operating-system-initrd-file base-os))
               (linux-arguments
                 (append bootable
-                        (geos-user-kernel-arguments 'console))))))))))
+                        (geos-user-kernel-arguments 'console))))
+            ;; v0.4 item 10: recovery boot.  same kernel + initrd as
+            ;; the other entries (we share one closure), but pid1
+            ;; reads geos.mode=recovery and (a) skips Xorg and (b)
+            ;; sets GEOS_MODE=recovery in emacs's env.  early-init.el
+            ;; then drops the rest of the -l userland chain so a
+            ;; broken defservice or defcustom cannot wedge the boot.
+            ;; the operator lands on bare *scratch* with panic.el in
+            ;; scope.
+            (menu-entry
+              (label "GNU/Emacs OS (Recovery, no userland chain)")
+              (linux (operating-system-kernel-file base-os))
+              (initrd (operating-system-initrd-file base-os))
+              (linux-arguments
+                (append bootable
+                        (geos-user-kernel-arguments 'recovery))))))))))

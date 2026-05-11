@@ -66,6 +66,54 @@ wiring. Plain `emacs -Q` invocations on a dev host see nil here.")
 (setq inhibit-startup-screen t)
 (setq initial-scratch-message nil)
 
+;; v0.4 item 10: recovery boot.  pid1 sets GEOS_MODE in the env from
+;; the geos.mode= kernel cmdline token; "recovery" means the operator
+;; picked the GRUB rescue entry because some defservice or defcustom
+;; is wedging a normal boot.  in that mode we DROP every remaining
+;; -l file from `command-line-args-left' so the rest of the userland
+;; chain never loads, then drop the operator into a *scratch* with a
+;; banner explaining the mode.  panic.el will still load (it is the
+;; very next -l after this file) because we set the flag BEFORE
+;; mutating the args list, then arrange for the mutation to apply
+;; starting AFTER panic.el.
+;;
+;; mechanism: emacs's `command-line-1' loops over `command-line-args-left'
+;; consuming `-l FILE' pairs.  while we are inside this very -l (early-init),
+;; the next pair is panic.el; we let it through and chop the rest.
+(when (equal (getenv "GEOS_MODE") "recovery")
+  (message "early-init: recovery mode, will drop userland chain after panic.el")
+  (defvar geos-recovery-mode t
+    "Non-nil when this Emacs is the recovery boot.
+panic.el and *scratch* are usable; every other userland load is
+short-circuited from `command-line-args-left'.")
+  ;; arrange for the chop to fire AFTER panic.el loads.  panic.el adds
+  ;; a (provide 'panic) at its tail; we hook on that via eval-after-load
+  ;; so we keep panic-handle available but stop everything else.
+  (eval-after-load 'panic
+    '(progn
+       (message "early-init: recovery mode, chopping %d remaining -l args"
+                (/ (length command-line-args-left) 2))
+       (setq command-line-args-left nil)
+       ;; banner: *scratch* is the user-facing surface, write a one-shot
+       ;; explainer there so a hand-attaching operator knows where they
+       ;; landed.  /dev/console mirror covers the boot trace.
+       (let ((banner (concat
+                      ";; GEOS recovery mode.\n"
+                      ";; panic.el is loaded.  userland (network, buffers,\n"
+                      ";; services, exwm) is NOT.  use this *scratch* to\n"
+                      ";; edit /etc, inspect /var/emacs, or kill -1 1 to\n"
+                      ";; reboot.\n\n")))
+         (with-current-buffer (get-buffer-create "*scratch*")
+           (let ((inhibit-read-only t))
+             (goto-char (point-min))
+             (insert banner))))
+       (condition-case _
+           (let ((write-region-inhibit-fsync t))
+             (write-region
+              "geos: recovery shell\n"
+              nil "/dev/console" 'append 'nomsg))
+         (error nil)))))
+
 ;; libgpm prints "zero screen dimension, assuming 80x25" the first
 ;; time emacs's tty layer wakes it up on a kernel framebuffer console.
 ;; the warning is harmless but it dirties the boot log. emacs's

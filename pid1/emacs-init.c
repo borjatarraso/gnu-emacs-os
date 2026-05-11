@@ -426,16 +426,20 @@ read_gnu_system_path(char *out, size_t out_len)
 }
 
 /* parse /proc/cmdline for the geos.mode= token. recognized values are
- * "ui" (default; spawn Xorg and run emacs as an X client) and "console"
- * (skip Xorg, run emacs on /dev/console with TERM=linux). returns 1 for
- * UI mode, 0 for console mode. anything else, including a missing token
- * or an unreadable cmdline, defaults to UI: that matches the historical
- * v0.1/v0.2 behaviour and means an unmodified GRUB entry keeps the
- * pretty boot. invariant: pure read, never blocks longer than the
- * /proc read takes. logs the chosen mode to /dev/console so the
- * operator sees the decision in the boot trace. */
-#define GEOS_MODE_UI      1
-#define GEOS_MODE_CONSOLE 0
+ * "ui" (default; spawn Xorg and run emacs as an X client), "console"
+ * (skip Xorg, run emacs on /dev/console with TERM=linux), and
+ * "recovery" (v0.4 item 10: skip Xorg AND skip the userland -l chain;
+ * the operator lands on a bare *scratch* with panic.el available so a
+ * broken defservice or defcustom cannot wedge the boot).  anything
+ * else, including a missing token or an unreadable cmdline, defaults
+ * to UI: matches the historical v0.1/v0.2 behaviour and means an
+ * unmodified GRUB entry keeps the pretty boot.  invariant: pure read,
+ * never blocks longer than the /proc read takes.  logs the chosen
+ * mode to /dev/console so the operator sees the decision in the boot
+ * trace. */
+#define GEOS_MODE_UI       1
+#define GEOS_MODE_CONSOLE  0
+#define GEOS_MODE_RECOVERY 2
 
 static int
 read_geos_mode(void)
@@ -483,6 +487,10 @@ read_geos_mode(void)
     if (strcmp(val, "ui") == 0) {
         console("pid1: geos.mode=ui, will spawn Xorg + EXWM");
         return GEOS_MODE_UI;
+    }
+    if (strcmp(val, "recovery") == 0) {
+        console("pid1: geos.mode=recovery, skipping Xorg AND userland chain");
+        return GEOS_MODE_RECOVERY;
     }
     /* unknown value: log and default. better than booting into a mode
      * the operator did not ask for. */
@@ -663,6 +671,16 @@ static const char *xorg_conf_path = NULL;
  * without an strdup. set in main() iff xorg_path is non-NULL. same
  * shape as module_env for consistency. */
 static const char *display_env = NULL;
+
+/* v0.4 item 10: GEOS_MODE=ui|console|recovery in the same shape as
+ * display_env and module_env so spawn_emacs's envp can splice it
+ * without an strdup.  early-init.el reads this via (getenv "GEOS_MODE")
+ * to decide whether to short-circuit the userland chain (recovery
+ * mode drops command-line-args-left so subsequent -l files are
+ * skipped).  set unconditionally from main() after read_geos_mode()
+ * runs; "ui"/"console" are informational, "recovery" actually changes
+ * elisp behaviour. */
+static const char *geos_mode_env = NULL;
 
 /* (B1, skeptic 2026-05-06) supervisor needs to know which child pid
  * is the X server so it can react to Xorg dying instead of treating
@@ -1100,9 +1118,9 @@ spawn_emacs(void)
         if (extra_argc == 0) argv[ai++] = "-Q";
         argv[ai] = NULL;
 
-        /* envp is fixed-size; we only ever splice PID1_MODULE_PATH and
-         * DISPLAY in if they were set. anything else added in the
-         * future grows the array and the cap. */
+        /* envp is fixed-size; we only ever splice PID1_MODULE_PATH,
+         * DISPLAY and GEOS_MODE in if they were set. anything else
+         * added in the future grows the array and the cap. */
         char *envp[8];
         int ei = 0;
         envp[ei++] = "TERM=linux";
@@ -1112,6 +1130,7 @@ spawn_emacs(void)
                      "/run/current-system/profile/sbin";
         if (module_env) envp[ei++] = (char *)module_env;
         if (display_env) envp[ei++] = (char *)display_env;
+        if (geos_mode_env) envp[ei++] = (char *)geos_mode_env;
         envp[ei] = NULL;
         execve(emacs_path, argv, envp);
         console("pid1: execve(emacs) failed");
@@ -1389,16 +1408,27 @@ main(int argc, char **argv)
 
     /* boot mode toggle: /proc/cmdline geos.mode=console forces a
      * pure-text boot (no Xorg, emacs talks to /dev/console). default
-     * (no token, or geos.mode=ui) keeps the v0.2 behaviour. clearing
-     * xorg_path here also disables xorg_bring_up's respawn path so a
-     * console-mode boot never tries to start an X server. display_env
-     * stays NULL so spawn_emacs's envp does not advertise a DISPLAY
-     * the user did not ask for. */
+     * (no token, or geos.mode=ui) keeps the v0.2 behaviour.  v0.4
+     * item 10 adds geos.mode=recovery: same Xorg suppression as
+     * console mode PLUS the userland -l chain is gated by an env
+     * variable that early-init.el reads to abort further loading.
+     * clearing xorg_path here also disables xorg_bring_up's respawn
+     * path so a console- or recovery-mode boot never tries to start
+     * an X server.  display_env stays NULL so spawn_emacs's envp
+     * does not advertise a DISPLAY the user did not ask for. */
     int boot_mode = read_geos_mode();
     if (boot_mode == GEOS_MODE_CONSOLE) {
         xorg_path = NULL;
         xorg_disabled = 1;
         display_env = NULL;
+        geos_mode_env = "GEOS_MODE=console";
+    } else if (boot_mode == GEOS_MODE_RECOVERY) {
+        xorg_path = NULL;
+        xorg_disabled = 1;
+        display_env = NULL;
+        geos_mode_env = "GEOS_MODE=recovery";
+    } else {
+        geos_mode_env = "GEOS_MODE=ui";
     }
 
     /* phase 5a: start Xorg if argv[3] gave us a spec. critical that
