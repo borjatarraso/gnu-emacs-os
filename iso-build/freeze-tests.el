@@ -68,6 +68,51 @@
 ;;     ('login-abuse/throttle, /snapshot, /cmdline, /empty-user) so
 ;;     partial failures are bisectable.
 ;;
+;;   9. spawn shape under abuse (v0.6 starter, 37ddbce)
+;;     pins the two functions that decide what the per-user child
+;;     emacs actually sees: session--child-env (DISPLAY pass-through
+;;     under a strict :N[.M] regex) and session--child-argv (--name
+;;     geos-user-NAME stamp, optional -l per-user init).  the smoke-
+;;     test boots the image but never inspects either function's
+;;     return value; a regression that drops the --name stamp or
+;;     accepts a shell-metachar DISPLAY would still PASS the smoke
+;;     gate.  sub-checks (each under 'spawn-shape/<name>):
+;;       env/display-valid, env/display-valid-screen,
+;;       env/display-unset, env/display-empty,
+;;       env/display-malformed (four malformed strings, per-case
+;;                              mismatches reported),
+;;       env/base (USER/LOGNAME/HOME/SHELL/PATH/TERM all present),
+;;       argv/no-init (no per-user init.el -> 4-element argv),
+;;       argv/with-init (per-user init.el readable -> argv ends
+;;                       with -l <path>, --name still at index 2-3),
+;;       argv/name-injection (contract-pin: this function does NOT
+;;                            re-validate NAME; passwd-add-user is
+;;                            the upstream gate per the docstring).
+;;
+;;   10. workspace routing (v0.6 starter, aa2917a)
+;;     pins exwm-config--user-workspace-for: the per-user EXWM
+;;     workspace allocator.  three behaviors must hold or per-user
+;;     window routing silently breaks: stickiness across re-lookup,
+;;     forward-only counter (never recycle on logout), and the B1
+;;     bounded grow loop (8 no-progress iterations or bail to nil,
+;;     because an unbounded while inside exwm-manage-finish-hook
+;;     would freeze PID 1's main thread).  also pins the regex on
+;;     exwm-config--maybe-route-user-window since the capture group
+;;     is the contract between the spawn stamp and the routing
+;;     hook.  sub-checks (each under 'workspace-routing/<name>):
+;;       unbound-live-list (W3: nil when exwm-workspace--list not
+;;                          bound, no error),
+;;       sticky (same name twice -> same index),
+;;       distinct (two names -> two indices, counter forward),
+;;       counter-forward (after a hypothetical logout, counter
+;;                        does not recycle),
+;;       grow-loop-bounded (B1: nil after 8 no-progress tries,
+;;                          and wall-clock under the budget),
+;;       cache-rebuild-after-shrink (B2: stale cache rebuilds
+;;                                   under the same slot),
+;;       regex/accepts (three valid NAMEs match and capture),
+;;       regex/rejects (seven near-miss strings do not match).
+;;
 ;; reporting: each test pushes a result alist into `freeze-test-results'.
 ;; (freeze-test-report) prints a per-test PASS/FAIL summary to *Messages*
 ;; and to /dev/console (when boot-marker--write is available, so the
@@ -606,6 +651,597 @@ regress, and a regression in any one of them is a privilege bug."
     (freeze-test--login-empty-user))))
 
 ;; --------------------------------------------------------------------
+;; test 9: spawn shape under abuse (v0.6 starter, 37ddbce)
+;; --------------------------------------------------------------------
+
+(defun freeze-test--spawn-shape-modules-loaded-p ()
+  "Return non-nil iff both spawn-shape functions are bound.
+the umbrella records 'module-not-loaded if either is missing.  I
+check the exact two symbols the sub-checks call rather than just
+`featurep' on session, because session.el can be half-byte-compiled
+on a partial image and slip through `featurep'."
+  (and (fboundp 'session--child-env)
+       (fboundp 'session--child-argv)))
+
+(defun freeze-test--spawn-env-with-display (display-value expect-present)
+  "Helper: call session--child-env with DISPLAY-VALUE set in the
+parent env, return t if a `DISPLAY=...' element is present in the
+result matches EXPECT-PRESENT (non-nil = should be there).
+DISPLAY is restored from the surrounding caller, not here; the
+caller MUST wrap the whole sub-check in unwind-protect."
+  (setenv "DISPLAY" display-value)
+  (let* ((env (session--child-env "u" "/home/u"))
+         (got (cl-some (lambda (s)
+                        (and (stringp s)
+                             (string-prefix-p "DISPLAY=" s)))
+                      env)))
+    (eq (not (null got)) (not (null expect-present)))))
+
+(defun freeze-test--spawn-env-display-valid ()
+  "Sub-check env/display-valid: DISPLAY=:0 from parent reaches child.
+this is the happy path.  pid1's hard-coded DISPLAY=:0 must survive
+the regex gate; a regression here would silently strand every
+per-user emacs in console mode on a UI boot."
+  (let ((result 'fail)
+        (saved (getenv "DISPLAY")))
+    (condition-case err
+        (unwind-protect
+            (progn
+              (setenv "DISPLAY" ":0")
+              (let ((env (session--child-env "u" "/home/u")))
+                (setq result (if (member "DISPLAY=:0" env)
+                                 'pass
+                               (format "DISPLAY=:0 missing from env: %S"
+                                       env)))))
+          (setenv "DISPLAY" saved))
+      (error
+       (panic-handle err 'freeze-test--spawn-env-display-valid)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/env/display-valid result)))
+
+(defun freeze-test--spawn-env-display-valid-screen ()
+  "Sub-check env/display-valid-screen: DISPLAY=:0.1 also honored.
+the regex covers the `:N.M' screen-number form too.  matters for
+the future-second-monitor case where Xorg hands out :0.1."
+  (let ((result 'fail)
+        (saved (getenv "DISPLAY")))
+    (condition-case err
+        (unwind-protect
+            (progn
+              (setenv "DISPLAY" ":0.1")
+              (let ((env (session--child-env "u" "/home/u")))
+                (setq result (if (member "DISPLAY=:0.1" env)
+                                 'pass
+                               (format "DISPLAY=:0.1 missing from env: %S"
+                                       env)))))
+          (setenv "DISPLAY" saved))
+      (error
+       (panic-handle err 'freeze-test--spawn-env-display-valid-screen)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/env/display-valid-screen result)))
+
+(defun freeze-test--spawn-env-display-unset ()
+  "Sub-check env/display-unset: parent has no DISPLAY -> no element.
+the console-mode boot.  child must NOT see a stray DISPLAY=, since
+an empty value would confuse Xt and a stale value would point at
+nothing."
+  (let ((result 'fail)
+        (saved (getenv "DISPLAY")))
+    (condition-case err
+        (unwind-protect
+            (progn
+              ;; setenv NAME nil unsets the variable.
+              (setenv "DISPLAY" nil)
+              (let* ((env (session--child-env "u" "/home/u"))
+                     (leak (cl-some (lambda (s)
+                                      (and (stringp s)
+                                           (string-prefix-p "DISPLAY=" s)))
+                                    env)))
+                (setq result (if leak
+                                 (format "DISPLAY leaked when unset: %S" env)
+                               'pass))))
+          (setenv "DISPLAY" saved))
+      (error
+       (panic-handle err 'freeze-test--spawn-env-display-unset)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/env/display-unset result)))
+
+(defun freeze-test--spawn-env-display-empty ()
+  "Sub-check env/display-empty: DISPLAY=\"\" is set-but-empty.
+getenv returns \"\" not nil for this case, so the length>0 guard in
+session--child-env is what saves us.  if that guard regresses, the
+child gets DISPLAY= with no value and Xt errors at connect-time."
+  (let ((result 'fail)
+        (saved (getenv "DISPLAY")))
+    (condition-case err
+        (unwind-protect
+            (progn
+              (setenv "DISPLAY" "")
+              (let* ((env (session--child-env "u" "/home/u"))
+                     (leak (cl-some (lambda (s)
+                                      (and (stringp s)
+                                           (string-prefix-p "DISPLAY=" s)))
+                                    env)))
+                (setq result (if leak
+                                 (format "empty DISPLAY leaked: %S" env)
+                               'pass))))
+          (setenv "DISPLAY" saved))
+      (error
+       (panic-handle err 'freeze-test--spawn-env-display-empty)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/env/display-empty result)))
+
+(defun freeze-test--spawn-env-display-malformed ()
+  "Sub-check env/display-malformed: every malformed DISPLAY dropped.
+runs four cases through the env builder and reports per-case any
+that slipped past the regex gate.  the four are picked to cover
+distinct attack shapes: shell injection, newline truncation, a
+hostname-bearing form (legal Xorg syntax but not what pid1 emits),
+and a non-numeric display number."
+  (let ((result 'fail)
+        (saved (getenv "DISPLAY"))
+        (cases '("evil; rm -rf /"
+                 ":0\n"
+                 "host:0"
+                 ":abc")))
+    (condition-case err
+        (unwind-protect
+            (let ((leaks nil))
+              (dolist (case cases)
+                (setenv "DISPLAY" case)
+                (let* ((env (session--child-env "u" "/home/u"))
+                       (leak (cl-some
+                              (lambda (s)
+                                (and (stringp s)
+                                     (string-prefix-p "DISPLAY=" s)))
+                              env)))
+                  (when leak
+                    (push case leaks))))
+              (setq result (if leaks
+                               (format "malformed DISPLAY admitted: %S"
+                                       (nreverse leaks))
+                             'pass)))
+          (setenv "DISPLAY" saved))
+      (error
+       (panic-handle err 'freeze-test--spawn-env-display-malformed)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/env/display-malformed result)))
+
+(defun freeze-test--spawn-env-base ()
+  "Sub-check env/base: USER/LOGNAME/HOME/SHELL/PATH/TERM all present.
+the base env list is what the child relies on for a sane userland;
+losing any one of these strands the spawn in a half-configured
+state (no HOME -> tramp panics, no PATH -> eshell cannot find
+binaries).  test with DISPLAY unset so we are looking at the pure
+base list, not the appended DISPLAY tail."
+  (let ((result 'fail)
+        (saved (getenv "DISPLAY")))
+    (condition-case err
+        (unwind-protect
+            (progn
+              (setenv "DISPLAY" nil)
+              (let* ((env (session--child-env "u" "/home/u"))
+                     (need '("USER=u"
+                             "LOGNAME=u"
+                             "HOME=/home/u"
+                             "SHELL=/bin/sh"
+                             "TERM=linux"))
+                     (missing (cl-remove-if (lambda (s) (member s env))
+                                            need))
+                     ;; PATH is a prefix-match because the actual value
+                     ;; is a triple-colon list; pin the leading entry
+                     ;; rather than the whole string so a PATH tweak
+                     ;; downstream does not break this test for free.
+                     (path-ok (cl-some
+                               (lambda (s)
+                                 (and (stringp s)
+                                      (string-prefix-p "PATH=" s)
+                                      (string-match-p "/run/current-system"
+                                                      s)))
+                               env)))
+                (setq result
+                      (cond
+                       (missing (format "missing base entries: %S" missing))
+                       ((not path-ok) "PATH= entry missing or wrong shape")
+                       (t 'pass)))))
+          (setenv "DISPLAY" saved))
+      (error
+       (panic-handle err 'freeze-test--spawn-env-base)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/env/base result)))
+
+(defun freeze-test--spawn-argv-no-init ()
+  "Sub-check argv/no-init: returns the 4-element form with --name.
+mocks file-readable-p to nil for every call so we do not depend on
+what /var/emacs/users/ looks like on the booted image.  pass iff
+the return is exactly (\"emacs\" \"-Q\" \"--name\" \"geos-user-u\")."
+  (let ((result 'fail))
+    (condition-case err
+        (cl-letf (((symbol-function 'file-readable-p) (lambda (_) nil)))
+          (let ((argv (session--child-argv "u")))
+            (setq result
+                  (if (equal argv
+                             '("emacs" "-Q" "--name" "geos-user-u"))
+                      'pass
+                    (format "argv shape wrong: %S" argv)))))
+      (error
+       (panic-handle err 'freeze-test--spawn-argv-no-init)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/argv/no-init result)))
+
+(defun freeze-test--spawn-argv-with-init ()
+  "Sub-check argv/with-init: per-user init.el path tacked on at end.
+mock file-readable-p to t.  must still have --name geos-user-u at
+indices 2-3 and -l /var/emacs/users/u/init.el at the tail."
+  (let ((result 'fail))
+    (condition-case err
+        (cl-letf (((symbol-function 'file-readable-p) (lambda (_) t)))
+          (let* ((argv (session--child-argv "u"))
+                 (expected '("emacs" "-Q" "--name" "geos-user-u"
+                             "-l" "/var/emacs/users/u/init.el")))
+            (setq result
+                  (cond
+                   ((not (equal argv expected))
+                    (format "argv shape wrong: %S != %S" argv expected))
+                   ;; redundant given the equal above but pinned
+                   ;; explicitly so a future shuffle of argv order
+                   ;; trips here with a clear diagnostic.
+                   ((not (and (equal (nth 2 argv) "--name")
+                              (equal (nth 3 argv) "geos-user-u")))
+                    (format "--name not at index 2-3: %S" argv))
+                   (t 'pass)))))
+      (error
+       (panic-handle err 'freeze-test--spawn-argv-with-init)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/argv/with-init result)))
+
+(defun freeze-test--spawn-argv-name-injection ()
+  "Sub-check argv/name-injection: contract-pin, no re-validation here.
+session--child-argv's docstring says passwd-add-user is the
+upstream gate that constrains NAME to [a-zA-Z0-9_-].  this test
+pins that contract: the function itself MUST NOT add any extra
+validation, because doing so would silently mask an upstream
+regression.  call with a deliberately bad NAME and assert the
+concat went through verbatim.  if this test fails it means
+someone added validation here and forgot to update the docstring,
+not that there is a real attack."
+  (let ((result 'fail))
+    (condition-case err
+        (cl-letf (((symbol-function 'file-readable-p) (lambda (_) nil)))
+          (let ((argv (session--child-argv "a;b c")))
+            (setq result
+                  (if (equal argv
+                             '("emacs" "-Q" "--name" "geos-user-a;b c"))
+                      'pass
+                    (format "contract drift: %S" argv)))))
+      (error
+       (panic-handle err 'freeze-test--spawn-argv-name-injection)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'spawn-shape/argv/name-injection result)))
+
+(defun freeze-test-spawn-shape ()
+  "Run all spawn-shape sub-checks.  each records its own result.
+v0.6 starter (37ddbce) wired DISPLAY pass-through and the --name
+stamp; the smoke-test PASS(ui) only proves boot.  these sub-checks
+are what catches a regression in the functions themselves."
+  (interactive)
+  (cond
+   ((not (freeze-test--spawn-shape-modules-loaded-p))
+    (freeze-test--record 'spawn-shape 'module-not-loaded))
+   (t
+    (freeze-test--spawn-env-display-valid)
+    (freeze-test--spawn-env-display-valid-screen)
+    (freeze-test--spawn-env-display-unset)
+    (freeze-test--spawn-env-display-empty)
+    (freeze-test--spawn-env-display-malformed)
+    (freeze-test--spawn-env-base)
+    (freeze-test--spawn-argv-no-init)
+    (freeze-test--spawn-argv-with-init)
+    (freeze-test--spawn-argv-name-injection))))
+
+;; --------------------------------------------------------------------
+;; test 10: workspace routing (v0.6 starter, aa2917a)
+;; --------------------------------------------------------------------
+
+(defun freeze-test--workspace-routing-modules-loaded-p ()
+  "Return non-nil iff the workspace allocator surface is linked in.
+exwm-config.el is NOT required by this file at load time (exwm
+itself is heavy and the dev-host load path may not have it), so
+we gate on the three exact symbols the sub-checks touch.  match
+test 8's pattern: half-loaded image with defvars but no defun
+must NOT slip through and crash a sub-check."
+  (and (fboundp 'exwm-config--user-workspace-for)
+       (boundp 'exwm-config--user-workspace)
+       (boundp 'exwm-config--user-workspace-next)))
+
+(defmacro freeze-test--with-workspace-fixture (live-list &rest body)
+  "Run BODY with exwm-config workspace state reset and the live
+exwm-workspace--list bound to LIVE-LIST.  saves and restores the
+hash table, the counter, and the live-list binding/value around
+BODY so sub-checks do not bleed state.  cl-letf cannot makunbound,
+so the live-list dance uses an explicit had-boundp save."
+  (declare (indent 1))
+  `(let ((saved-hash exwm-config--user-workspace)
+         (saved-next exwm-config--user-workspace-next)
+         (had (boundp 'exwm-workspace--list))
+         (saved-list (when (boundp 'exwm-workspace--list)
+                       (symbol-value 'exwm-workspace--list))))
+     (unwind-protect
+         (progn
+           (setq exwm-config--user-workspace (make-hash-table :test 'equal)
+                 exwm-config--user-workspace-next 1)
+           (set 'exwm-workspace--list ,live-list)
+           ,@body)
+       (setq exwm-config--user-workspace saved-hash
+             exwm-config--user-workspace-next saved-next)
+       (if had
+           (set 'exwm-workspace--list saved-list)
+         (makunbound 'exwm-workspace--list)))))
+
+(defun freeze-test--workspace-unbound-live-list ()
+  "Sub-check unbound-live-list: W3 degradation when live list absent.
+on a no-X dev host exwm-workspace--list is not bound.  the
+allocator must return nil cleanly rather than signal void-variable.
+this is the path the headless freeze-tests run was hitting before
+the W3 guard landed."
+  (let ((result 'fail)
+        (saved-hash exwm-config--user-workspace)
+        (saved-next exwm-config--user-workspace-next)
+        (had (boundp 'exwm-workspace--list))
+        (saved-list (when (boundp 'exwm-workspace--list)
+                      (symbol-value 'exwm-workspace--list))))
+    (condition-case err
+        (unwind-protect
+            (progn
+              (setq exwm-config--user-workspace
+                    (make-hash-table :test 'equal)
+                    exwm-config--user-workspace-next 1)
+              (when had (makunbound 'exwm-workspace--list))
+              (let ((got (exwm-config--user-workspace-for "borja")))
+                (setq result (if (null got)
+                                 'pass
+                               (format "expected nil, got %S" got)))))
+          (setq exwm-config--user-workspace saved-hash
+                exwm-config--user-workspace-next saved-next)
+          (when had (set 'exwm-workspace--list saved-list)))
+      (error
+       (panic-handle err 'freeze-test--workspace-unbound-live-list)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'workspace-routing/unbound-live-list result)))
+
+(defun freeze-test--workspace-sticky ()
+  "Sub-check sticky: same NAME hits the cache on second call.
+the muscle-memory contract: once alice is at workspace N, a
+re-lookup of alice must return N.  a regression here breaks the
+`s-N = NAME' UX promise on every re-login."
+  (let ((result 'fail))
+    (condition-case err
+        (freeze-test--with-workspace-fixture '(:ws0 :ws1 :ws2)
+          (let ((first (exwm-config--user-workspace-for "alice"))
+                (second (exwm-config--user-workspace-for "alice")))
+            (setq result
+                  (cond
+                   ((null first) "first lookup returned nil")
+                   ((not (equal first second))
+                    (format "not sticky: %S then %S" first second))
+                   (t 'pass)))))
+      (error
+       (panic-handle err 'freeze-test--workspace-sticky)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'workspace-routing/sticky result)))
+
+(defun freeze-test--workspace-distinct ()
+  "Sub-check distinct: two NAMEs get two indices, counter forward.
+alice and bob must NOT collide on the same workspace.  bob's
+index must be exactly alice's + 1 (the counter is the
+authoritative next-pointer)."
+  (let ((result 'fail))
+    (condition-case err
+        (freeze-test--with-workspace-fixture '(:ws0 :ws1 :ws2)
+          (let ((a (exwm-config--user-workspace-for "alice"))
+                (b (exwm-config--user-workspace-for "bob")))
+            (setq result
+                  (cond
+                   ((or (null a) (null b))
+                    (format "nil index: alice=%S bob=%S" a b))
+                   ((= a b)
+                    (format "alice and bob collided on %S" a))
+                   ((not (= b (1+ a)))
+                    (format "counter not forward: alice=%S bob=%S" a b))
+                   (t 'pass)))))
+      (error
+       (panic-handle err 'freeze-test--workspace-distinct)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'workspace-routing/distinct result)))
+
+(defun freeze-test--workspace-counter-forward ()
+  "Sub-check counter-forward: counter never recycles on logout.
+simulate alice having taken slot 1 then logged out, then bob logs
+in.  bob must get slot 2, not slot 1.  the defvar docstring
+promises this; a regression that resets the counter on logout
+would re-route bob's windows onto alice's leftover workspace and
+fight any cached state in EXWM."
+  (let ((result 'fail))
+    (condition-case err
+        (freeze-test--with-workspace-fixture '(:ws0 :ws1 :ws2)
+          ;; pretend alice already minted slot 1 and then logged out.
+          ;; the cache row stays (sticky-on-relogin), the counter has
+          ;; already moved on.
+          (puthash "alice" 1 exwm-config--user-workspace)
+          (setq exwm-config--user-workspace-next 2)
+          (let ((b (exwm-config--user-workspace-for "bob")))
+            (setq result
+                  (cond
+                   ((null b) "bob got nil")
+                   ((= b 1) "counter recycled, bob landed on alice's slot")
+                   ((not (= b 2)) (format "expected bob=2, got %S" b))
+                   (t 'pass)))))
+      (error
+       (panic-handle err 'freeze-test--workspace-counter-forward)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'workspace-routing/counter-forward result)))
+
+(defun freeze-test--workspace-grow-loop-bounded ()
+  "Sub-check grow-loop-bounded: B1 cap fires, control returns.
+mock exwm-workspace-add as a no-op so the grow loop never makes
+progress.  the allocator MUST bail after 8 tries and return nil;
+an unbounded while inside exwm-manage-finish-hook freezes PID 1.
+also wall-clock the call against the freeze-test loop budget so
+a regression that unbounded the loop trips a timeout instead of
+sitting forever."
+  (let ((result 'fail))
+    (condition-case err
+        (freeze-test--with-workspace-fixture '(:ws0)
+          (cl-letf (((symbol-function 'exwm-workspace-add)
+                     (lambda (&rest _) nil)))
+            (let* ((started (current-time))
+                   (got (with-timeout (freeze-test-loop-budget-sec
+                                       'budget-exceeded)
+                          (exwm-config--user-workspace-for "borja")))
+                   (elapsed (float-time
+                             (time-subtract (current-time) started))))
+              (setq result
+                    (cond
+                     ((eq got 'budget-exceeded)
+                      (format "grow loop exceeded %ds budget"
+                              freeze-test-loop-budget-sec))
+                     ((not (null got))
+                      (format "expected nil, got %S in %.2fs" got elapsed))
+                     (t 'pass))))))
+      (error
+       (panic-handle err 'freeze-test--workspace-grow-loop-bounded)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'workspace-routing/grow-loop-bounded result)))
+
+(defun freeze-test--workspace-cache-rebuild-after-shrink ()
+  "Sub-check cache-rebuild-after-shrink: B2 path, idx reused.
+alice gets a slot.  someone shrinks the live workspace list out
+from under us (an exwm-workspace-delete in the future, or a
+manual /exwm-workspace--list mutation today).  on the next
+lookup, the cached idx is now OOB; the allocator must take the
+grow path under the same slot rather than mint a fresh one.
+the test verifies BOTH stickiness of the returned idx AND that
+the grow path actually ran (the live list grew during the
+call)."
+  (let ((result 'fail))
+    (condition-case err
+        (freeze-test--with-workspace-fixture '(:ws0 :ws1 :ws2)
+          ;; mock exwm-workspace-add to actually grow the live list
+          ;; (a faithful stub) so the rebuild can complete.
+          (cl-letf (((symbol-function 'exwm-workspace-add)
+                     (lambda (&rest _)
+                       (set 'exwm-workspace--list
+                            (append (symbol-value 'exwm-workspace--list)
+                                    (list :grown))))))
+            (let* ((first (exwm-config--user-workspace-for "alice"))
+                   ;; shrink: simulate a workspace-delete that yanked
+                   ;; the slot out from under the cache.
+                   (_ (set 'exwm-workspace--list '(:ws0)))
+                   (before-len (length (symbol-value
+                                        'exwm-workspace--list)))
+                   (second (exwm-config--user-workspace-for "alice"))
+                   (after-len (length (symbol-value
+                                       'exwm-workspace--list))))
+              (setq result
+                    (cond
+                     ((null first) "first lookup returned nil")
+                     ((not (equal first second))
+                      (format "lost stickiness across rebuild: %S -> %S"
+                              first second))
+                     ((not (> after-len before-len))
+                      (format "grow path did not run: list %d -> %d"
+                              before-len after-len))
+                     (t 'pass))))))
+      (error
+       (panic-handle err 'freeze-test--workspace-cache-rebuild-after-shrink)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'workspace-routing/cache-rebuild-after-shrink
+                         result)))
+
+(defun freeze-test--workspace-regex-accepts ()
+  "Sub-check regex/accepts: valid geos-user- names match and capture.
+the regex on exwm-config--maybe-route-user-window is the contract
+between the spawn stamp and the routing hook.  test it in
+isolation since invoking the hook needs a real EXWM."
+  (let ((result 'fail)
+        (rx "\\`geos-user-\\([a-zA-Z0-9_-]+\\)\\'")
+        (cases '(("geos-user-borja"  . "borja")
+                 ("geos-user-b"      . "b")
+                 ("geos-user-A_B-1"  . "A_B-1"))))
+    (condition-case err
+        (let ((mismatches nil))
+          (dolist (case cases)
+            (let ((s (car case))
+                  (want (cdr case)))
+              (save-match-data
+                (cond
+                 ((not (string-match rx s))
+                  (push (cons 'no-match s) mismatches))
+                 ((not (equal (match-string 1 s) want))
+                  (push (cons (match-string 1 s) want) mismatches))))))
+          (setq result (if mismatches
+                           (format "regex misbehaved: %S"
+                                   (nreverse mismatches))
+                         'pass)))
+      (error
+       (panic-handle err 'freeze-test--workspace-regex-accepts)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'workspace-routing/regex/accepts result)))
+
+(defun freeze-test--workspace-regex-rejects ()
+  "Sub-check regex/rejects: near-miss strings do NOT match.
+covers the substring-attack family (`xgeos-user-...',
+`geos-userborja' with no separator), the empty-suffix case, and
+three out-of-class characters (space, semicolon, slash).  if any
+slip through, exwm-config--maybe-route-user-window would attempt
+to route an arbitrary X resource name through session.el and the
+audit story collapses."
+  (let ((result 'fail)
+        (rx "\\`geos-user-\\([a-zA-Z0-9_-]+\\)\\'")
+        (cases '("geos-user-"
+                 "geos-user"
+                 "geos-userborja"
+                 "xgeos-user-borja"
+                 "geos-user-bad name"
+                 "geos-user-bad;name"
+                 "geos-user-bad/name")))
+    (condition-case err
+        (let ((mismatches nil))
+          (dolist (s cases)
+            (save-match-data
+              (when (string-match rx s)
+                (push s mismatches))))
+          (setq result (if mismatches
+                           (format "regex accepted bad input: %S"
+                                   (nreverse mismatches))
+                         'pass)))
+      (error
+       (panic-handle err 'freeze-test--workspace-regex-rejects)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'workspace-routing/regex/rejects result)))
+
+(defun freeze-test-workspace-routing ()
+  "Run all workspace-routing sub-checks.  each records its own result.
+v0.6 starter (aa2917a) wired per-user EXWM workspace allocation
+and a routing hook keyed off `geos-user-NAME'.  smoke-test
+PASS(ui) only proves the file loaded; these sub-checks pin the
+allocator semantics (sticky, forward, bounded) and the regex
+contract."
+  (interactive)
+  (cond
+   ((not (freeze-test--workspace-routing-modules-loaded-p))
+    (freeze-test--record 'workspace-routing 'module-not-loaded))
+   (t
+    (freeze-test--workspace-unbound-live-list)
+    (freeze-test--workspace-sticky)
+    (freeze-test--workspace-distinct)
+    (freeze-test--workspace-counter-forward)
+    (freeze-test--workspace-grow-loop-bounded)
+    (freeze-test--workspace-cache-rebuild-after-shrink)
+    (freeze-test--workspace-regex-accepts)
+    (freeze-test--workspace-regex-rejects))))
+
+;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
 
@@ -625,6 +1261,8 @@ regress, and a regression in any one of them is a privilege bug."
   (freeze-test-state-roundtrip)
   (freeze-test-supervise-throttle)
   (freeze-test-login-abuse)
+  (freeze-test-spawn-shape)
+  (freeze-test-workspace-routing)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
