@@ -82,7 +82,7 @@
 ;; login.el (provides `login-buffer') requires session.el, so we
 ;; cannot require it back without a load cycle.  declare the one
 ;; symbol we call from `session--present-login' to silence the
-;; byte-compiler; at after-init-hook time the function is bound
+;; byte-compiler; at emacs-startup-hook time the function is bound
 ;; because the boot gexp loads login.el after session.el.
 (declare-function login-show "login" ())
 
@@ -693,23 +693,45 @@ both: a session with no recorded child cannot be alive).
     sandbox).  we return t there so loading session.el outside the
     OS does not false-positive every recorded session as dead.
 
+zombie handling: a child that exited but has not been reaped by
+its parent (the supervisor's emacs is PPid for these) still has a
+/proc/<pid>/ directory, so `file-directory-p' alone reports it
+alive.  read /proc/<pid>/status and treat State: Z (zombie) as
+dead, so the poller transitions the session to 'held instead of
+sitting on a dead child forever.  this matters when the per-user
+emacs exits before the supervisor's SIGCHLD handler reaps it (a
+window of typically tens of milliseconds, but with no upper
+bound).  malformed /proc/<pid>/status counts as alive: a read
+that fails mid-flight while the process is being reaped should
+not cause a false 'held transition; the next tick reads cleanly.
+the /proc/<pid>/status read also covers the comm cross-check the
+prior comment flagged as future work: a recycled pid will not
+have State: Z immediately, and the supervisor can detect the
+identity drift via comm in a later hardening pass.
 pid-reuse race: in the window between the child's death and the
 next poll tick another process could in principle be assigned the
 same pid by the kernel.  on a vanilla linux PID_MAX is 32768 (4M
 with the bigger-pids sysctl), the poll interval defaults to 3s,
 and a single-user geos box has a handful of processes; the
 probability of recycling a freshly-killed emacs's pid inside one
-window is small enough to ignore for v0.5.  a future hardening
-would cross-check /proc/<pid>/comm reads back as `emacs' before
-declaring alive, one extra file read per tick per running
-session.  worth revisiting if pid recycling on busy boxes ever
-shows up as a real concern."
+window is small enough to ignore for v0.5."
   (cond
    ((not (integerp pid)) nil)
    ((<= pid 0) nil)
    ((not (file-directory-p "/proc"))
     (not (and (boundp 'pid1-as-emacs-p) pid1-as-emacs-p)))
-   (t (file-directory-p (format "/proc/%d" pid)))))
+   ((not (file-directory-p (format "/proc/%d" pid))) nil)
+   (t
+    (condition-case _err
+        (with-temp-buffer
+          (insert-file-contents-literally
+           (format "/proc/%d/status" pid))
+          (goto-char (point-min))
+          ;; State line shape: "State:\tZ (zombie)" or "State:\tR (running)" etc.
+          (not (re-search-forward "^State:[ \t]+Z" nil t)))
+      ;; status read failed; treat as alive so a transient /proc
+      ;; race does not flip a real running child to 'held.
+      (error t)))))
 
 (defun session--poll-children ()
   "Sweep the registry, transition vanished 'running children to 'held.
@@ -762,11 +784,11 @@ through `session--poll-children', which is itself wrapped in
 panic-handle, so a poll iteration cannot wedge the supervisor.
 
 LOAD-BEARING: the only caller is `session--boot-rehydrate', which
-self-removes from `after-init-hook' on first run; that hook's
+self-removes from `emacs-startup-hook' on first run; that hook's
 self-removal is what actually prevents stacked pollers across
 repeated init loads.  cancel-then-rearm here is the second line
 of defense, not the first.  if the self-remove in
-`session--boot-rehydrate' ever regresses, every after-init pass
+`session--boot-rehydrate' ever regresses, every startup pass
 will land here and the cancel-then-rearm is all that stops a
 runaway timer stack."
   (when (timerp session--poll-timer)
@@ -863,16 +885,28 @@ visible breadcrumb than a blank tty."
 ;; free outside the OS.
 ;;
 ;; the hook intentionally fires AFTER `supervise-finalize' because
-;; emacs runs `after-init-hook' once the `-l' chain is fully loaded;
-;; the boot gexp loads session.el BEFORE buffers/, userland services,
-;; and exwm-config, so calling `session-rehydrate' at file-load time
-;; would try to spawn per-user emacses before the rest of the system
-;; is up (and before `supervise-finalize' has restored counters).
-;; deferring to after-init-hook makes rehydrate sequence safely
-;; against the rest of the boot.  the hook is removed inside its own
-;; body so it is idempotent under repeated init-file loads.
+;; emacs runs `emacs-startup-hook' AFTER `command-line-1' has loaded
+;; every `-l' file on the supervisor's argv; the boot gexp loads
+;; session.el BEFORE buffers/, userland services, and exwm-config, so
+;; calling `session-rehydrate' at file-load time would try to spawn
+;; per-user emacses before the rest of the system is up (and before
+;; `supervise-finalize' has restored counters).  deferring to
+;; emacs-startup-hook makes rehydrate sequence safely against the rest
+;; of the boot.  the hook is removed inside its own body so it is
+;; idempotent under repeated init-file loads.
+;;
+;; (v0.6-preview, 2026-05-11) MUST be `emacs-startup-hook', NOT
+;; `after-init-hook'.  emacs fires after-init-hook inside
+;; `command-line' BEFORE `command-line-1' processes -l args (see
+;; startup.el lines ~1543 vs 2866 in emacs 30.2).  the supervisor
+;; is started with `-Q -l early-init.el -l ... -l session.el ...',
+;; so at after-init-hook time session.el has not been loaded and
+;; `add-hook' has not run yet; the hook fires empty and the
+;; *login* buffer never appears.  emacs-startup-hook is the
+;; AFTER-l-chain hook and is the right one for any startup wiring
+;; declared inside a `-l'-loaded file.
 (defun session--boot-rehydrate ()
-  "after-init-hook entry point.  gated on `pid1-as-emacs-p' and
+  "emacs-startup-hook entry point.  gated on `pid1-as-emacs-p' and
 removes itself on first run.
 
 after rehydrate returns, if no session is `'running' we present the
@@ -884,7 +918,7 @@ session uses the `q' binding in login-mode's :running state).
 
 the `geos.login=skip' kernel cmdline token short-circuits the login
 presentation; see file commentary for the rationale."
-  (remove-hook 'after-init-hook #'session--boot-rehydrate)
+  (remove-hook 'emacs-startup-hook #'session--boot-rehydrate)
   (when (and (boundp 'pid1-as-emacs-p) pid1-as-emacs-p)
     (condition-case err
         (progn
@@ -909,7 +943,7 @@ presentation; see file commentary for the rationale."
       (error
        (panic-handle err 'session-boot-rehydrate)))))
 
-(add-hook 'after-init-hook #'session--boot-rehydrate)
+(add-hook 'emacs-startup-hook #'session--boot-rehydrate)
 
 (provide 'session)
 ;;; session.el ends here
