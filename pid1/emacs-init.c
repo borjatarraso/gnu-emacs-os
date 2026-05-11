@@ -30,6 +30,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <limits.h>
 #include <linux/if.h>
 #include <net/route.h>
@@ -41,6 +42,7 @@
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -2062,6 +2064,578 @@ Fpid1_reboot(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return Qnil;
 }
 
+/* signal pid1-error with an arbitrary literal message (no strerror
+ * suffix). used by parent-side validation paths that do not have an
+ * errno to report, like "uid below floor".  invariant: sets a non-local
+ * exit on env, returns nil, same contract as pid1_signal_errno. */
+static emacs_value
+pid1_signal_msg(emacs_env *env, const char *msg)
+{
+    emacs_value Qnil = env->intern(env, "nil");
+    emacs_value sym = env->intern(env, "pid1-error");
+    emacs_value s = env->make_string(env, msg, (ptrdiff_t)strlen(msg));
+    emacs_value largs[1] = { s };
+    emacs_value data = env->funcall(env, env->intern(env, "list"), 1, largs);
+    env->non_local_exit_signal(env, sym, data);
+    return Qnil;
+}
+
+/* (M, v0.5 spawn binding) pre-built console prefixes for the child-
+ * side failure path.  the child cannot malloc, cannot call printf,
+ * cannot signal pid1-error; it can only call syscalls and write
+ * pre-built bytes.  these strings let the child report which stage
+ * of the post-fork sequence failed without formatting at runtime.
+ * the trailing ": errno=" is appended in the child by an itoa loop
+ * over the integer errno value, followed by "\n". */
+static const char child_pfx_setgid[]    = "pid1: spawn-as-uid: setgid: errno=";
+static const char child_pfx_setgroups[] = "pid1: spawn-as-uid: setgroups: errno=";
+static const char child_pfx_setuid[]    = "pid1: spawn-as-uid: setuid: errno=";
+static const char child_pfx_chdir[]     = "pid1: spawn-as-uid: chdir: errno=";
+static const char child_pfx_execve[]    = "pid1: spawn-as-uid: execve: errno=";
+
+/* write an errno-tagged line to a pre-opened fd from the child path.
+ * invariant: no malloc, no stdio; only write().  err can be any int.
+ * if fd < 0 we silently no-op.  used for any logging that happens
+ * AFTER setresuid in the child, because at that point we cannot
+ * re-open /dev/console (typically mode 600 root:root, EACCES). */
+static void
+child_log_fd(int fd, const char *prefix, int err)
+{
+    if (fd < 0) return;
+    /* itoa into a tiny local buffer.  errno fits in 32 bits worst
+     * case, ten digits plus sign plus NUL is 12; we have 16 to spare. */
+    char num[16];
+    int ni = (int)sizeof num;
+    num[--ni] = '\0';
+    int neg = 0;
+    unsigned int v;
+    if (err < 0) { neg = 1; v = (unsigned int)(-(long)err); }
+    else         { v = (unsigned int)err; }
+    if (v == 0) {
+        num[--ni] = '0';
+    } else {
+        while (v > 0 && ni > 0) { num[--ni] = (char)('0' + (v % 10u)); v /= 10u; }
+    }
+    if (neg && ni > 0) num[--ni] = '-';
+    ssize_t r;
+    r = write(fd, prefix, strlen(prefix));     (void)r;
+    r = write(fd, num + ni, strlen(num + ni)); (void)r;
+    r = write(fd, "\n", 1);                    (void)r;
+}
+
+/* write an errno-tagged line to /dev/console from the child path.
+ * invariant: no malloc, no stdio; only open/write/close.  if the open
+ * fails we silently give up; the supervisor will still see exit-status
+ * 127.  ONLY safe for use BEFORE setresuid: an unprivileged child
+ * cannot open /dev/console (mode 600 root:root) and the failure log
+ * would silently vanish.  for post-setresuid logging use child_log_fd
+ * against a fd opened earlier while still root. */
+static void
+child_log(const char *prefix, int err)
+{
+    int fd = open("/dev/console", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    child_log_fd(fd, prefix, err);
+    int c = close(fd); (void)c;
+}
+
+/* parse /etc/passwd for ROW where pw_name == name.  on match, copies
+ * the home directory into HOMEBUF (size HOMESIZE) and returns 0.
+ * returns -1 with errno set on read/format errors, +1 if NAME is not
+ * found in the file.  parent-side only; uses malloc-free fixed
+ * buffers because /etc/passwd lines are bounded in practice (the
+ * kernel's getpwnam_r expects buffers of ~1 KiB and we are not
+ * fancier than getpwnam_r).  NAMEMAX columns 0 and 5 are the only
+ * ones we read. */
+static int
+passwd_lookup_home(const char *name, char *homebuf, size_t homesize)
+{
+    FILE *f = fopen("/etc/passwd", "re");
+    if (!f) return -1;
+    /* a /etc/passwd line is conventionally well under 1 KiB.  4 KiB
+     * is the same cap getent uses on glibc; anything longer is
+     * malformed. */
+    char line[4096];
+    size_t namelen = strlen(name);
+    while (fgets(line, (int)sizeof line, f)) {
+        /* split on ':' in place.  we want field 0 (name) and field 5
+         * (home).  do not write past the buffer; lines without a
+         * trailing newline are tolerated. */
+        char *fields[7];
+        int nf = 0;
+        char *p = line;
+        fields[nf++] = p;
+        while (*p && nf < 7) {
+            if (*p == ':') { *p = '\0'; fields[nf++] = p + 1; }
+            p++;
+        }
+        if (nf < 6) continue;
+        /* strip trailing newline from whichever was the last field. */
+        char *last = fields[nf - 1];
+        size_t ll = strlen(last);
+        while (ll > 0 && (last[ll-1] == '\n' || last[ll-1] == '\r'))
+            last[--ll] = '\0';
+        if (strlen(fields[0]) != namelen) continue;
+        if (memcmp(fields[0], name, namelen) != 0) continue;
+        size_t hl = strlen(fields[5]);
+        if (hl + 1 > homesize) { fclose(f); errno = ENAMETOOLONG; return -1; }
+        memcpy(homebuf, fields[5], hl + 1);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return 1;
+}
+
+/* collect supplementary group ids from /etc/group where NAME appears
+ * in the comma-separated member list.  on success returns the count
+ * written to OUT and *OUTN, where OUT is caller-owned with capacity
+ * OUTCAP.  the primary GID is always included as out[0]; the spec is
+ * generous about duplicates and the kernel deduplicates internally.
+ * returns -1 with errno set on error.  parent-side only. */
+static int
+group_collect(const char *name, gid_t primary, gid_t *out, size_t outcap,
+              size_t *outn)
+{
+    if (outcap < 1) { errno = EINVAL; return -1; }
+    size_t n = 0;
+    out[n++] = primary;
+    FILE *f = fopen("/etc/group", "re");
+    if (!f) return -1;
+    char line[8192];
+    size_t namelen = strlen(name);
+    while (fgets(line, (int)sizeof line, f)) {
+        /* /etc/group: groupname:passwd:gid:members
+         * members is comma-separated, possibly empty. */
+        char *fields[4];
+        int nf = 0;
+        char *p = line;
+        fields[nf++] = p;
+        while (*p && nf < 4) {
+            if (*p == ':') { *p = '\0'; fields[nf++] = p + 1; }
+            p++;
+        }
+        if (nf < 4) continue;
+        char *members = fields[3];
+        size_t ml = strlen(members);
+        while (ml > 0 && (members[ml-1] == '\n' || members[ml-1] == '\r'))
+            members[--ml] = '\0';
+        /* walk the comma-separated list looking for an exact-token
+         * match against NAME.  do this without strtok to avoid the
+         * static-state hazard if some future caller is also using it. */
+        char *m = members;
+        while (*m) {
+            char *q = m;
+            while (*q && *q != ',') q++;
+            size_t tl = (size_t)(q - m);
+            if (tl == namelen && memcmp(m, name, namelen) == 0) {
+                long g = strtol(fields[2], NULL, 10);
+                if (g < 0) g = 0;
+                gid_t gv = (gid_t)g;
+                /* dedupe against primary, which already sits at out[0]. */
+                int dup = 0;
+                for (size_t i = 0; i < n; i++)
+                    if (out[i] == gv) { dup = 1; break; }
+                if (!dup) {
+                    if (n >= outcap) { fclose(f); errno = E2BIG; return -1; }
+                    out[n++] = gv;
+                }
+                break;
+            }
+            if (*q == ',') m = q + 1; else m = q;
+        }
+    }
+    fclose(f);
+    *outn = n;
+    return 0;
+}
+
+/* (pid1-spawn-as-uid UID GID NAME PROGRAM ARGV ENV) -> child pid int.
+ * v0.5 session-spawn ABI (see docs/v05-session-spawn-abi.md).
+ * invariant: every privilege-transition syscall happens in the child
+ * in the exact order setgid -> setgroups -> setuid, then env-scrub
+ * (via execve with a parent-built envp), then chdir, then fd close,
+ * then execve.  every allocation happens in the parent before fork;
+ * the child path uses only the parent-built buffers, raw syscalls,
+ * and _exit.  parent-side errors signal pid1-error; child-side
+ * failures write one line to /dev/console and _exit(127).
+ * uid floor is 1000.  gid floor is 1000 (mirrors uid; passwd-add-user
+ * allocates primary gids from the same range, and a uid=1000 child
+ * with gid=0 would otherwise have write access to anything mode 070). */
+static emacs_value
+Fpid1_spawn_as_uid(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                   void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 6)
+        return pid1_signal_errno(env, "pid1: pid1-spawn-as-uid needs 6 args",
+                                 EINVAL);
+
+    /* --- parent step 1: arg extraction + validation. --- */
+    intmax_t uid_im = env->extract_integer(env, args[0]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    intmax_t gid_im = env->extract_integer(env, args[1]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    /* uid/gid floor for v0.5.  the spec reserves a future module flag
+     * pid1-spawn-allow-system for v0.6+; until then refuse anything
+     * that could become root by accident.  legitimate users in v0.5
+     * have both uid and gid >= 1000 (passwd-add-user allocates from
+     * the same range).  the message strings are matched by login.el's
+     * error handler, do not rephrase. */
+    if (uid_im < 1000)
+        return pid1_signal_msg(env, "pid1: spawn-as-uid: uid below floor");
+    if (gid_im < 1000)
+        return pid1_signal_msg(env, "pid1: spawn-as-uid: gid below floor");
+    if (gid_im < 0 || uid_im > 0x7fffffff || gid_im > 0x7fffffff)
+        return pid1_signal_errno(env, "pid1: spawn-as-uid: bad uid/gid",
+                                 EINVAL);
+    uid_t uid = (uid_t)uid_im;
+    gid_t gid = (gid_t)gid_im;
+
+    char name[256];
+    char program[4096];
+    if (extract_cstring_into(env, args[2], name, sizeof name) < 0)
+        return Qnil;
+    if (extract_cstring_into(env, args[3], program, sizeof program) < 0)
+        return Qnil;
+    /* empty NAME would otherwise pass the character-reject loop with
+     * zero iterations and then fail later with "user not found", which
+     * is the wrong error message.  catch it here. */
+    if (name[0] == '\0') {
+        return pid1_signal_errno(env, "pid1: spawn-as-uid: bad name (empty)",
+                                 EINVAL);
+    }
+    /* reject embedded slashes or NULs in NAME so a clever caller can
+     * not slip "../root" past the passwd lookup.  copy_string_contents
+     * already rejects raw NUL but leaving the check in for clarity. */
+    for (size_t i = 0; name[i]; i++) {
+        if (name[i] == '/' || name[i] == ':' || name[i] == '\n' ||
+            name[i] == '\r' || name[i] == ' ') {
+            return pid1_signal_errno(env, "pid1: spawn-as-uid: bad name",
+                                     EINVAL);
+        }
+    }
+
+    /* --- parent step 2/3: passwd lookup for home. --- */
+    char home[4096];
+    {
+        int rc = passwd_lookup_home(name, home, sizeof home);
+        if (rc < 0)
+            return pid1_signal_errno(env, "pid1: spawn-as-uid: passwd lookup",
+                                     errno);
+        if (rc > 0)
+            return pid1_signal_msg(env,
+                "pid1: spawn-as-uid: passwd lookup: user not found");
+    }
+
+    /* --- parent step 2: supplementary groups from /etc/group. ---
+     * NGROUPS_MAX on linux is the system cap, but we keep our own
+     * smaller bound because setgroups copies into a kernel-side
+     * fixed buffer and we want the cap to be deterministic across
+     * kernels.  64 is what login(1) historically used. */
+    gid_t groups[64];
+    size_t ngroups = 0;
+    if (group_collect(name, gid, groups, sizeof groups / sizeof groups[0],
+                      &ngroups) < 0)
+        return pid1_signal_errno(env, "pid1: spawn-as-uid: group lookup",
+                                 errno);
+
+    /* --- parent step 4: build envp from ENV.  ENV is a lisp list of
+     * "KEY=VALUE" strings.  we malloc the char** + each string in the
+     * parent.  comment per project rule: malloc is acceptable here
+     * because this binding is a startup-rare path (one call per user
+     * login, not a hot path).  every allocation is freed on every
+     * exit, including the parent-side error branches; the child does
+     * NOT free, since exec/execve releases the address space. --- */
+    emacs_value Qcar = env->intern(env, "car");
+    emacs_value Qcdr = env->intern(env, "cdr");
+    emacs_value Qlength = env->intern(env, "length");
+    char **envp = NULL;
+    char **child_argv = NULL;
+    intmax_t envn = 0;
+    intmax_t argn = 0;
+
+    {
+        emacs_value la[1] = { args[5] };
+        emacs_value len = env->funcall(env, Qlength, 1, la);
+        envn = env->extract_integer(env, len);
+        if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+            return Qnil;
+        if (envn < 0 || envn > 4096) {
+            return pid1_signal_errno(env,
+                "pid1: spawn-as-uid: env list bad length", EINVAL);
+        }
+    }
+    {
+        emacs_value la[1] = { args[4] };
+        emacs_value len = env->funcall(env, Qlength, 1, la);
+        argn = env->extract_integer(env, len);
+        if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+            return Qnil;
+        if (argn < 1 || argn > 4096) {
+            return pid1_signal_errno(env,
+                "pid1: spawn-as-uid: argv list bad length", EINVAL);
+        }
+    }
+
+    envp = (char **)calloc((size_t)envn + 1, sizeof *envp);
+    if (!envp) {
+        return pid1_signal_errno(env, "pid1: spawn-as-uid: calloc envp",
+                                 errno ? errno : ENOMEM);
+    }
+    child_argv = (char **)calloc((size_t)argn + 1, sizeof *child_argv);
+    if (!child_argv) {
+        int e = errno ? errno : ENOMEM;
+        free(envp);
+        return pid1_signal_errno(env, "pid1: spawn-as-uid: calloc argv", e);
+    }
+
+    /* helper: free what we built so far on the parent error path.
+     * inline because we want it visible in the local control flow,
+     * goto pattern matches the rest of the file's defensive style. */
+#define SPAWN_PARENT_FREE() do {                                     \
+        if (envp) {                                                  \
+            for (intmax_t i = 0; i < envn; i++) free(envp[i]);       \
+            free(envp);                                              \
+            envp = NULL;                                             \
+        }                                                            \
+        if (child_argv) {                                            \
+            for (intmax_t i = 0; i < argn; i++) free(child_argv[i]); \
+            free(child_argv);                                        \
+            child_argv = NULL;                                       \
+        }                                                            \
+    } while (0)
+
+    /* walk ENV list, copy each "KEY=VALUE" string into a heap dup. */
+    {
+        emacs_value cur = args[5];
+        for (intmax_t i = 0; i < envn; i++) {
+            emacs_value ca[1] = { cur };
+            emacs_value item = env->funcall(env, Qcar, 1, ca);
+            if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+            ptrdiff_t need = 0;
+            if (!env->copy_string_contents(env, item, NULL, &need)) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+            if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+            if (need < 1 || need > 65536) {
+                SPAWN_PARENT_FREE();
+                return pid1_signal_errno(env,
+                    "pid1: spawn-as-uid: env entry too long", ENAMETOOLONG);
+            }
+            envp[i] = (char *)malloc((size_t)need);
+            if (!envp[i]) {
+                int e = errno ? errno : ENOMEM;
+                SPAWN_PARENT_FREE();
+                return pid1_signal_errno(env,
+                    "pid1: spawn-as-uid: malloc env entry", e);
+            }
+            if (!env->copy_string_contents(env, item, envp[i], &need)) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+            /* reject embedded NUL, missing '=', or leading '=' so the
+             * child env is well-formed before we hand it to execve.  a
+             * leading '=' means an empty key, which POSIX leaves undef
+             * and execve will happily pass on to a child that has no
+             * way to look it up.  refuse it here. */
+            if (envp[i][0] == '=') {
+                SPAWN_PARENT_FREE();
+                return pid1_signal_errno(env,
+                    "pid1: spawn-as-uid: bad env entry", EINVAL);
+            }
+            int saw_eq = 0;
+            for (ptrdiff_t k = 0; k + 1 < need; k++) {
+                if (envp[i][k] == '\0') {
+                    SPAWN_PARENT_FREE();
+                    return pid1_signal_errno(env,
+                        "pid1: spawn-as-uid: env entry has NUL", EINVAL);
+                }
+                if (envp[i][k] == '=') saw_eq = 1;
+            }
+            if (!saw_eq) {
+                SPAWN_PARENT_FREE();
+                return pid1_signal_errno(env,
+                    "pid1: spawn-as-uid: env entry missing '='", EINVAL);
+            }
+            emacs_value da[1] = { cur };
+            cur = env->funcall(env, Qcdr, 1, da);
+            if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+        }
+        envp[envn] = NULL;
+    }
+
+    /* --- parent step 5: walk ARGV list the same way. --- */
+    {
+        emacs_value cur = args[4];
+        for (intmax_t i = 0; i < argn; i++) {
+            emacs_value ca[1] = { cur };
+            emacs_value item = env->funcall(env, Qcar, 1, ca);
+            if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+            ptrdiff_t need = 0;
+            if (!env->copy_string_contents(env, item, NULL, &need)) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+            if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+            if (need < 1 || need > 65536) {
+                SPAWN_PARENT_FREE();
+                return pid1_signal_errno(env,
+                    "pid1: spawn-as-uid: argv entry too long", ENAMETOOLONG);
+            }
+            child_argv[i] = (char *)malloc((size_t)need);
+            if (!child_argv[i]) {
+                int e = errno ? errno : ENOMEM;
+                SPAWN_PARENT_FREE();
+                return pid1_signal_errno(env,
+                    "pid1: spawn-as-uid: malloc argv entry", e);
+            }
+            if (!env->copy_string_contents(env, item, child_argv[i], &need)) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+            emacs_value da[1] = { cur };
+            cur = env->funcall(env, Qcdr, 1, da);
+            if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+                SPAWN_PARENT_FREE();
+                return Qnil;
+            }
+        }
+        child_argv[argn] = NULL;
+    }
+
+    /* compute the fd-close upper bound in the parent so the child does
+     * not have to call sysconf or getrlimit (both AS-safe on glibc but
+     * not strictly required to be).  RLIMIT_NOFILE soft is what open()
+     * would honor anyway; cap at 65536 in case the limit is INFINITY. */
+    rlim_t maxfd_rl = 1024;
+    {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+            maxfd_rl = rl.rlim_cur;
+            if (maxfd_rl == RLIM_INFINITY || maxfd_rl > 65536)
+                maxfd_rl = 65536;
+        }
+    }
+    int maxfd = (int)maxfd_rl;
+
+    /* --- parent step 6: fork. --- */
+    pid_t pid = fork();
+    if (pid < 0) {
+        int e = errno;
+        SPAWN_PARENT_FREE();
+        return pid1_signal_errno(env, "pid1: spawn-as-uid: fork", e);
+    }
+
+    if (pid == 0) {
+        /* --- CHILD PATH.  no malloc, no env->* calls, no stdio. ---
+         * everything from here uses syscalls and the parent-built
+         * buffers (home, child_argv, envp, groups, program).  on any
+         * error we write a line to /dev/console and _exit(127); the
+         * supervisor's reaper picks up the exit status. */
+
+        /* step 7: setsid.  EPERM means we are already a session
+         * leader (true for any pid1-spawned child whose pgid was
+         * inherited), which is fine; ignore. */
+        if (setsid() < 0 && errno != EPERM) {
+            /* not fatal per spec, but worth a line. */
+            child_log("pid1: spawn-as-uid: setsid: errno=", errno);
+        }
+
+        /* pre-open /dev/console for the post-setresuid log path.
+         * after setresuid the child is unprivileged and an open of
+         * /dev/console (mode 600 root:root in normal configs) returns
+         * EACCES, so any failure line we tried to write later would
+         * silently vanish.  open() is async-signal-safe, which keeps
+         * us inside the post-fork rules.  if the open itself fails we
+         * proceed with console_fd = -1; child_log_fd no-ops on it.
+         * O_CLOEXEC keeps it from leaking past the eventual execve. */
+        int console_fd = open("/dev/console", O_WRONLY | O_CLOEXEC);
+
+        /* step 8: setresgid.  MUST be before setuid; once euid is
+         * non-zero, setgid/setgroups silently refuse. */
+        if (setresgid(gid, gid, gid) < 0) {
+            child_log(child_pfx_setgid, errno);
+            _exit(127);
+        }
+
+        /* step 9: setgroups.  also before setuid for the same reason. */
+        if (setgroups(ngroups, groups) < 0) {
+            child_log(child_pfx_setgroups, errno);
+            _exit(127);
+        }
+
+        /* step 10: setresuid.  after this we are unprivileged. */
+        if (setresuid(uid, uid, uid) < 0) {
+            child_log(child_pfx_setuid, errno);
+            _exit(127);
+        }
+
+        /* step 12: chdir to home; failure is logged but non-fatal,
+         * per spec we fall back to "/".  step 11 (env scrub) is
+         * implicit: execve replaces our env entirely with envp.
+         * post-setresuid: use console_fd, not child_log, because the
+         * unprivileged child cannot re-open /dev/console. */
+        if (chdir(home) < 0) {
+            child_log_fd(console_fd, child_pfx_chdir, errno);
+            if (chdir("/") < 0) {
+                child_log_fd(console_fd,
+                    "pid1: spawn-as-uid: chdir(/): errno=", errno);
+                _exit(127);
+            }
+        }
+
+        /* step 13: close fds >= 3.  fds 0/1/2 stay inherited from
+         * pid1 (all pointing at /dev/console per the spec's v0.5
+         * decision).  loop bounded by the parent-computed maxfd so
+         * the child does not need any post-fork syscalls beyond
+         * close() in this stage.
+         *
+         * close fds 3..maxfd-1 unconditionally.  the child should
+         * inherit only stdin/stdout/stderr (0/1/2, all /dev/console)
+         * and console_fd (the pre-opened error channel, fd N).  if
+         * future maintenance wants a fd to survive this loop, gate
+         * the close on `fd != console_fd' or whitelist explicitly.
+         * NOT silently dup2(logfd, 3) and hope. */
+        for (int fd = 3; fd < maxfd; fd++) {
+            if (fd == console_fd) continue;
+            (void)close(fd);
+        }
+
+        /* step 14: execve.  if it returns, we failed; log and exit.
+         * post-setresuid path, so route the log through console_fd. */
+        (void)execve(program, child_argv, envp);
+        child_log_fd(console_fd, child_pfx_execve, errno);
+        _exit(127);
+    }
+
+    /* --- parent step 15: return the pid.  free the buffers; the
+     * child has its own copy via fork's COW. --- */
+    SPAWN_PARENT_FREE();
+#undef SPAWN_PARENT_FREE
+
+    return env->make_integer(env, (intmax_t)pid);
+}
+
 /* binds NAME to FUNC at top level via (defalias NAME FUNC). assumes
  * env is non-null and not in non-local-exit state. named with a pid1_
  * prefix because the bare name `bind` collides with libc's bind(2)
@@ -2145,6 +2719,11 @@ emacs_module_init(struct emacs_runtime *ert)
         "STATE is one of \"mem\", \"freeze\", \"standby\", \"disk\".",
         NULL);
     pid1_defalias(env, "pid1-suspend", sus);
+
+    emacs_value spw = env->make_function(env, 6, 6, Fpid1_spawn_as_uid,
+        "pid1-spawn-as-uid: spawn child as uid/gid per v0.5 ABI",
+        NULL);
+    pid1_defalias(env, "pid1-spawn-as-uid", spw);
 
     /* provide the feature so (require 'pid1-module) works after
      * (module-load ...) without a separate elisp wrapper. */

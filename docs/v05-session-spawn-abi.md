@@ -50,7 +50,11 @@ bug.
 
   1. parent: validate args. UID >= 1000 unless caller passed the
      module flag `pid1-spawn-allow-system' (deferred to v0.6; v0.5
-     refuses uid < 1000 with EPERM mapped to "uid below floor").
+     refuses uid < 1000 with EPERM mapped to "uid below floor"). The
+     same floor of 1000 applies to GID, refused as "gid below floor",
+     because passwd-add-user allocates primary gids from the same
+     range and a uid=1000 child with gid=0 would have write access to
+     anything mode 070.
   2. parent: fork(). On -1 -> signal pid1-error fork.
   3. child: setsid() so the child is its own session leader. ignore
      EPERM (already a leader is fine).
