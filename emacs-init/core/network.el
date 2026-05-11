@@ -35,25 +35,27 @@
   :prefix "network-")
 
 (defcustom network-interface-config
-  '(("lo" . (:address "127.0.0.1" :netmask "255.0.0.0" :auto-up t)))
+  '(("lo" . (:address "127.0.0.1" :prefix 8 :auto-up t)))
   "Declarative interface table.
 Each entry is (NAME . PLIST). PLIST keys:
   :address  string, e.g. \"127.0.0.1\"
-  :netmask  string, e.g. \"255.0.0.0\"
-  :gateway  string or nil
+  :prefix   integer 0..32, CIDR prefix length (e.g. 24 for /24).
+  :gateway  string or nil, default-route next-hop
   :auto-up  bool, bring the interface up at boot.
 
-`network-apply-config' walks this list and converges the system
-toward it. today only the lo + :auto-up case actually does
-anything; the rest is a placeholder until the pid1 module exposes
-SIOCSIFADDR."
+`network-apply-config' walks this list and calls into the pid1
+module to converge the running kernel toward it. lo is special-
+cased to use `pid1-bring-up-lo' (so the loopback comes up even
+when pid1-set-address is unbound, e.g. plain `emacs -Q'); every
+other interface goes through `pid1-set-address' and, if :gateway
+is non-nil, `pid1-set-route-default'."
   :group 'network
   :type '(alist
           :key-type (string :tag "Interface name")
           :value-type
           (plist :key-type symbol
                  :options ((:address (string :tag "IPv4 address"))
-                           (:netmask (string :tag "Netmask"))
+                           (:prefix (integer :tag "CIDR prefix length"))
                            (:gateway (choice (const :tag "None" nil)
                                              (string :tag "Gateway")))
                            (:auto-up (boolean :tag "Bring up at boot"))))))
@@ -82,6 +84,43 @@ that is not a panic, it is the documented degraded mode."
     (message "network: pid1-bring-up-lo unbound, skipping (no module loaded)")
     nil))
 
+(defun network--set-static (name address prefix gateway)
+  "Apply ADDRESS/PREFIX (and optional GATEWAY) to interface NAME.
+Calls into the pid1 module. Signals `network-error' on bad input
+(missing address, prefix out of range), routes pid1-error through
+the caller's panic-handle. Returns t on success, nil on failure
+already routed."
+  (unless (stringp address)
+    (signal 'network-error
+            (list "static apply: missing :address" name)))
+  (unless (and (integerp prefix) (>= prefix 0) (<= prefix 32))
+    (signal 'network-error
+            (list "static apply: bad :prefix" name prefix)))
+  (cond
+   ((not (fboundp 'pid1-set-address))
+    (message "network: %s static-config noted, pid1-set-address unbound" name)
+    nil)
+   (t
+    (condition-case err
+        (progn
+          (funcall (symbol-function 'pid1-set-address) name address prefix)
+          (when (and gateway (fboundp 'pid1-set-route-default))
+            ;; gateway add can fail with EEXIST on a re-apply; route
+            ;; that through panic-handle but do not abort the address
+            ;; assignment we just successfully made.
+            (condition-case gw-err
+                (funcall (symbol-function 'pid1-set-route-default)
+                         gateway name)
+              (error
+               (panic-handle gw-err
+                             (cons 'network--set-static-gateway name)))))
+          (message "network: %s -> %s/%d%s" name address prefix
+                   (if gateway (format " via %s" gateway) ""))
+          t)
+      (error
+       (panic-handle err (cons 'network--set-static name))
+       nil)))))
+
 (defun network--apply-entry (name plist)
   "Apply one (NAME . PLIST) row from `network-interface-config'.
 Wrapped in condition-case so a single bad row cannot take the
@@ -92,11 +131,15 @@ can distinguish malformed-input bugs from supervision failures
       (cond
        ((and (string= name "lo") (plist-get plist :auto-up))
         (network--bring-up-lo))
+       ((and (plist-get plist :auto-up) (plist-get plist :address))
+        (network--set-static name
+                             (plist-get plist :address)
+                             (plist-get plist :prefix)
+                             (plist-get plist :gateway)))
        (t
-        ;; TODO(5c): wire :address / :netmask / :gateway once
-        ;; pid1-set-address lands C-side. until then we acknowledge
-        ;; the config exists but cannot enact it.
-        (message "network: %s config noted, no apply path yet (phase 5)" name)
+        ;; entry exists but no actionable shape: missing :address, or
+        ;; :auto-up nil (declarative "leave it alone"). log and move on.
+        (message "network: %s config noted, no auto-up action" name)
         nil))
     (network-error
      ;; let the caller deal with this. malformed config is not the
@@ -229,11 +272,33 @@ to dotted IPv4. Signals `network-error' on malformed rows."
 ;; is `C-c e n'. nothing fancy yet, just the operations a human might
 ;; want at the prompt before the *network* buffer lands.
 
+(defun network-set-static (name address prefix &optional gateway)
+  "Imperative: assign ADDRESS/PREFIX to NAME, optional GATEWAY default.
+Convenience wrapper around `network--set-static' for M-x and the
+*network* buffer's `s' key. PREFIX is the CIDR length 0..32.
+GATEWAY may be nil. Returns t on success, nil on routed failure."
+  (interactive
+   (let* ((default-iface
+            (or (and (boundp 'network-buffer-iface-at-point)
+                     (fboundp 'network-buffer-iface-at-point)
+                     (let ((p (network-buffer-iface-at-point)))
+                       (and p (plist-get p :iface))))
+                ""))
+          (n (read-string "Interface: " default-iface))
+          (a (read-string (format "Address for %s: " n)))
+          (p (read-number (format "Prefix length for %s/%s: " n a) 24))
+          (g (let ((s (read-string
+                       (format "Gateway (empty for none): "))))
+               (if (string-empty-p s) nil s))))
+     (list n a p g)))
+  (network--set-static name address prefix gateway))
+
 (defvar network-prefix-map
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "a") #'network-apply-config)
     (define-key m (kbd "i") #'network-show-interfaces)
     (define-key m (kbd "r") #'network-show-routes)
+    (define-key m (kbd "s") #'network-set-static)
     m)
   "Keymap for network commands, hung under \\`C-c e n'.")
 

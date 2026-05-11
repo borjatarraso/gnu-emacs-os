@@ -27,10 +27,13 @@
  */
 
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/if.h>
+#include <net/route.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -215,6 +218,99 @@ raw_bring_up_lo(void)
     (void)close(s);
     return 0;
 }
+
+#ifdef PID1_MODULE
+/* assign IPv4 address + netmask to IFNAME and bring it up. ADDR_BE
+ * is the address in network byte order; PREFIX is the CIDR length
+ * 0..32 from which the netmask is computed (callers already know the
+ * prefix; we avoid round-tripping the netmask through dotted-quad
+ * parsing). on success returns 0 and the interface is up; on failure
+ * returns -1 with errno set, fd always closed. invariant: SIOCSIFADDR
+ * before SIOCSIFNETMASK before flags-up; the kernel rejects netmask
+ * before address with EADDRNOTAVAIL on some 5.x trees. */
+static int
+raw_set_address(const char *ifname, uint32_t addr_be, int prefix)
+{
+    if (prefix < 0 || prefix > 32) { errno = EINVAL; return -1; }
+    size_t nlen = strnlen(ifname, IFNAMSIZ);
+    if (nlen == 0 || nlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) return -1;
+    struct ifreq r;
+    memset(&r, 0, sizeof r);
+    memcpy(r.ifr_name, ifname, nlen);
+    r.ifr_name[IFNAMSIZ - 1] = '\0';
+    struct sockaddr_in *sin = (struct sockaddr_in *)&r.ifr_addr;
+    sin->sin_family = AF_INET;
+    sin->sin_addr.s_addr = addr_be;
+    if (ioctl(s, SIOCSIFADDR, &r) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    /* prefix == 0 special-cased: shift by 32 on a 32-bit value is
+     * undefined behavior in C, and -Wshift-count-overflow would
+     * notice on a constant. */
+    uint32_t mask_host = (prefix == 0)
+        ? 0u
+        : (uint32_t)(0xFFFFFFFFu << (32 - prefix));
+    sin->sin_addr.s_addr = htonl(mask_host);
+    if (ioctl(s, SIOCSIFNETMASK, &r) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    /* read-modify-write: preserve whatever flags the kernel had set
+     * and only OR in UP|RUNNING. clobbering flags is how you
+     * accidentally drop NOARP or PROMISC. */
+    if (ioctl(s, SIOCGIFFLAGS, &r) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    r.ifr_flags |= IFF_UP | IFF_RUNNING;
+    if (ioctl(s, SIOCSIFFLAGS, &r) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    (void)close(s);
+    return 0;
+}
+
+/* install a default IPv4 route via GW_BE through IFNAME. SIOCADDRT
+ * with rt_dst=0/0 is the kernel's idiom for "default gateway". if a
+ * default route already exists this returns -1 with errno=EEXIST;
+ * caller decides whether to delete-then-add or surface the error.
+ * IFNAME may be NULL to let the kernel pick the egress interface
+ * by gateway lookup, but we require it from the elisp side because
+ * the *network* buffer always has one selected. */
+static int
+raw_set_route_default(uint32_t gw_be, const char *ifname)
+{
+    if (!ifname) { errno = EINVAL; return -1; }
+    size_t nlen = strnlen(ifname, IFNAMSIZ);
+    if (nlen == 0 || nlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) return -1;
+    struct rtentry rt;
+    memset(&rt, 0, sizeof rt);
+    struct sockaddr_in *dst  = (struct sockaddr_in *)&rt.rt_dst;
+    struct sockaddr_in *gw   = (struct sockaddr_in *)&rt.rt_gateway;
+    struct sockaddr_in *mask = (struct sockaddr_in *)&rt.rt_genmask;
+    dst->sin_family  = AF_INET;
+    dst->sin_addr.s_addr = 0;
+    mask->sin_family = AF_INET;
+    mask->sin_addr.s_addr = 0;
+    gw->sin_family   = AF_INET;
+    gw->sin_addr.s_addr = gw_be;
+    rt.rt_flags  = RTF_UP | RTF_GATEWAY;
+    rt.rt_metric = 1;
+    /* rt_dev is char *, not const char *, in the kernel ABI. cast is
+     * intentional and the buffer outlives the ioctl call. */
+    char ifbuf[IFNAMSIZ];
+    memcpy(ifbuf, ifname, nlen);
+    ifbuf[nlen] = '\0';
+    rt.rt_dev = ifbuf;
+    if (ioctl(s, SIOCADDRT, &rt) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    (void)close(s);
+    return 0;
+}
+#endif /* PID1_MODULE */
 
 /* ---- boot-only code -------------------------------------------- */
 
@@ -1679,6 +1775,72 @@ Fpid1_bring_up_lo(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
+/* (pid1-set-address IFNAME ADDRESS PREFIX) -> t or signal pid1-error.
+ * IFNAME is a string ("eth0").  ADDRESS is dotted-quad IPv4 ("10.0.0.5").
+ * PREFIX is the CIDR prefix length 0..32.  resulting netmask is
+ * derived from PREFIX so the elisp side does not have to know how to
+ * format a netmask.  on success, the interface has the address +
+ * netmask + IFF_UP|IFF_RUNNING set. */
+static emacs_value
+Fpid1_set_address(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                  void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 3)
+        return pid1_signal_errno(env, "pid1: pid1-set-address needs 3 args",
+                                 EINVAL);
+    char ifname[IFNAMSIZ];
+    if (extract_cstring_into(env, args[0], ifname, sizeof ifname) < 0)
+        return Qnil;
+    /* INET_ADDRSTRLEN is 16 incl. NUL; allow a small slop for callers
+     * who pass trailing whitespace. inet_pton will reject anyway. */
+    char addr[INET_ADDRSTRLEN + 8];
+    if (extract_cstring_into(env, args[1], addr, sizeof addr) < 0)
+        return Qnil;
+    intmax_t prefix = env->extract_integer(env, args[2]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    struct in_addr ia;
+    if (inet_pton(AF_INET, addr, &ia) != 1)
+        return pid1_signal_errno(env, "pid1: pid1-set-address: bad address",
+                                 EINVAL);
+    if (raw_set_address(ifname, ia.s_addr, (int)prefix) < 0)
+        return pid1_signal_errno(env, "pid1: set-address", errno);
+    return env->intern(env, "t");
+}
+
+/* (pid1-set-route-default GATEWAY IFNAME) -> t or signal pid1-error.
+ * installs a default route via GATEWAY (dotted-quad IPv4) through
+ * IFNAME. EEXIST means a default route is already present; the elisp
+ * side typically wants to delete and re-add via a separate call (not
+ * yet exposed); for now we surface the error. */
+static emacs_value
+Fpid1_set_route_default(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                        void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 2)
+        return pid1_signal_errno(env,
+                                 "pid1: pid1-set-route-default needs 2 args",
+                                 EINVAL);
+    char gws[INET_ADDRSTRLEN + 8];
+    if (extract_cstring_into(env, args[0], gws, sizeof gws) < 0)
+        return Qnil;
+    char ifname[IFNAMSIZ];
+    if (extract_cstring_into(env, args[1], ifname, sizeof ifname) < 0)
+        return Qnil;
+    struct in_addr ia;
+    if (inet_pton(AF_INET, gws, &ia) != 1)
+        return pid1_signal_errno(env,
+                                 "pid1: pid1-set-route-default: bad gateway",
+                                 EINVAL);
+    if (raw_set_route_default(ia.s_addr, ifname) < 0)
+        return pid1_signal_errno(env, "pid1: set-route-default", errno);
+    return env->intern(env, "t");
+}
+
 /* (pid1-fsync-dir PATH) -> t or signal pid1-error.
  * opens the directory at PATH, fsync()s it, closes. used by elisp
  * state writers (see core/state.el) after rename(.tmp, final) to make
@@ -1875,6 +2037,16 @@ emacs_module_init(struct emacs_runtime *ert)
         "Bring up the loopback interface. Return t.",
         NULL);
     pid1_defalias(env, "pid1-bring-up-lo", lo);
+
+    emacs_value sa = env->make_function(env, 3, 3, Fpid1_set_address,
+        "Assign IPv4 ADDRESS/PREFIX to IFNAME and bring it up. Return t.",
+        NULL);
+    pid1_defalias(env, "pid1-set-address", sa);
+
+    emacs_value srd = env->make_function(env, 2, 2, Fpid1_set_route_default,
+        "Install default route via GATEWAY through IFNAME. Return t.",
+        NULL);
+    pid1_defalias(env, "pid1-set-route-default", srd);
 
     emacs_value fsd = env->make_function(env, 1, 1, Fpid1_fsync_dir,
         "fsync the directory at PATH. Return t. Use after rename to commit durably.",

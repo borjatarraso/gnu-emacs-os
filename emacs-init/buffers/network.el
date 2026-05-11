@@ -229,6 +229,50 @@ Bound to `RET'. silently no-ops on lines without an iface."
             (goto-char (point-min))))
         (display-buffer buf)))))
 
+(defun network-buffer-set-static ()
+  "Prompt for address/prefix/gateway and apply to the iface at point.
+Bound to `s'. Falls back to a free-form read of the iface name if
+point is not on an iface row. Calls `network-set-static', which
+routes pid1-error through panic-handle."
+  (interactive)
+  (let* ((p (network-buffer-iface-at-point))
+         (default-iface (and p (plist-get p :iface)))
+         (n (read-string (format "Interface%s: "
+                                 (if default-iface
+                                     (format " (default %s)" default-iface)
+                                   ""))
+                         nil nil default-iface))
+         (a (read-string (format "Address for %s: " n)))
+         (pf (read-number (format "Prefix length for %s/%s: " n a) 24))
+         (g (let ((s (read-string "Gateway (empty for none): ")))
+              (if (string-empty-p s) nil s))))
+    (if (fboundp 'network-set-static)
+        (progn
+          (network-set-static n a pf g)
+          (network-buffer-refresh))
+      (message "network-buffer: network-set-static unbound; load core/network.el"))))
+
+(defun network-buffer-bring-up ()
+  "Bring the iface at point up via flag-only ioctl (no address change).
+Bound to `i'. For lo this routes through `pid1-bring-up-lo'; for
+any other iface we currently have no flag-only entry point, so we
+message the user to use `s' (which does flags + address). that is
+intentional: bringing a NIC up with no address attached is rarely
+what an operator actually wants and we'd rather force the prompt."
+  (interactive)
+  (let* ((p (network-buffer-iface-at-point))
+         (iface (and p (plist-get p :iface))))
+    (cond
+     ((null iface)
+      (message "network-buffer: no interface on this line"))
+     ((string= iface "lo")
+      (if (fboundp 'network--bring-up-lo)
+          (progn (funcall (symbol-function 'network--bring-up-lo))
+                 (network-buffer-refresh))
+        (message "network-buffer: network--bring-up-lo unbound")))
+     (t
+      (message "network-buffer: %s needs an address; press `s'" iface)))))
+
 (defun network-buffer-quit ()
   "Bury *network*. Per project rules we do not kill it."
   (interactive)
@@ -238,6 +282,8 @@ Bound to `RET'. silently no-ops on lines without an iface."
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "g")   #'network-buffer-refresh)
     (define-key m (kbd "RET") #'network-buffer-show-iface-details)
+    (define-key m (kbd "s")   #'network-buffer-set-static)
+    (define-key m (kbd "i")   #'network-buffer-bring-up)
     (define-key m (kbd "q")   #'network-buffer-quit)
     m)
   "Keymap for `network-buffer-mode'.")
