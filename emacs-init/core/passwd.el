@@ -457,6 +457,97 @@ plaintext never lands in command-history."
        (panic-handle err `(passwd-set-password . ,name))
        nil)))))
 
+;;;; verification (login.el's entry point into the password store)
+
+(defun passwd--extract-salt (stored)
+  "Return the salt prefix from STORED, suitable for re-feeding to `pid1-crypt'.
+crypt(3)'s output is `$ID$[PARAMS$]SALT$HASH'.  the slice we hand back
+to crypt_r is everything up to and including the final `$' before the
+hash, which crypt_r treats as the salt input and re-emits with the
+correct hash appended.  yescrypt adds a params segment between ID and
+salt (`$y$j9T$<salt>$<hash>'); we keep that intact by walking `$' from
+the front and stopping when the next segment would be the hash.
+
+returns nil if STORED is missing, locked (`!' or `*' prefix), or
+malformed enough that we can't pick out a salt.  callers treat nil as
+\"no possible match\" and fail closed."
+  (cond
+   ((or (null stored) (string-empty-p stored)) nil)
+   ((or (string-prefix-p "!" stored) (string-prefix-p "*" stored)) nil)
+   ((not (string-prefix-p "$" stored)) nil)
+   (t
+    (let* ((parts (split-string stored "\\$" t))
+           (id (car parts)))
+      (cond
+       ;; yescrypt: $y$<params>$<salt>$<hash> -> keep first 3 fields
+       ((and (string= id "y") (>= (length parts) 4))
+        (concat "$" (mapconcat #'identity (cl-subseq parts 0 3) "$") "$"))
+       ;; sha512crypt: $6$<salt>$<hash> -> keep first 2 fields.  same
+       ;; shape for sha256crypt ($5$) and md5crypt ($1$); we treat them
+       ;; uniformly because the position of the hash is identical.
+       ((and (member id '("1" "5" "6")) (>= (length parts) 3))
+        (concat "$" (mapconcat #'identity (cl-subseq parts 0 2) "$") "$"))
+       (t nil))))))
+
+(defun passwd--ct-string-eq (a b)
+  "Constant-time-ish string equality.
+Elisp's `equal' short-circuits on the first mismatched byte, which
+leaks a few microseconds of timing per matched prefix byte.  for a
+local console login that is not a realistic attack (the attacker
+already has /dev/console), but we are about to extend to network
+logins in v0.6 and it costs us nothing to do it right now.
+
+invariant: both args must be strings.  returns t iff they have the
+same length AND every byte matches.  the xor accumulator means we
+walk the full string regardless of where the mismatch is."
+  (cond
+   ((not (and (stringp a) (stringp b))) nil)
+   ((/= (length a) (length b)) nil)
+   (t
+    (let ((acc 0)
+          (n (length a)))
+      (dotimes (i n)
+        (setq acc (logior acc (logxor (aref a i) (aref b i)))))
+      (zerop acc)))))
+
+(defun passwd-verify (name plaintext)
+  "Return t iff PLAINTEXT hashes to NAME's stored shadow entry.
+returns nil on any failure path: unknown user, locked account
+(`!' or `*' hash), shadow unreadable, salt unparseable, crypt
+unavailable, or hash mismatch.
+
+uses `pid1-crypt' against the salt extracted from the stored hash;
+this is the same crypt_r(3) used by `passwd-hash-password' so a
+password set on this box will re-verify on this box regardless of
+which algorithm libxcrypt picked.
+
+the hash comparison is constant-time via `passwd--ct-string-eq'.
+the early returns (unknown user, locked, etc.) are NOT
+constant-time; that timing leak is documented and accepted: an
+attacker who can already poll the login surface fast enough to
+distinguish them already knows the username space from /etc/passwd."
+  (cond
+   ((or (not (stringp name)) (string-empty-p name)) nil)
+   ((not (stringp plaintext)) nil)
+   ((not (fboundp 'pid1-crypt)) nil)
+   (t
+    (condition-case err
+        (let* ((rows (passwd-read-shadow))
+               (row (cl-find-if
+                     (lambda (e) (string= (plist-get e :user) name))
+                     rows))
+               (stored (and row (plist-get row :hash)))
+               (salt (passwd--extract-salt stored)))
+          (cond
+           ((null salt) nil)
+           (t
+            (let ((computed
+                   (funcall (symbol-function 'pid1-crypt) plaintext salt)))
+              (passwd--ct-string-eq stored computed)))))
+      (error
+       (panic-handle err `(passwd-verify . ,name))
+       nil)))))
+
 ;;;; user-facing keymap (under C-c e u)
 
 (defvar passwd-prefix-map

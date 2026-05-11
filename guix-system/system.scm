@@ -146,6 +146,17 @@
     ;; after panic.el and state.el (atomic-write mirrors state-write).
     (local-file "../emacs-init/core/passwd.el" "passwd.el"))
 
+(define session-el
+    ;; v0.5 login plumbing.  in-memory session table keyed by tty/seat,
+    ;; persisted under /var/emacs/sessions/ via state-write so logins
+    ;; survive an emacs restart.  calls state-read / state-write /
+    ;; state-path (state-el), supervise-register (supervise-el),
+    ;; passwd-read-passwd (passwd-el) and panic-handle (panic-el), so
+    ;; it MUST load after all four.  buffers/login.el and
+    ;; buffers/users.el both (require 'session) for display; users.el
+    ;; soft-requires it, login.el hard-requires it.
+    (local-file "../emacs-init/core/session.el" "session.el"))
+
 (define boot-marker-el
     ;; smoke-test gate.  writes "geos: emacs userland up" to
     ;; /dev/console at load time and arms an exwm-init-hook that
@@ -244,6 +255,11 @@
     ;; a/d/p keys backed by core/passwd.el's atomic writers.  must
     ;; load after passwd-el.
     (local-file "../emacs-init/buffers/users.el" "users-buffer.el"))
+(define login-buffer-el
+    ;; v0.5 login buffer.  *login* prompts user + password, verifies
+    ;; via passwd-verify (passwd-el) and opens a session via session.el.
+    ;; hard requires 'session, so it MUST load after session-el.
+    (local-file "../emacs-init/buffers/login.el" "login-buffer.el"))
 (define audio-buffer-el
     ;; v0.4 item 8 buffer.  *audio* lists ALSA cards and exposes
     ;; volume keys; depends on userland-audio.el.
@@ -520,6 +536,7 @@
                                "-l" #$network-el
                                "-l" #$hostname-el
                                "-l" #$passwd-el
+                               "-l" #$session-el
                                "-l" #$network-buffer-el
                                ;; phase 5c modules -l'd BEFORE
                                ;; exwm-config so the (require 'multimon)
@@ -563,6 +580,7 @@
                                "-l" #$packages-buffer-el
                                "-l" #$reconfigure-buffer-el
                                "-l" #$users-buffer-el
+                               "-l" #$login-buffer-el
                                "-l" #$audio-buffer-el
                                ;; v0.4 item 2 services.  each defservice
                                ;; form runs at load time and populates

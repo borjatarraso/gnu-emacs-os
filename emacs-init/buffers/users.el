@@ -26,12 +26,38 @@
        (panic-handle err 'users-buffer-require)
      (message "users-buffer: passwd require failed: %S" err))))
 
+;; session.el is optional in case the *users* buffer is invoked on a
+;; v0.4 image where the login flow has not been wired yet.  the
+;; rendering helper below soft-fails when `session-count-for-uid' is
+;; unbound and prints "-" in the login column.
+(condition-case err
+    (require 'session)
+  (error
+   (if (fboundp 'panic-handle)
+       (panic-handle err 'users-buffer-require-session)
+     (message "users-buffer: session require failed: %S" err))))
+
 (defvar users-buffer-name "*users*"
   "Canonical name of the user-list buffer.")
 
 (defun users-buffer--source-available-p ()
   "Return non-nil if the passwd reader is bound."
   (fboundp 'passwd-read-passwd))
+
+(defun users-buffer--session-cell (uid)
+  "Return the per-row login-count string for UID.
+\"N sessions\" when session.el is loaded, \"-\" otherwise.  one
+buffer per system concept means we annotate here rather than spin
+up a *sessions* buffer."
+  (cond
+   ((not (fboundp 'session-count-for-uid)) "-")
+   (t
+    (let ((n (condition-case err
+                 (session-count-for-uid uid)
+               (error
+                (panic-handle err `(users-buffer--session-cell . ,uid))
+                0))))
+      (format "%d sessions" n)))))
 
 (defun users-buffer--locked-p (user shadow-rows)
   "Return non-nil if USER's shadow row indicates a locked account.
@@ -66,22 +92,26 @@ since an account with no shadow entry effectively cannot log in."
       (condition-case err
           (let ((users (passwd-read-passwd))
                 (shadow (passwd-read-shadow)))
-            (insert (format "  %-16s %5s %5s %-22s %-16s %s\n"
-                            "user" "uid" "gid" "home" "shell" "pw"))
+            (insert (format "  %-16s %5s %5s %-22s %-16s %-6s %s\n"
+                            "user" "uid" "gid" "home" "shell" "pw"
+                            "login"))
             (cond
              ((null users)
               (insert "  (no data)\n"))
              (t
               (dolist (u users)
                 (let* ((name (plist-get u :user))
+                       (uid (plist-get u :uid))
                        (locked (users-buffer--locked-p name shadow))
-                       (line (format "  %-16s %5d %5d %-22s %-16s %s"
+                       (login-cell (users-buffer--session-cell uid))
+                       (line (format "  %-16s %5d %5d %-22s %-16s %-6s %s"
                                      name
-                                     (plist-get u :uid)
+                                     uid
                                      (plist-get u :gid)
                                      (plist-get u :home)
                                      (plist-get u :shell)
-                                     (if locked "locked" "set"))))
+                                     (if locked "locked" "set")
+                                     login-cell)))
                   (insert (propertize line 'users-row u) "\n")))))
             (insert
              "\nkeys: a=add  d=delete  p=password  g=refresh  q=bury\n"))
