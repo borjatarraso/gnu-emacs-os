@@ -97,10 +97,11 @@ document I would actually rather you read first.
 The Hurd variant. Real hardware (only QEMU is exercised). The login
 flow (account store is in, per-user emacs split is not). Bluetooth.
 Wayland. DHCP and DNS UI (static IPv4 lands packets but the resolver
-side is manual). Disk encryption at boot. A real `*reconfigure*`
-buffer for `guix system reconfigure`. The list lives in
-[docs/ROADMAP.md](docs/ROADMAP.md), with the detailed v0.4 plan in
-[docs/v04-plan.md](docs/v04-plan.md).
+side is manual). Disk encryption at boot. A bare-metal install
+wizard (the `*reconfigure*` buffer covers in-place generation
+changes; first-install partitioning is the next piece). The list
+lives in [docs/ROADMAP.md](docs/ROADMAP.md), with the detailed v0.4
+plan in [docs/v04-plan.md](docs/v04-plan.md).
 
 ## the failure mode I have accepted
 

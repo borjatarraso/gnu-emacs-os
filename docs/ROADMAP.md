@@ -48,8 +48,9 @@ docs/CONTRIBUTING.md, docs/USER_GUIDE.md.
 
 The detailed plan lives in [v04-plan.md](v04-plan.md). Eleven items
 ordered into four phases, with dependency notes per item. Eight items
-have landed; three remain (one in flight, two deferred). The
-top-level shape:
+fully landed plus the in-place half of item 3; the first-install
+wizard, LUKS, the user-login split (deferred to v0.5), and the Hurd
+spike remain. The top-level shape:
 
 ### Phase A (foundational, done)
 
@@ -88,8 +89,10 @@ top-level shape:
   `passwd.el` store under `/var/emacs/users/` and the `*users*` buffer
   shipped. The login flow and per-user emacs split (so each session
   gets its own process tree) is the v0.5 follow-up.
-- **3. real installer** (in flight): a `*reconfigure*` buffer that
-  runs `guix system reconfigure` and surfaces the build log. Not done.
+- **3. real installer** (partial): the `*reconfigure*` buffer that
+  runs `guix system reconfigure` and streams the build log has
+  shipped. The bare-metal first-install wizard (partition, mkfs,
+  copy closure, install grub) is still in flight.
 - **9. disk encryption (LUKS at boot)** (not done): cryptsetup into
   the initrd, passphrase prompt before pid1 takes over. Deferred.
 
