@@ -421,8 +421,19 @@ either way, the buffer contents are identical."
         (login-mode))
       ;; do not stomp an existing :running session if login-show is
       ;; re-invoked from a menu while a user is already in.  only
-      ;; reset when we are NOT mid-session.
-      (unless (eq login--state :running)
+      ;; reset when we are NOT mid-session.  the registry cross-check
+      ;; (2026-05-11) covers the auto-teardown path: the poller flips
+      ;; the registry status to 'held when a child vanishes, but the
+      ;; login buffer's `login--state' is private and stays at
+      ;; :running until something here resets it.  if no session is
+      ;; actually 'running anymore, treat the buffer's :running as
+      ;; stale and reset back to :prompt-user so the next user sees a
+      ;; live prompt instead of "session active as ghost-tester".
+      (unless (and (eq login--state :running)
+                   (fboundp 'session-list)
+                   (cl-some (lambda (s)
+                              (eq (geos-session-status s) 'running))
+                            (session-list)))
         (setq login--state :prompt-user
               login--user nil
               login--password nil

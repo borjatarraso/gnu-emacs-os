@@ -282,7 +282,18 @@ session.el present."
                   (panic-handle (list 'exwm-route-unknown-user name)
                                 'exwm-config--maybe-route-user-window)))
               (when (and idx (fboundp 'exwm-workspace-move-window))
-                (exwm-workspace-move-window idx)
+                ;; pass exwm--id explicitly. without it,
+                ;; exwm-workspace-move-window resolves the "current
+                ;; window" from the selected emacs window, not the
+                ;; managed X buffer. inside
+                ;; exwm-manage-finish-hook the selected window is
+                ;; still the supervisor's, so the move silently
+                ;; relocated the wrong window and left the new X
+                ;; buffer on workspace 0. captured here on
+                ;; 2026-05-11 after a probe showed exwm--frame
+                ;; unchanged post-move; with the id arg the buffer
+                ;; lands on the right ws.
+                (exwm-workspace-move-window idx exwm--id)
                 (exwm-config--trace
                  (format "routed user=%s instance=%s -> ws %d"
                          name exwm-instance-name idx)))))))
