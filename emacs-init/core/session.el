@@ -636,6 +636,18 @@ steps:
               (cond
                ((session--spawn-child sess)
                 (session--persist sess)
+                ;; v0.7 item 1.3: release the supervisor's X connection
+                ;; so the user-emacs (which is about to call
+                ;; exwm-wm-mode 1 from its user-init--chain) becomes the
+                ;; sole WM on :0.  x-display-release is panic-handled
+                ;; and idempotent; a nil return means the release failed
+                ;; (supervisor keeps its frame, user-emacs may end up
+                ;; fighting for the root window).  we do NOT block the
+                ;; spawn on it: the session is already up at this point,
+                ;; the display dance is cosmetic, and a non-WM user-
+                ;; emacs is recoverable on next login.
+                (when (fboundp 'x-display-release)
+                  (x-display-release))
                 sess)
                (t
                 (setq session--last-spawn-error
@@ -934,6 +946,15 @@ must not take down the supervisor."
                          (lambda (s)
                            (eq (geos-session-status s) 'running))
                          (session-list))))
+          ;; v0.7 item 1.3: re-open :0 BEFORE drawing *login*.  the
+          ;; poller is the only path that re-presents login after a
+          ;; session ends; if we leave the X connection closed, the
+          ;; supervisor has no frame to draw into and *login* lands
+          ;; on the tty.  x-display-reclaim is idempotent and panic-
+          ;; handled; a nil return means the operator has to M-x
+          ;; x-display-reclaim by hand from the supervisor tty.
+          (when (fboundp 'x-display-reclaim)
+            (x-display-reclaim))
           (session--present-login)))
     (error
      (panic-handle err 'session--poll-children))))
