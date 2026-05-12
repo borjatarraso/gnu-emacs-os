@@ -43,12 +43,20 @@
 ;; daemon is up.  the daemon's lifetime is the per-user emacs process
 ;; group; logout kills it, login starts a fresh one.
 ;;
-;; out of scope for slice 2.3: supervise.el respawn registration.  a
-;; crashed ibus-daemon today stays dead until the user logs out and
-;; back in.  slice 2.4 will replace the fire-and-forget spawn with
-;; `supervise-register'.
+;; slice 2.4 adds an inline mini-supervisor for ibus-daemon: the
+;; sentinel respawns on death up to `input--ibus-respawn-cap' times
+;; inside `input--ibus-respawn-window-sec', then sets
+;; `input--ibus-held' and gives up.  the cap and window mirror
+;; `supervise-respawn-cap' / -window-sec from core/supervise.el so the
+;; operator's crashloop intuition is the same on both sides of the
+;; supervisor/user-emacs boundary.  we did NOT pull supervise.el
+;; user-side because its persistence layer writes to /var/emacs/
+;; services/ which the user cannot reach; the inline cap is the right
+;; size for one daemon.  interactive `input-set-method' clears the
+;; throttle, giving the user a way to recover without re-login.
 
 (require 'panic)
+(require 'cl-lib)
 
 (defvar input-default-method "rfc1345"
   "Default quail input method.
@@ -137,6 +145,79 @@ when non-nil and `process-live-p' returns t we keep the existing
 one.  on user-emacs death the process group dies with it (the
 daemon is our child), so no /var/run lifetime tracking is needed.")
 
+(defvar input--ibus-respawn-times nil
+  "Float-time stamps of recent ibus-daemon respawns.
+the sentinel pushes a stamp on every restart and trims entries
+older than `input--ibus-respawn-window-sec' before comparing
+against `input--ibus-respawn-cap'.  used by
+`input--ibus-throttle-trips-p' to break crashloops.")
+
+(defconst input--ibus-respawn-cap 5
+  "Max ibus-daemon respawns inside `input--ibus-respawn-window-sec'.
+above this the sentinel stops respawning and the daemon stays
+dead until the next login (or the next M-x input-set-method).
+mirrors `supervise-respawn-cap' from core/supervise.el so the
+operator's mental model of `5 strikes and you are out' carries
+across the supervisor/user-emacs boundary.")
+
+(defconst input--ibus-respawn-window-sec 60
+  "Rolling window for the ibus-daemon respawn cap, in seconds.
+five crashes in a minute is the cap; the same minute that quiets
+down allows another five.  mirrors `supervise-respawn-window-sec'
+from core/supervise.el.")
+
+(defvar input--ibus-held nil
+  "Non-nil iff the sentinel tripped the respawn cap and gave up.
+clears on a successful `input--ibus-spawn' (interactive recovery
+via `M-x input-set-method' or a re-login).  the dispatcher checks
+this so a held daemon doesn't get spawned again on a second
+`input-apply' inside the same emacs.")
+
+(defun input--ibus-throttle-trips-p ()
+  "Return non-nil iff ibus-daemon has crashed too often recently.
+trims `input--ibus-respawn-times' to the rolling window as a side
+effect, the same shape `supervise--throttle-trips-p' uses
+supervisor-side."
+  (let* ((now (float-time))
+         (cutoff (- now input--ibus-respawn-window-sec))
+         (recent (cl-remove-if (lambda (t0) (< t0 cutoff))
+                               input--ibus-respawn-times)))
+    (setq input--ibus-respawn-times recent)
+    (>= (length recent) input--ibus-respawn-cap)))
+
+(defun input--ibus-sentinel (proc event)
+  "Process sentinel for ibus-daemon.
+respawns on death (exit / signal) until the throttle trips, then
+holds.  the `held' state survives the rest of the session: a user
+who wants to retry hits `M-x input-set-method :ibus' which calls
+`input-apply' which calls `input--ibus-spawn' which clears the
+flag.  bare-error in `make-process' is swallowed via panic-handle
+so a sentinel can never take down the user-emacs."
+  (let ((status (process-status proc))
+        (trimmed (string-trim (or event ""))))
+    (input--trace
+     (format "ibus sentinel: %s (status %S)" trimmed status))
+    (when (memq status '(exit signal failed))
+      (cond
+       ((input--ibus-throttle-trips-p)
+        (setq input--ibus-held t
+              input--ibus-process nil)
+        (input--trace
+         (format "ibus: throttle trip after %d respawns in %ds, held"
+                 input--ibus-respawn-cap
+                 input--ibus-respawn-window-sec)))
+       (t
+        (push (float-time) input--ibus-respawn-times)
+        (input--trace "ibus: respawning")
+        (condition-case err
+            (input--ibus-spawn)
+          (error
+           (if (fboundp 'panic-handle)
+               (panic-handle err 'input--ibus-sentinel)
+             (input--trace
+              (format "ibus respawn raised: %S" err)))
+           (setq input--ibus-process nil))))))))
+
 (defun input--dbus-launch ()
   "Start a DBus session bus iff DBUS_SESSION_BUS_ADDRESS is unset.
 calls `dbus-launch --csh-syntax' synchronously, parses the two
@@ -199,7 +280,10 @@ it directly is within the no-shell rule."
 (defun input--ibus-spawn ()
   "Start ibus-daemon as a child of this emacs.
 returns the process object on success, nil otherwise.  idempotent:
-when `input--ibus-process' is alive we return it unchanged.
+when `input--ibus-process' is alive we return it unchanged.  the
+`held' flag is cleared on every successful spawn, so an
+`M-x input-set-method' after a throttle trip gives the user one
+more chance.
 
 flags:
   -d  daemonize (fork into background)
@@ -211,11 +295,19 @@ the daemon writes its socket under /run/user/UID/ibus/.  the
 supervisor lays /run/user/$UID/ down with the right ownership as
 part of `session--ensure-user-state-dir'; if that dir is missing
 the daemon will fall back to ~/.config/ibus/bus/ which the user
-also owns.  either way it works without root."
+also owns.  either way it works without root.
+
+the sentinel is `input--ibus-sentinel', which respawns the daemon
+on crash up to `input--ibus-respawn-cap' times inside
+`input--ibus-respawn-window-sec'; past that it sets
+`input--ibus-held' and stops trying."
   (cond
    ((and input--ibus-process (process-live-p input--ibus-process))
     (input--trace "ibus: daemon already alive, reusing")
     input--ibus-process)
+   (input--ibus-held
+    (input--trace "ibus: throttle held, refusing automatic spawn")
+    nil)
    ((not (executable-find "ibus-daemon"))
     (input--trace "ibus: ibus-daemon not on PATH")
     nil)
@@ -226,13 +318,9 @@ also owns.  either way it works without root."
                      :command '("ibus-daemon" "-drx")
                      :noquery t
                      :connection-type 'pipe
-                     :sentinel
-                     (lambda (p ev)
-                       (input--trace
-                        (format "ibus-daemon sentinel: %s (status %S)"
-                                (string-trim (or ev ""))
-                                (process-status p)))))))
-          (setq input--ibus-process proc)
+                     :sentinel #'input--ibus-sentinel)))
+          (setq input--ibus-process proc
+                input--ibus-held nil)
           (input--trace "ibus: daemon spawned")
           proc)
       (error
@@ -345,6 +433,11 @@ ad-hoc picker; this one is the durable chooser."
         (message "input-set-method: refusing unknown %S" method))
        (t
         (setq geos-input-method method)
+        ;; an interactive method change is a fresh chance: clear any
+        ;; ibus respawn throttle so the next input-apply can try again.
+        ;; the sentinel still owns the cap for sentinel-driven retries.
+        (setq input--ibus-held nil
+              input--ibus-respawn-times nil)
         (input-apply)
         (input--persist-save method)
         (message "input: method set to %S (persisted)" method)))

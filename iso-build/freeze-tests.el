@@ -2859,6 +2859,77 @@ only."
       (when (file-exists-p tmp) (delete-file tmp)))
     (freeze-test--record 'input-persist result)))
 
+(defun freeze-test-input-ibus-throttle ()
+  "Pin v0.7 item 2.4: ibus-daemon sentinel respects the respawn cap.
+
+we shadow `input--ibus-spawn' with a counter and feed
+`input--ibus-sentinel' synthetic `exit' events.  the contract:
+
+  - first `input--ibus-respawn-cap' deaths each trigger one respawn
+    call (cap=5 today; the test reads the const, not a literal).
+  - the (cap+1)-th death does NOT trigger a respawn and instead
+    sets `input--ibus-held' to t and `input--ibus-process' to nil.
+
+we synthesise events via direct call to `input--ibus-sentinel'
+because `make-process' sentinels in batch are timing-flaky.  the
+sentinel's bare-error path is also covered: if the shadowed spawn
+raises, the sentinel must not propagate, and `input--ibus-process'
+must end up nil."
+  (interactive)
+  (require 'input)
+  (let ((result 'fail)
+        (sav-times input--ibus-respawn-times)
+        (sav-held input--ibus-held)
+        (sav-proc input--ibus-process))
+    (unwind-protect
+        (condition-case err
+            (let ((spawn-calls 0)
+                  (cap input--ibus-respawn-cap))
+              (cl-letf (((symbol-function 'input--ibus-spawn)
+                         (lambda () (cl-incf spawn-calls) 'dummy-proc))
+                        ((symbol-function 'input--trace)
+                         (lambda (_msg) nil))
+                        ((symbol-function 'process-status)
+                         (lambda (_p) 'exit)))
+                ;; reset state
+                (setq input--ibus-respawn-times nil
+                      input--ibus-held nil
+                      input--ibus-process 'dummy-proc)
+                ;; fire cap sentinel events; each should trigger a respawn.
+                (dotimes (_ cap)
+                  (input--ibus-sentinel 'dummy-proc "finished\n"))
+                (cond
+                 ((not (= spawn-calls cap))
+                  (setq result
+                        (format "spawn-calls = %d after %d deaths, want %d"
+                                spawn-calls cap cap)))
+                 (input--ibus-held
+                  (setq result
+                        "held flipped early (at cap-th death, not cap+1)"))
+                 (t
+                  ;; fire one more: this should trip the throttle.
+                  (input--ibus-sentinel 'dummy-proc "finished\n")
+                  (cond
+                   ((not (= spawn-calls cap))
+                    (setq result
+                          (format "throttle did not block spawn: calls=%d"
+                                  spawn-calls)))
+                   ((not input--ibus-held)
+                    (setq result "throttle trip did not set held flag"))
+                   (input--ibus-process
+                    (setq result
+                          (format "throttle trip left process slot = %S"
+                                  input--ibus-process)))
+                   (t
+                    (setq result 'pass)))))))
+          (error
+           (panic-handle err 'freeze-test-input-ibus-throttle)
+           (setq result (format "raised: %S" err))))
+      (setq input--ibus-respawn-times sav-times
+            input--ibus-held sav-held
+            input--ibus-process sav-proc))
+    (freeze-test--record 'input-ibus-throttle result)))
+
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.
 two simulated 'running sessions, A on workspace 1 and B on
@@ -3020,6 +3091,7 @@ back via state-read to confirm the persist landed."
   (freeze-test-x-display-idempotent)
   (freeze-test-input-chooser)
   (freeze-test-input-persist)
+  (freeze-test-input-ibus-throttle)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
