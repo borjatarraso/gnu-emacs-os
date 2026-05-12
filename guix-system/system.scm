@@ -624,26 +624,19 @@
                                "-l" #$fonts-el
                                "-l" #$input-el
                                "-l" #$exwm-config-el
-                               ;; phase 5b: userland packages. each
-                               ;; (provide 'userland-foo)s, then init.el
-                               ;; verifies they are all present. order
-                               ;; here is the same as `userland-modules'
-                               ;; in init.el, kept in lockstep so the
-                               ;; verification list matches the load
-                               ;; order. nothing in here depends on
-                               ;; anything else in here, so the order
-                               ;; itself is cosmetic.
-                               "-l" #$userland-files-el
-                               "-l" #$userland-shell-el
-                               "-l" #$userland-uname-el
-                               "-l" #$userland-git-el
-                               "-l" #$userland-web-el
-                               "-l" #$userland-mail-el
-                               "-l" #$userland-chat-el
-                               "-l" #$userland-notes-el
-                               "-l" #$userland-pdf-el
+                               ;; v0.6 item 1.2: every -l for the
+                               ;; userland chain except audio is
+                               ;; gone.  the per-user emacs loads
+                               ;; them itself via user-init.el (see
+                               ;; emacs-init/user/user-init.el).
+                               ;; userland-audio stays here because
+                               ;; emacs-init/buffers/audio.el (which
+                               ;; IS supervisor-side) requires
+                               ;; userland-audio at load time; until
+                               ;; the *audio* buffer moves user-
+                               ;; side, the wrapper has to be
+                               ;; reachable from the supervisor.
                                "-l" #$userland-audio-el
-                               "-l" #$userland-init-el
                                ;; phase 6 buffers. lazy-loaded entry
                                ;; points; touching any of these via M-x
                                ;; spins up the per-buffer timer/source.
@@ -974,6 +967,44 @@
      (cons* emacs-init-boot-service
             (extra-special-file "/sbin/emacs-init" emacs-init-binary)
             (extra-special-file "/etc/geos/user-init.el" user-init-el)
+            ;; v0.6 item 1.2: lay the user-side chain on disk at fixed
+            ;; paths.  user-init.el loads each absolute path via plain
+            ;; `load' (not require) so the per-user emacs does not
+            ;; depend on the supervisor having loaded anything.  panic
+            ;; and use-package-shim live under /etc/geos/core/; the
+            ;; userland packages under /etc/geos/user/userland/.  the
+            ;; supervisor's -l chain no longer references these files;
+            ;; the user-emacs side does.
+            (extra-special-file "/etc/geos/core/panic.el" panic-el)
+            (extra-special-file "/etc/geos/core/use-package-shim.el"
+                                use-package-shim-el)
+            (extra-special-file "/etc/geos/user/userland/files.el"
+                                userland-files-el)
+            (extra-special-file "/etc/geos/user/userland/shell.el"
+                                userland-shell-el)
+            (extra-special-file "/etc/geos/user/userland/uname.el"
+                                userland-uname-el)
+            (extra-special-file "/etc/geos/user/userland/git.el"
+                                userland-git-el)
+            (extra-special-file "/etc/geos/user/userland/web.el"
+                                userland-web-el)
+            (extra-special-file "/etc/geos/user/userland/mail.el"
+                                userland-mail-el)
+            (extra-special-file "/etc/geos/user/userland/chat.el"
+                                userland-chat-el)
+            (extra-special-file "/etc/geos/user/userland/notes.el"
+                                userland-notes-el)
+            (extra-special-file "/etc/geos/user/userland/pdf.el"
+                                userland-pdf-el)
+            ;; audio.el is ALSO loaded supervisor-side via the -l
+            ;; below (because buffers/audio.el requires it at
+            ;; supervisor load time).  laying it user-side too means
+            ;; alsa-set-volume etc. are available in dired/eshell
+            ;; AND the verifier's featurep walk sees it.
+            (extra-special-file "/etc/geos/user/userland/audio.el"
+                                userland-audio-el)
+            (extra-special-file "/etc/geos/user/userland/init.el"
+                                userland-init-el)
             %base-services))
 
     (name-service-switch %mdns-host-lookup-nss)))
