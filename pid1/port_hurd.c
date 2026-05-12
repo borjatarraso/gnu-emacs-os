@@ -184,9 +184,13 @@ hurd_mount(const char *src, const char *tgt, const char *type,
      * "mount" means in the linux sense. */
     file_t target = file_name_lookup(tgt, O_NOTRANS, 0);
     if (target == MACH_PORT_NULL) {
-        /* file_name_lookup sets errno via __hurd_fail on failure;
-         * the MACH_PORT_NULL path means lookup itself bailed.  errno
-         * is already correct for us to return. */
+        /* file_name_lookup sets errno via __hurd_fail on failure; the
+         * MACH_PORT_NULL path means lookup itself bailed.  capture errno
+         * immediately so any future logging/cleanup inserted between
+         * here and the return cannot trash it.  matches the saved-errno
+         * discipline of the ioctl error paths below. */
+        int saved = errno;
+        errno = saved;
         return -1;
     }
 
@@ -244,11 +248,24 @@ hurd_mount(const char *src, const char *tgt, const char *type,
     mach_port_deallocate(mach_task_self(), target);
 
     if (rc) {
-        /* file_set_translator returns an error_t which Hurd's libc
-         * has already mapped to a POSIX errno value (error_t is
-         * compatible with errno on Hurd, see <hurd/hurd_types.h>).
-         * assign directly; do NOT pass a raw kern_return_t up. */
-        errno = rc;
+        /* error_t on Hurd is a typedef for kern_return_t (32-bit signed
+         * with the high-bit subsystem tag).  the Hurd glibc convention
+         * is that some surfaces (file_name_lookup) translate to POSIX
+         * errno via __hurd_fail before returning, but file_set_translator
+         * passes the underlying kern_return_t straight through.  raw
+         * values like KERN_PROTECTION_FAILURE / MIG_TYPE_ERROR are NOT
+         * valid POSIX errnos and would surface as garbage to the elisp
+         * layer.  we translate the common cases explicitly, defaulting
+         * to EIO; same shape as hurd_reboot_cmd's switch below. */
+        switch (rc) {
+        case KERN_INVALID_ARGUMENT:    errno = EINVAL; break;
+        case KERN_NO_ACCESS:           errno = EACCES; break;
+        case KERN_PROTECTION_FAILURE:  errno = EACCES; break;
+        case MACH_SEND_INVALID_DEST:   errno = ENOENT; break;
+        case EOPNOTSUPP:               errno = EOPNOTSUPP; break;
+        case KERN_INVALID_VALUE:       errno = EOPNOTSUPP; break;
+        default:                       errno = EIO; break;
+        }
         return -1;
     }
     return 0;
@@ -378,6 +395,8 @@ hurd_set_address(const char *ifname, uint32_t addr_be, int prefix)
     r.ifr_name[IFNAMSIZ - 1] = '\0';
     struct sockaddr_in *sin = (struct sockaddr_in *)&r.ifr_addr;
     sin->sin_family = AF_INET;
+    /* addr_be arrives in network byte order (supervisor contract, matches
+     * port_linux.c); the mask is built host-order below and htonl'd. */
     sin->sin_addr.s_addr = addr_be;
     /* SIOCSIFADDR -> pfinet S_iioctl_siocsifaddr.  pfinet stores the
      * address on the named device's struct device and the route table
@@ -484,9 +503,9 @@ hurd_set_route_default(uint32_t gw_be, const char *ifname)
  *
  * the caller passes the linux constants today.  rather than build a
  * dispatch table here, i compare against the same numeric values the
- * linux header defines (they are not Hurd-portable include-wise) and
- * fall back to RB_AUTOBOOT for anything else.  if pid1 ever grows a
- * third reboot mode, this dispatch needs a real lookup table.
+ * linux header defines (they are not Hurd-portable include-wise).  if
+ * pid1 ever grows a fourth reboot mode, this dispatch needs a real
+ * lookup table.
  *
  * the LINUX_REBOOT_CMD_* values are part of the kernel ABI; their
  * numeric values are documented and stable across linux history:
@@ -494,8 +513,10 @@ hurd_set_route_default(uint32_t gw_be, const char *ifname)
  *   HALT      = 0xCDEF0123
  *   POWER_OFF = 0x4321FEDC
  *
- * if a caller hands us a value we do not recognise, we still try
- * RB_AUTOBOOT.  a wedged kernel is worse than a wrong reboot type. */
+ * a caller that hands us a value outside the three known LINUX_REBOOT_CMD_*
+ * constants is a supervisor-side bug, not a request.  the skeptic pass on
+ * step 5 (docs/v04-item11-hurd-spike.md wraparound) made this explicit:
+ * we fail loudly with EINVAL rather than warm-reboot on a typo. */
 static int
 hurd_reboot_cmd(int cmd)
 {
@@ -506,15 +527,27 @@ hurd_reboot_cmd(int cmd)
      * happy under -Wsign-compare.  the high-bit values cast to
      * negative ints on a 32-bit signed type, which is fine since the
      * caller is passing them through int as well. */
-    if (cmd == (int)0xCDEF0123 || cmd == (int)0x4321FEDC) {
-        /* HALT or POWER_OFF.  Mach has RB_HALT; some Hurd headers
-         * also expose RB_POWERDOWN but it is not universal, and
-         * mach's idea of "power off" on a hosted VM ends up halting
-         * the kernel and letting the VM monitor stop the cpu.  RB_HALT
-         * is the portable choice. */
+    if (cmd == (int)0xCDEF0123) {
+        /* LINUX_REBOOT_CMD_HALT.  Mach has RB_HALT; some Hurd headers
+         * also expose RB_POWERDOWN but it is not universal, and mach's
+         * idea of "power off" on a hosted VM ends up halting the kernel
+         * and letting the VM monitor stop the cpu.  RB_HALT is the
+         * portable choice. */
         flag = RB_HALT;
-    } else {
+    } else if (cmd == (int)0x4321FEDC) {
+        /* LINUX_REBOOT_CMD_POWER_OFF.  same RB_HALT mapping as above on
+         * a hosted Mach VM; the distinction matters on bare metal but
+         * pid1 today only runs hosted. */
+        flag = RB_HALT;
+    } else if (cmd == (int)0x01234567) {
+        /* LINUX_REBOOT_CMD_RESTART -> warm reboot. */
         flag = RB_AUTOBOOT;
+    } else {
+        /* unknown cmd: bail before host_reboot.  the supervisor passes
+         * one of three constants; anything else is a caller bug we want
+         * the elisp layer to surface, not a silent warm reboot. */
+        errno = EINVAL;
+        return -1;
     }
     /* the Mach host port for the reboot RPC.  mach_host_self()
      * returns a send right to the host control port; this is what
