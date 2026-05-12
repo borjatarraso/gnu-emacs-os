@@ -121,6 +121,75 @@ to actually change package state you reconfigure the system (the
 `*reconfigure*` buffer is item 3 of the v0.4 plan, see
 `docs/v04-plan.md`).
 
+### `*users*`
+
+The live UI for `/etc/passwd` and `/etc/shadow`. Columns: user, uid,
+gid, home, shell, pw (set / locked), login (per-uid session count).
+Keys:
+
+```
+a   add a user. prompts for name, uid (default next free), gid,
+    home, shell, and password. password is read twice and stored
+    via the libcrypt hash; an empty password leaves the account
+    locked.
+d   delete the user on the current line. refuses uid 0. offers to
+    remove the home directory (default n: a stale dir is cheap, a
+    home dir lost to a typo is not).
+p   set the password for the user on the current line.
+u   clear the lockout file for the user on the current line.
+    v0.6 item 5.3: 10 bad login attempts against one username inside
+    5 minutes write /var/emacs/lockouts/NAME with a :locked-until
+    expiry; this key unlocks early.
+g   refresh.
+q   bury.
+```
+
+## logging in and out
+
+The first thing on screen at boot is `*login*`. Type the username,
+RET, type the password, RET. On success the supervisor spawns a
+per-user Emacs and the *login* surface flips to "session active as
+NAME pid N"; press `q` to log out, which sends SIGTERM and returns
+to the username prompt.
+
+Defenses on the *login* surface:
+
+  - Global throttle: 5 bad attempts inside 60 seconds locks the
+    buffer for the rest of the window. Mashing `r` to retry eats
+    the same rate limit (5 second sit-for stall per attempt once
+    the cap trips).
+  - Per-user lockout: 10 bad attempts against ONE username inside
+    5 minutes writes `/var/emacs/lockouts/NAME` with a 15 minute
+    expiry. The verify path refuses without hashing while the
+    lockout is active. An admin can clear it via the `u` key in
+    *users*, or the user can wait it out.
+  - Last-login footer: the username prompt shows
+    `last login: NAME @ TIMESTAMP` from the most recent successful
+    record in the audit log. A fresh image with no auth log yet
+    shows nothing.
+
+### the audit log
+
+Every login outcome appends one sexp line to
+`/var/emacs/journal/auth.log`. Shape:
+
+```
+((time . "2026-05-12T10:00:00Z") (user . "alice") (result . :ok))
+((time . "2026-05-12T10:00:01Z") (user . "alice") (result . :fail)
+ (reason . :wrong-password))
+```
+
+Reasons used today: `:wrong-password`, `:throttled`, `:locked-out`,
+`:spawn-failed`, `:spawn-raised`. To investigate after the fact:
+
+```
+M-x find-file RET /var/emacs/journal/auth.log RET
+```
+
+On a tmpfs root the file vanishes on reboot; the *journal* header
+prints `state: tmpfs` so you know. For persistence across reboots,
+format a partition as ext4 with label `geos-var`.
+
 ## file management
 
 `M-x dired` for the current directory, `C-x C-f /path/` to open one.

@@ -33,6 +33,12 @@ populates `/dev/disk/by-label/` from the ext4 superblock.
   journal/      kmsg consumer state. seq position so we don't reread
                 the entire ring buffer on every refresh; dropped-line
                 counter for when the kernel ring outruns us.
+                also home to auth.log: one sexp-per-line of every
+                login outcome, written by login.el via
+                state-append-journal.  the *login* buffer reads the
+                tail to render the last-login footer.  on tmpfs this
+                file vanishes on reboot, which is documented but
+                worth knowing post-incident.
   packages/     last-fetched manifest cache, install history, the
                 pinned channel revision so we know what produced the
                 running system.
@@ -48,6 +54,14 @@ populates `/dev/disk/by-label/` from the ext4 superblock.
   dotfiles/     eshell aliases, M-x recent commands, anything the
                 user expects to outlive a poweroff but is not part
                 of system state proper.
+  sessions/     per-session records the session registry persists so
+                a supervisor restart can reattach to a still-living
+                per-user emacs (registry-rehydrate path).
+  lockouts/     one file per locked-out username.  v0.6 item 5.3:
+                10 bad attempts against ONE name inside 5 minutes
+                writes /var/emacs/lockouts/NAME with a :locked-until
+                expiry.  cleared on the *users* buffer `u' key, or
+                automatically on read once the expiry passes.
 
 The state API (state-write KEY VALUE) does not enforce that KEY starts
 with one of the prefixes above, but everything user-facing should.
@@ -102,7 +116,8 @@ time, when `pid1-as-emacs-p` is true, it calls `state--ensure-layout`
 which:
 
   1. mkdir -p /var/emacs/
-  2. mkdir -p /var/emacs/{journal,packages,network,users,services,dotfiles}
+  2. mkdir -p /var/emacs/{journal,packages,network,users,services,
+                          dotfiles,sessions,lockouts}
   3. detects state-mode from /proc/mounts
 
 It then writes a single line to /dev/console:
