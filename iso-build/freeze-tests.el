@@ -2593,6 +2593,133 @@ not touch disk (the allocator is in-memory only)."
            (t (remhash (car pair) session--registry))))))
     (freeze-test--record 'session-workspace-allocator result)))
 
+(defun freeze-test-session-end-isolation ()
+  "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.
+two simulated 'running sessions, A on workspace 1 and B on
+workspace 2.  call `session-end' on A and assert:
+
+  - A flips to 'held with `child-pid' nil and the persisted
+    snapshot mirrors that.
+  - B is untouched: same status, same `child-pid', same
+    workspace.
+  - the allocator now returns workspace 1 (A's vacated slot)
+    when asked for a fresh NAME, but does NOT return 2 (B is
+    still occupying it).
+  - the poller's `session--present-login' is NOT invoked: the
+    contract says re-present only when no session remains
+    'running, and B is still alive.
+
+we deliberately use `child-pid' nil on both records so
+`session-end' takes the no-signal branch.  the test does NOT
+touch the on-disk snapshot beyond the persist-then-cleanup
+side effect of `session-end' itself; the post-cond on A reads
+back via state-read to confirm the persist landed."
+  (interactive)
+  (let* ((result 'fail)
+         (a (format "geos-freeze-iso-a-%06d" (random 1000000)))
+         (b (format "geos-freeze-iso-b-%06d" (random 1000000)))
+         (key-a (concat "sessions/" a))
+         (key-b (concat "sessions/" b))
+         (path-a (concat state-root key-a))
+         (path-b (concat state-root key-b))
+         (sav-a (and (boundp 'session--registry)
+                     (gethash a session--registry)))
+         (sav-b (and (boundp 'session--registry)
+                     (gethash b session--registry)))
+         (present-log nil))
+    (unwind-protect
+        (condition-case err
+            (cond
+             ((not (and (fboundp 'session-end)
+                        (fboundp 'session-allocate-workspace)
+                        (fboundp 'make-geos-session)
+                        (boundp 'session--registry)))
+              (setq result "session-end primitives unbound"))
+             (t
+              (clrhash session--registry)
+              (let ((sa (make-geos-session
+                         :name a :uid 50030 :gid 50030
+                         :home "/tmp"
+                         :supervise-key (intern (concat "session:" a))
+                         :workspace 1
+                         :status 'running))
+                    (sb (make-geos-session
+                         :name b :uid 50031 :gid 50031
+                         :home "/tmp"
+                         :supervise-key (intern (concat "session:" b))
+                         :workspace 2
+                         :status 'running)))
+                (puthash a sa session--registry)
+                (puthash b sb session--registry)
+                ;; trip-wire: shadow present-login so an errant
+                ;; call shows up in `present-log'.
+                (cl-letf (((symbol-function 'session--present-login)
+                           (lambda (&rest _)
+                             (setq present-log
+                                   (cons 'called present-log)))))
+                  (session-end a))
+                (let ((after-a (gethash a session--registry))
+                      (after-b (gethash b session--registry)))
+                  (cond
+                   ((not (eq (geos-session-status after-a) 'held))
+                    (setq result
+                          (format "A status = %S, want 'held"
+                                  (geos-session-status after-a))))
+                   ((not (null (geos-session-child-pid after-a)))
+                    (setq result
+                          (format "A child-pid = %S, want nil"
+                                  (geos-session-child-pid after-a))))
+                   ((not (eq (geos-session-status after-b) 'running))
+                    (setq result
+                          (format "B status = %S, want 'running"
+                                  (geos-session-status after-b))))
+                   ((not (eql (geos-session-workspace after-b) 2))
+                    (setq result
+                          (format "B workspace = %S, want 2"
+                                  (geos-session-workspace after-b))))
+                   (t
+                    ;; persist landed?
+                    (let ((snap (and (file-readable-p path-a)
+                                     (state-read key-a nil))))
+                      (cond
+                       ((not (and (listp snap)
+                                  (eq (plist-get snap :status) 'held)))
+                        (setq result
+                              (format "persisted A status = %S, want 'held"
+                                      (and snap (plist-get snap :status)))))
+                       (t
+                        ;; allocator should reclaim A's slot.
+                        (let ((c (format "geos-freeze-iso-c-%06d"
+                                         (random 1000000))))
+                          (let ((alloc (session-allocate-workspace c)))
+                            (cond
+                             ((not (eql alloc 1))
+                              (setq result
+                                    (format "allocator picked %S, want 1"
+                                            alloc)))
+                             (present-log
+                              (setq result
+                                    "present-login called despite B still 'running"))
+                             (t
+                              (setq result 'pass))))))))))))))
+          (error
+           (panic-handle err 'freeze-test-session-end-isolation)
+           (setq result (format "raised: %S" err))))
+      ;; cleanup.
+      (when (boundp 'session--registry)
+        (cond
+         (sav-a (puthash a sav-a session--registry))
+         (t (remhash a session--registry)))
+        (cond
+         (sav-b (puthash b sav-b session--registry))
+         (t (remhash b session--registry))))
+      (condition-case _
+          (dolist (p (list path-a path-b))
+            (when (file-exists-p p)
+              (delete-file p)))
+        (error nil)))
+    (freeze-test--record 'session-end-isolation result)))
+
 ;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
@@ -2623,6 +2750,7 @@ not touch disk (the allocator is in-memory only)."
   (freeze-test-session-workspace)
   (freeze-test-multi-session-ui)
   (freeze-test-session-workspace-allocator)
+  (freeze-test-session-end-isolation)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
