@@ -294,6 +294,19 @@ session.el present."
                 ;; unchanged post-move; with the id arg the buffer
                 ;; lands on the right ws.
                 (exwm-workspace-move-window idx exwm--id)
+                ;; v0.6 item 6.1: tell session.el where this user
+                ;; actually landed so the supervisor knows the
+                ;; workspace occupancy.  noop when session.el is
+                ;; not loaded (a stripped image) or when NAME has
+                ;; no registry entry (the unknown-user breadcrumb
+                ;; above already covers that case).
+                (when (fboundp 'session-record-workspace)
+                  (condition-case err
+                      (session-record-workspace name idx)
+                    (error
+                     (panic-handle
+                      err
+                      'exwm-config--maybe-route-user-window-record))))
                 (exwm-config--trace
                  (format "routed user=%s instance=%s -> ws %d"
                          name exwm-instance-name idx)))))))

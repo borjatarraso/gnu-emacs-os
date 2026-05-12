@@ -196,6 +196,17 @@
 ;;     scribble over a real operator's history.  records under
 ;;     'login-last-success.
 ;;
+;;  16. session workspace plumbing (v0.6 item 6.1)
+;;     round-trips the workspace slot on the geos-session struct:
+;;     session-record-workspace writes the in-memory slot AND
+;;     persists, session-workspace-for-name reads it back, and
+;;     the on-disk snapshot carries the :workspace key.  also
+;;     pins the no-phantom guarantee: calling record-workspace
+;;     with an unknown name returns nil and does NOT allocate a
+;;     registry entry (an EXWM hook firing for a spoofed
+;;     instance-name must not invent state).  records under
+;;     'session-workspace.
+;;
 ;; reporting: each test pushes a result alist into `freeze-test-results'.
 ;; (freeze-test-report) prints a per-test PASS/FAIL summary to *Messages*
 ;; and to /dev/console (when boot-marker--write is available, so the
@@ -2224,6 +2235,98 @@ we restore the prior contents on exit."
     (freeze-test--record 'login-last-success result)))
 
 ;; --------------------------------------------------------------------
+;; test 17: session workspace plumbing (v0.6 item 6.1)
+;; --------------------------------------------------------------------
+
+(defun freeze-test-session-workspace ()
+  "Round-trip the v0.6 item 6.1 workspace slot on the session record.
+synthesises a sentinel session in the in-memory registry, calls
+`session-record-workspace' with an index, asserts:
+  - `session-workspace-for-name' returns the index we wrote.
+  - the snapshot persisted to /var/emacs/sessions/<name> carries
+    the :workspace key.
+  - calling with an unregistered name returns nil and does NOT
+    create a phantom entry (important: an EXWM hook firing for a
+    spoofed instance-name must not allocate state).
+
+cleanup: removes the sentinel from the registry AND from disk on
+every exit path.  the sentinel name is `geos-freeze-ws-NNNNNN'."
+  (interactive)
+  (let* ((result 'fail)
+         (suffix (format "%06d" (random 1000000)))
+         (name (concat "geos-freeze-ws-" suffix))
+         (state-key (concat "sessions/" name))
+         (path (concat state-root state-key))
+         (saved (and (boundp 'session--registry)
+                     (gethash name session--registry))))
+    (unwind-protect
+        (condition-case err
+            (cond
+             ((not (and (fboundp 'session-record-workspace)
+                        (fboundp 'session-workspace-for-name)
+                        (boundp 'session--registry)
+                        (fboundp 'make-geos-session)))
+              (setq result "session workspace primitives unbound"))
+             (t
+              ;; unregistered name returns nil and writes nothing.
+              (let ((pre (session-record-workspace name 7)))
+                (cond
+                 (pre
+                  (setq result
+                        (format "record-workspace on unknown name returned %S"
+                                pre)))
+                 ((gethash name session--registry)
+                  (setq result
+                        "record-workspace on unknown name allocated entry"))
+                 (t
+                  ;; install a real entry, then round-trip the slot.
+                  (puthash name
+                           (make-geos-session
+                            :name name
+                            :uid 50001
+                            :gid 50001
+                            :home "/tmp"
+                            :supervise-key (intern (concat "session:" name))
+                            :status 'starting)
+                           session--registry)
+                  (let ((written (session-record-workspace name 2))
+                        (read    (session-workspace-for-name name)))
+                    (cond
+                     ((not (eql written 2))
+                      (setq result
+                            (format "record-workspace returned %S, want 2"
+                                    written)))
+                     ((not (eql read 2))
+                      (setq result
+                            (format "workspace-for-name returned %S, want 2"
+                                    read)))
+                     ((not (file-readable-p path))
+                      (setq result
+                            (format "snapshot file missing: %s" path)))
+                     (t
+                      (let ((snap (state-read state-key nil)))
+                        (cond
+                         ((not (eql (plist-get snap :workspace) 2))
+                          (setq result
+                                (format
+                                 "snapshot :workspace = %S, want 2"
+                                 (plist-get snap :workspace))))
+                         (t (setq result 'pass))))))))))))
+          (error
+           (panic-handle err 'freeze-test-session-workspace)
+           (setq result (format "raised: %S" err))))
+      ;; cleanup: drop in-memory + on-disk records.
+      (when (boundp 'session--registry)
+        (cond
+         (saved (puthash name saved session--registry))
+         (t (remhash name session--registry))))
+      (condition-case _
+          (when (file-exists-p path)
+            (delete-file path))
+        (error nil)))
+    (freeze-test--record 'session-workspace result)))
+
+;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
 
@@ -2250,6 +2353,7 @@ we restore the prior contents on exit."
   (freeze-test-login-audit)
   (freeze-test-login-lockout)
   (freeze-test-login-last-success)
+  (freeze-test-session-workspace)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

@@ -117,6 +117,14 @@ ephemeral by design.")
   started-at                            ; time-list at spawn
   child-pid                             ; integer or nil
   supervise-key                         ; symbol used in supervise registry
+  ;; v0.6 item 6 plumbing.  the EXWM workspace this user's emacs
+  ;; lives on, integer or nil.  populated by `session-record-workspace'
+  ;; from `exwm-config--maybe-route-user-window' once exwm has actually
+  ;; assigned the window a workspace.  stays nil in console mode (no
+  ;; EXWM, no workspaces).  persisted via `session--snapshot' so a
+  ;; supervisor restart can re-present the *login* buffer on a
+  ;; workspace other than the one a still-running user occupies.
+  workspace                             ; integer or nil
   ;; one of: 'held 'starting 'running 'exited
   ;;   'held      explicitly logged out OR rehydrated from persisted held
   ;;   'starting  pid1-spawn-as-uid returned, child not yet observed alive
@@ -139,13 +147,16 @@ will accept the result."
   "Return a serialisable plist for SESS.
 omits child-pid because a pid number is meaningless after a PID-1
 restart (the kernel will have reassigned it).  status is preserved
-so 'held survives a reboot."
+so 'held survives a reboot.  workspace, when known, is preserved
+so a supervisor restart can resume the *login* surface on a
+workspace that does not collide with a still-running session."
   (list :name (geos-session-name sess)
         :uid (geos-session-uid sess)
         :gid (geos-session-gid sess)
         :home (geos-session-home sess)
         :started-at (geos-session-started-at sess)
         :supervise-key (geos-session-supervise-key sess)
+        :workspace (geos-session-workspace sess)
         :status (geos-session-status sess)))
 
 (defun session--persist (sess)
@@ -208,6 +219,41 @@ used by the *users* buffer's per-row login column."
                  (eq (geos-session-status s) 'running))
         (cl-incf n)))
     n))
+
+(defun session-workspace-for-name (name)
+  "Return the EXWM workspace index recorded for NAME, or nil.
+nil means either the user is not in the registry or the EXWM
+manage hook has not fired yet (early in the spawn, before the
+per-user emacs has created any window).  the supervisor reads
+this to decide where NOT to draw the *login* buffer once a
+second login flow lands."
+  (let ((sess (gethash name session--registry)))
+    (and sess (geos-session-workspace sess))))
+
+(defun session-record-workspace (name idx)
+  "Stamp IDX onto NAME's session record and persist.
+NAME is the user shortname captured from `geos-user-NAME' by
+`exwm-config--maybe-route-user-window'; IDX is whatever
+`exwm-config--user-workspace-for' allocated for that name.
+
+we re-persist via `session--persist' so a supervisor restart
+sees the workspace assignment and can re-route the next *login*
+draw appropriately.  no-op (returns nil) when NAME has no
+registry entry: an unregistered window is logged elsewhere by
+the EXWM hook as a `exwm-route-unknown-user' breadcrumb; we
+must not allocate a phantom session here just because a
+spoofed `exwm-instance-name' showed up.
+
+returns IDX on success, nil on no-op."
+  (let ((sess (and (stringp name)
+                   (integerp idx)
+                   (gethash name session--registry))))
+    (cond
+     ((null sess) nil)
+     (t
+      (setf (geos-session-workspace sess) idx)
+      (session--persist sess)
+      idx))))
 
 ;; --------------------------------------------------------------------
 ;; spawn
@@ -640,6 +686,7 @@ they are NOT added to the registry and do NOT count toward the
           ;; 'held-but-restartable until the spawn succeeds.
           (let* ((persisted-status (plist-get snap :status))
                  (name (plist-get snap :name))
+                 (ws   (plist-get snap :workspace))
                  (sess (make-geos-session
                         :name name
                         :uid (plist-get snap :uid)
@@ -648,6 +695,7 @@ they are NOT added to the registry and do NOT count toward the
                         :started-at (plist-get snap :started-at)
                         :supervise-key (or (plist-get snap :supervise-key)
                                            (session--supervise-key name))
+                        :workspace (and (integerp ws) (>= ws 0) ws)
                         :status (pcase persisted-status
                                   ('held 'held)
                                   ('running 'held)  ; will respawn below

@@ -426,6 +426,11 @@ we don't re-print the warning here."
     (insert (format "  child pid:   %s\n"
                     (or (geos-session-child-pid login--session)
                         "(stubbed)")))
+    (let ((ws (geos-session-workspace login--session)))
+      (insert (format "  workspace:   %s\n"
+                      (cond
+                       ((integerp ws) (format "%d" ws))
+                       (t "(unassigned, EXWM hook has not fired yet)")))))
     (insert (format "  started:     %s\n"
                     (format-time-string
                      "%Y-%m-%d %H:%M:%S"
