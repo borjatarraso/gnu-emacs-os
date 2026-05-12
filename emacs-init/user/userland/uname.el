@@ -90,10 +90,20 @@ so we synthesize the four UTS fields from Emacs built-ins:
 No shelling-out, no /proc reads.  the eshell uname rebrand prefers
 something over nothing here."
   (list :kernel  "GNU"
+        ;; TODO(hurd): replace literal "0.9" once pid1 exports the
+        ;; gnumach release string through the port table.  the
+        ;; placeholder is grep-able so the deferred-work flag is
+        ;; visible to anyone scanning git blame for this column.
         :release "0.9"
-        :version (format-time-string "%a %b %e %H:%M:%S %Y"
-                                     (or emacs-build-time
-                                         (current-time)))
+        ;; prefix with "GEOS-userland built " so the column does not
+        ;; impersonate a kernel-build-date field on real-hurd output.
+        ;; uname -v on linux prints the kernel's own build date; we
+        ;; cannot read gnumach's build date today, so we render what
+        ;; we DO know (this userland's build time) honestly.
+        :version (concat "GEOS-userland built "
+                         (format-time-string "%a %b %e %H:%M:%S %Y"
+                                             (or emacs-build-time
+                                                 (current-time))))
         :host    (or (system-name) "")))
 
 (defun geos--uname ()
@@ -107,6 +117,12 @@ it is on."
   (cond
    ((geos-kernel-linux-p) (geos--uname-linux))
    ((geos-kernel-hurd-p)  (geos--uname-hurd))
+   ;; unknown kernel: uname needs SOMETHING to print or eshell
+   ;; explodes, so we lie to the user and return the linux shape.
+   ;; this is the one place in the port seam where we do NOT route
+   ;; through geos-port-unimplemented; the render-or-bust contract
+   ;; of eshell/uname wins over the "loud failure on unknown
+   ;; kernel" rule documented in core/port.el.
    (t                     (geos--uname-linux))))
 
 (defun geos--uname-flags (argv)
