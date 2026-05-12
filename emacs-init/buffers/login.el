@@ -311,6 +311,45 @@ RESULT is :ok or :fail.  REASON, when supplied, is a keyword like
        (panic-handle err 'login--audit-record)
        nil))))
 
+(defun login--audit-last-success ()
+  "Return (USER . TIMESTRING) of the most recent :ok audit entry, or nil.
+walks /var/emacs/journal/auth.log from the bottom up.  the audit
+log appends new records, so scanning in reverse is one pass.  the
+file is small for any sane operator (one record per login attempt,
+human-paced) so we load the whole thing into a buffer once.
+
+returns nil if the file is missing or no :ok record is present.
+parse errors on individual lines are silently skipped: a truncated
+last line (mid-write crash) or a future-format extension should
+not blank the footer."
+  (let ((path (concat state-root "journal/" login--audit-file)))
+    (cond
+     ((not (file-readable-p path)) nil)
+     (t
+      (condition-case err
+          (with-temp-buffer
+            (insert-file-contents path)
+            (goto-char (point-max))
+            (let (found)
+              (while (and (not found)
+                          (> (line-number-at-pos) 1)
+                          (zerop (forward-line -1)))
+                (let ((line (buffer-substring-no-properties
+                             (line-beginning-position)
+                             (line-end-position))))
+                  (unless (string-empty-p line)
+                    (condition-case _
+                        (let ((rec (car (read-from-string line))))
+                          (when (eq (cdr (assq 'result rec)) :ok)
+                            (setq found
+                                  (cons (cdr (assq 'user rec))
+                                        (cdr (assq 'time rec))))))
+                      (error nil)))))
+              found))
+        (error
+         (panic-handle err 'login--audit-last-success)
+         nil))))))
+
 ;; --------------------------------------------------------------------
 ;; render
 ;; --------------------------------------------------------------------
@@ -343,12 +382,25 @@ RESULT is :ok or :fail.  REASON, when supplied, is a keyword like
        (insert "render failed, see *panic*\n")))))
 
 (defun login--render-prompt-user ()
-  "Username entry."
+  "Username entry.
+the last-login footer is read from /var/emacs/journal/auth.log so
+an operator sees `last login: NAME @ TIMESTAMP' under the prompt.
+a fresh image with no auth.log yet shows nothing (we don't print
+`last login: never' because that's noise during the empty common
+case).  if the auth log lives on tmpfs the footer resets every
+reboot; the *journal* header already tells the operator that, so
+we don't re-print the warning here."
   (insert "  RET continue    q quit\n\n")
   (insert "=== geos login ===\n\n")
   (insert "  username: ")
   (when login--user (insert login--user))
-  (insert "\n\n  Press RET to confirm the username (or type one first).\n"))
+  (insert "\n\n  Press RET to confirm the username (or type one first).\n")
+  (let ((last (and (fboundp 'login--audit-last-success)
+                   (login--audit-last-success))))
+    (when (consp last)
+      (insert (format "\n  last login: %s @ %s\n"
+                      (or (car last) "?")
+                      (or (cdr last) "?"))))))
 
 (defun login--render-prompt-password ()
   "Password entry.  we never echo the password into the buffer."

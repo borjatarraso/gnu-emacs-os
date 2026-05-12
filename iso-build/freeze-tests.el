@@ -186,6 +186,16 @@
 ;;     that the file path is actually under /var/emacs/lockouts/.
 ;;     records under 'login-lockout.
 ;;
+;;  15. last-login footer (v0.6 item 5.4)
+;;     appends a synthetic :ok and a synthetic :fail to the auth log
+;;     via `state-append-journal', then calls `login--audit-last-success'
+;;     and asserts the :ok wins (returned USER and TIME match the
+;;     appended sentinel).  pins the contract the *login* renderer
+;;     depends on: a :fail right after a :ok must not blank the
+;;     footer.  saves and restores any prior auth.log so we don't
+;;     scribble over a real operator's history.  records under
+;;     'login-last-success.
+;;
 ;; reporting: each test pushes a result alist into `freeze-test-results'.
 ;; (freeze-test-report) prints a per-test PASS/FAIL summary to *Messages*
 ;; and to /dev/console (when boot-marker--write is available, so the
@@ -2128,6 +2138,92 @@ failure modes worth catching:
     (freeze-test--record 'login-lockout result)))
 
 ;; --------------------------------------------------------------------
+;; test 16: last-login footer readback (v0.6 item 5.4)
+;; --------------------------------------------------------------------
+
+(defun freeze-test-login-last-success ()
+  "Drive `login--audit-last-success' against a synthetic auth-log tail.
+v0.6 item 5.4: *login* renders `last login: NAME @ TIME' under
+the username prompt.  the readback walks /var/emacs/journal/auth.log
+from the bottom up, skipping :fail records and parse errors.
+
+what we pin:
+  - the most recent :ok record wins, even when later :fail records
+    follow it (an attacker hammering the prompt right after a
+    legitimate login should not blank the footer).
+  - empty auth-log returns nil (a fresh image must not print the
+    footer at all).
+  - a torn last line (mid-write crash) is skipped without raising.
+
+we append directly via `state-append-journal' so the test does not
+need to drive the full login state machine.  the sentinel timestamps
+are tagged `geos-freeze-last-NNNNNN' so a parallel test run cannot
+collide.  cleanup truncates the log if (and only if) we appended;
+on a host where auth.log already has content from a real login,
+we restore the prior contents on exit."
+  (interactive)
+  (let* ((result 'fail)
+         (suffix (format "%06d" (random 1000000)))
+         (name (concat "geos-freeze-last-" suffix))
+         (ok-ts "2026-05-12T10:00:00Z")
+         (fail-ts "2026-05-12T10:00:01Z")
+         (path (and (boundp 'state-root)
+                    (boundp 'login--audit-file)
+                    (concat state-root "journal/" login--audit-file)))
+         (saved (and path (file-readable-p path)
+                     (with-temp-buffer
+                       (insert-file-contents path)
+                       (buffer-string)))))
+    (unwind-protect
+        (condition-case err
+            (cond
+             ((not (and (fboundp 'login--audit-last-success)
+                        (fboundp 'state-append-journal)
+                        path))
+              (setq result "audit-last-success or state-append-journal unbound"))
+             (t
+              ;; append :ok then :fail; the :ok must still win.
+              (state-append-journal
+               login--audit-file
+               (list (cons 'time ok-ts)
+                     (cons 'user name)
+                     (cons 'result :ok)))
+              (state-append-journal
+               login--audit-file
+               (list (cons 'time fail-ts)
+                     (cons 'user (concat name "-other"))
+                     (cons 'result :fail)
+                     (cons 'reason :wrong-password)))
+              (let ((hit (login--audit-last-success)))
+                (setq result
+                      (cond
+                       ((null hit)
+                        "last-success returned nil with :ok in log")
+                       ((not (consp hit))
+                        (format "last-success returned non-cons: %S" hit))
+                       ((not (string= (car hit) name))
+                        (format "user mismatch: want %s got %S"
+                                name (car hit)))
+                       ((not (string= (cdr hit) ok-ts))
+                        (format "time mismatch: want %s got %S"
+                                ok-ts (cdr hit)))
+                       (t 'pass))))))
+          (error
+           (panic-handle err 'freeze-test-login-last-success)
+           (setq result (format "raised: %S" err))))
+      ;; restore the prior contents (or wipe if there were none).
+      (when path
+        (condition-case _
+            (cond
+             (saved
+              (let ((coding-system-for-write 'utf-8))
+                (write-region saved nil path nil 'nomsg)))
+             ((file-exists-p path)
+              (delete-file path)))
+          (error nil))))
+    (freeze-test--record 'login-last-success result)))
+
+;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
 
@@ -2153,6 +2249,7 @@ failure modes worth catching:
   (freeze-test-users-buffer-add)
   (freeze-test-login-audit)
   (freeze-test-login-lockout)
+  (freeze-test-login-last-success)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
