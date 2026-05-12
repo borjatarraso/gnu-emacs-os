@@ -34,9 +34,19 @@
 ;; down via session--ensure-user-state-dir before forking the user
 ;; emacs); reading our own data back is the boundary we trust.
 ;;
-;; out of scope for slice 2.2: dbus-launch, ibus-daemon supervision.
-;; the IBus branch is a placeholder that fails-fall-back until slice
-;; 2.3 lands the Guix packages.
+;; slice 2.3 turns the IBus branch from a stub into a real launcher:
+;; `input--ibus-available-p' probes ibus-daemon + dbus-launch on PATH,
+;; `input--dbus-launch' calls dbus-launch --csh-syntax and parses the
+;; setenv lines into the running emacs's process-environment,
+;; `input--ibus-spawn' make-processes ibus-daemon -drx, and
+;; `input--ibus-apply' sets default-input-method to "ibus" after the
+;; daemon is up.  the daemon's lifetime is the per-user emacs process
+;; group; logout kills it, login starts a fresh one.
+;;
+;; out of scope for slice 2.3: supervise.el respawn registration.  a
+;; crashed ibus-daemon today stays dead until the user logs out and
+;; back in.  slice 2.4 will replace the fire-and-forget spawn with
+;; `supervise-register'.
 
 (require 'panic)
 
@@ -106,14 +116,130 @@ and ipa methods register themselves before we look them up."
     (error nil)))
 
 (defun input--ibus-available-p ()
-  "Return non-nil iff an IBus daemon is reachable from this emacs.
-slice 2.1 stub: returns nil unconditionally.  slice 2.3 will replace
-the body with a real probe: dbus-ping of the org.freedesktop.IBus
-well-known name, or `executable-find' for ibus-daemon + a poke at
-$IBUS_ADDRESS / ~/.config/ibus/bus/.  keeping the seam empty for
-now means :auto falls through to quail and :ibus fails closed,
-which is the documented slice 2.1 contract."
-  nil)
+  "Return non-nil iff IBus + dbus-launch are on PATH.
+slice 2.3 grew this from the slice 2.1 always-nil stub: now we
+look for both `ibus-daemon' and `dbus-launch' executables, since
+ibus-daemon requires a DBus session bus and dbus-launch is how we
+start one without systemd / shepherd.  any missing piece returns
+nil and the dispatcher falls back to quail.
+
+we deliberately do NOT probe for a running daemon (a dbus ping
+against org.freedesktop.IBus): that would loop on the first boot
+where no daemon has started yet.  the `available' contract is
+about capability, not state."
+  (and (executable-find "ibus-daemon")
+       (executable-find "dbus-launch")))
+
+(defvar input--ibus-process nil
+  "Live ibus-daemon process spawned by `input--ibus-spawn', or nil.
+guards against double-spawning on a second `input-apply' call:
+when non-nil and `process-live-p' returns t we keep the existing
+one.  on user-emacs death the process group dies with it (the
+daemon is our child), so no /var/run lifetime tracking is needed.")
+
+(defun input--dbus-launch ()
+  "Start a DBus session bus iff DBUS_SESSION_BUS_ADDRESS is unset.
+calls `dbus-launch --csh-syntax' synchronously, parses the two
+`setenv NAME 'VAL';' lines it prints, and pushes the values into
+the running emacs's `process-environment'.  returns t when the
+bus is reachable after this call (either we set it or it was
+already set), nil on any failure.
+
+we use --csh-syntax because the output shape is the most rigid:
+`setenv NAME 'VALUE';' one per line.  --sh-syntax uses `NAME=...'
+plus an `export' line, which is harder to parse without a real
+shell.  dbus-launch is a binary, not a shell wrapper, so calling
+it directly is within the no-shell rule."
+  (cond
+   ((getenv "DBUS_SESSION_BUS_ADDRESS")
+    (input--trace "dbus: address already in environment, skipping launch")
+    t)
+   ((not (executable-find "dbus-launch"))
+    (input--trace "dbus: dbus-launch not on PATH")
+    nil)
+   (t
+    (condition-case err
+        (with-temp-buffer
+          (let ((rc (call-process "dbus-launch" nil t nil "--csh-syntax")))
+            (cond
+             ((not (eq rc 0))
+              (input--trace
+               (format "dbus-launch exit %S, output: %s"
+                       rc (buffer-string)))
+              nil)
+             (t
+              (goto-char (point-min))
+              (let ((addr nil) (pid nil))
+                (while (re-search-forward
+                        "^setenv +\\([A-Z_]+\\) +'\\([^']*\\)';"
+                        nil t)
+                  (let ((k (match-string 1))
+                        (v (match-string 2)))
+                    (cond
+                     ((equal k "DBUS_SESSION_BUS_ADDRESS")
+                      (setq addr v))
+                     ((equal k "DBUS_SESSION_BUS_PID")
+                      (setq pid v)))
+                    (setenv k v)))
+                (cond
+                 (addr
+                  (input--trace
+                   (format "dbus-launch: bus at %s pid %s" addr pid))
+                  t)
+                 (t
+                  (input--trace
+                   "dbus-launch: parsed no DBUS_SESSION_BUS_ADDRESS")
+                  nil)))))))
+      (error
+       (if (fboundp 'panic-handle)
+           (panic-handle err 'input--dbus-launch)
+         (input--trace (format "dbus-launch failed: %S" err)))
+       nil)))))
+
+(defun input--ibus-spawn ()
+  "Start ibus-daemon as a child of this emacs.
+returns the process object on success, nil otherwise.  idempotent:
+when `input--ibus-process' is alive we return it unchanged.
+
+flags:
+  -d  daemonize (fork into background)
+  -r  replace any running daemon (paranoia, costs nothing here)
+  -x  start with XIM bridge so non-emacs X clients (xterm, etc)
+      can also talk to IBus
+
+the daemon writes its socket under /run/user/UID/ibus/.  the
+supervisor lays /run/user/$UID/ down with the right ownership as
+part of `session--ensure-user-state-dir'; if that dir is missing
+the daemon will fall back to ~/.config/ibus/bus/ which the user
+also owns.  either way it works without root."
+  (cond
+   ((and input--ibus-process (process-live-p input--ibus-process))
+    (input--trace "ibus: daemon already alive, reusing")
+    input--ibus-process)
+   ((not (executable-find "ibus-daemon"))
+    (input--trace "ibus: ibus-daemon not on PATH")
+    nil)
+   (t
+    (condition-case err
+        (let ((proc (make-process
+                     :name "ibus-daemon"
+                     :command '("ibus-daemon" "-drx")
+                     :noquery t
+                     :connection-type 'pipe
+                     :sentinel
+                     (lambda (p ev)
+                       (input--trace
+                        (format "ibus-daemon sentinel: %s (status %S)"
+                                (string-trim (or ev ""))
+                                (process-status p)))))))
+          (setq input--ibus-process proc)
+          (input--trace "ibus: daemon spawned")
+          proc)
+      (error
+       (if (fboundp 'panic-handle)
+           (panic-handle err 'input--ibus-spawn)
+         (input--trace (format "ibus-daemon spawn failed: %S" err)))
+       nil)))))
 
 (defun input--persist-path ()
   "Return the path of this user's input.eld, or nil.
@@ -306,19 +432,39 @@ user picked :quail (mozc is a quail-compatible method)."
     nil)))
 
 (defun input--ibus-apply ()
-  "Set `default-input-method' to ibus (slice 2.1 stub).
-returns nil unconditionally for now: the dispatcher's caller treats
-nil as `did not apply' and the :auto branch falls through to quail.
-slice 2.3 will:
-  - confirm `input--ibus-available-p' (the probe is here today)
-  - (require 'ibus) or (setq default-input-method \"ibus\") depending
-    on which integration package the system profile carries
-  - trace `ibus: default-input-method <- ...' on success
-the stub still traces a one-liner so a serial log shows the chooser
-was reached, which is the point of the slice: the seam exists and
-is testable, even if it does nothing yet."
-  (input--trace "ibus: stub (slice 2.3 lands the real probe)")
-  nil)
+  "Bring up IBus and point `default-input-method' at it.
+three steps, any failure returns nil and lets the dispatcher fall
+back to quail:
+  1. `input--dbus-launch' ensures a session bus exists.
+  2. `input--ibus-spawn' forks ibus-daemon if not already running.
+  3. set `default-input-method' to \"ibus\" so vanilla
+     `toggle-input-method' picks it up.
+
+step 3 is intentionally `default-input-method' (a string the
+in-tree `input-method-alist' resolves), NOT a setq of any ibus.el
+integration variable.  emacs's leim-list registers an `ibus' method
+when an IBus-aware integration package is present; if not, the
+setq is harmless and the user can still toggle via C-c e i with
+quail as the fallback.
+
+slice 2.4 will replace the fire-and-forget spawn with a real
+`supervise-register' call so a crashed daemon respawns.  for now
+the daemon's lifetime is tied to this emacs's process group:
+logout kills it, login starts a fresh one."
+  (cond
+   ((not (input--ibus-available-p))
+    (input--trace "ibus: not available, refusing apply")
+    nil)
+   ((not (input--dbus-launch))
+    (input--trace "ibus: dbus bus unreachable, refusing apply")
+    nil)
+   ((not (input--ibus-spawn))
+    (input--trace "ibus: daemon spawn failed")
+    nil)
+   (t
+    (setq default-input-method "ibus")
+    (input--trace "ibus: default-input-method <- ibus")
+    t)))
 
 (defun input-apply ()
   "Set up input methods at boot, dispatching on `geos-input-method'.

@@ -35,6 +35,8 @@
              (gnu packages emacs)
              (gnu packages emacs-xyz)
              (gnu packages fonts)
+             (gnu packages glib)
+             (gnu packages ibus)
              (gnu packages linux)
              (gnu packages mail)
              (gnu packages xorg)
@@ -959,6 +961,17 @@
                      ;; is the kernel API we already have.
                      alsa-utils
                      alsa-lib
+                     ;; v0.7 item 2.3: IBus + the libpinyin engine for
+                     ;; canonical CJK round-trip.  dbus is added because
+                     ;; ibus-daemon expects a session bus; user-init.el
+                     ;; will run dbus-launch under make-process and let
+                     ;; ibus-daemon find DBUS_SESSION_BUS_ADDRESS in its
+                     ;; environment.  no systemd, no shepherd: the
+                     ;; daemon's lifetime is the per-user emacs's
+                     ;; process group, which dies on logout.
+                     ibus
+                     ibus-libpinyin
+                     dbus
                      ;; v0.4 item 5 finisher.  dhcpcd is spawned by
                      ;; services/dhcp.el on operator action (the `d'
                      ;; key in the *network* buffer).  shell-out
