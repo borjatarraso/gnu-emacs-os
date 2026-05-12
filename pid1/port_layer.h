@@ -89,16 +89,33 @@ typedef struct port_caps {
      * returns when the kernel finishes resuming.  Hurd has no
      * equivalent today; the Hurd backend returns -1 with errno=ENOSYS
      * and the elisp side renders M-x geos-suspend as "not on this
-     * kernel". */
+     * kernel".  (W5) the Hurd stub will not use STATE; cast it to
+     * (void) at the top of the body to keep -Wunused-parameter quiet
+     * under -Werror. */
     int (*suspend)(const char *state);
 } port_caps;
 
-/* the active backend.  exactly one assignment per process, done at
- * startup before any port-> call.  the standalone PID 1 binary picks
- * port_linux_impl from main(); the dynamic module picks it from
- * emacs_module_init().  the Hurd backend will land a parallel
- * port_hurd_impl on the side branch and a build-time selector. */
+/* the active backend.  starts NULL.  exactly one assignment per
+ * process, done at startup before any port-> call: the standalone
+ * PID 1 binary picks port_linux_impl from main(); the dynamic module
+ * picks it from emacs_module_init().  the Hurd backend will land a
+ * parallel port_hurd_impl on the side branch and a build-time
+ * selector.
+ *
+ * the "starts NULL, must be assigned" contract is intentional: a
+ * silent default-to-linux would mask "forgot to register the Hurd
+ * backend" as a Linux-syscalls-on-Mach run, which is exactly the
+ * footgun the Hurd port has to avoid (B2, skeptic review 2026-05-12).
+ * call port_require_or_abort() after assignment to enforce the
+ * invariant in one place. */
 extern const port_caps *port;
+
+/* asserts that `port` has been assigned.  intended to be called once
+ * from main() / emacs_module_init() right after the assignment; on a
+ * NULL port it writes a one-line diagnostic to fd 2 and abort()s.
+ * defined in port_linux.c today; the Hurd backend defines its own
+ * copy in port_hurd.c with the same semantics. */
+void port_require_or_abort(void);
 
 /* the Linux backend instance.  defined in port_linux.c. */
 extern const port_caps port_linux_impl;

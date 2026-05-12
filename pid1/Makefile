@@ -109,6 +109,13 @@ endif
 COMMON_SRCS := emacs-init.c port_linux.c
 COMMON_HDRS := port_layer.h
 
+# per-TU object files.  the boot and module builds need distinct
+# names because the module build adds -DPID1_MODULE -fPIC and uses
+# its own CFLAGS; sharing a single .o between the two would silently
+# pick whichever was built last (W4, skeptic review 2026-05-12).
+BOOT_OBJS   := emacs-init.boot.o port_linux.boot.o
+MODULE_OBJS := emacs-init.mod.o port_linux.mod.o
+
 .PHONY: all default module clean install
 
 default: emacs-init
@@ -117,15 +124,24 @@ all: emacs-init pid1-module.so
 
 module: pid1-module.so
 
-emacs-init: $(COMMON_SRCS) $(COMMON_HDRS)
-	$(CC) $(CFLAGS) $(STATIC_FLAG) -o $@ $(COMMON_SRCS) $(LDFLAGS)
+# boot-path objects.  static-friendly, no PIC, no module ifdef.
+%.boot.o: %.c $(COMMON_HDRS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+emacs-init: $(BOOT_OBJS)
+	$(CC) $(CFLAGS) $(STATIC_FLAG) -o $@ $(BOOT_OBJS) $(LDFLAGS)
+
+# module objects.  -fPIC and -DPID1_MODULE come from MODULE_CFLAGS so
+# the same .c files compile differently from the boot variant.
+%.mod.o: %.c $(COMMON_HDRS)
+	$(CC) $(MODULE_CFLAGS) -c -o $@ $<
 
 # the module is loaded into a running emacs; do not pass -static, do
-# pass -fPIC (already in MODULE_CFLAGS).  feed both TUs in one go so
+# pass -fPIC (already in MODULE_CFLAGS).  link the per-TU objects so
 # the resulting .so carries both port_linux_impl and the Fpid1_*
 # bindings.
-pid1-module.so: $(COMMON_SRCS) $(COMMON_HDRS)
-	$(CC) $(MODULE_CFLAGS) $(MODULE_LDFLAGS) -o $@ $(COMMON_SRCS) $(MODULE_LIBS)
+pid1-module.so: $(MODULE_OBJS)
+	$(CC) $(MODULE_CFLAGS) $(MODULE_LDFLAGS) -o $@ $(MODULE_OBJS) $(MODULE_LIBS)
 
 install: emacs-init
 	install -d $(DESTDIR)$(SBINDIR)

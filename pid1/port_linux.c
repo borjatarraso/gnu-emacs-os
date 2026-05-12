@@ -34,6 +34,7 @@
 #include <net/route.h>
 #include <netinet/in.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
@@ -168,8 +169,13 @@ linux_set_route_default(uint32_t gw_be, const char *ifname)
     rt.rt_flags  = RTF_UP | RTF_GATEWAY;
     rt.rt_metric = 1;
     /* rt_dev is char *, not const char *, in the kernel ABI.  cast
-     * is intentional and the buffer outlives the ioctl call. */
+     * is intentional and the buffer outlives the ioctl call.  zero the
+     * whole IFNAMSIZ tail first: nlen < IFNAMSIZ here so the trailing
+     * bytes would otherwise carry whatever the stack had when we
+     * entered.  the kernel reads up to the first NUL, so this is
+     * defence in depth rather than a current-bug fix (W1). */
     char ifbuf[IFNAMSIZ];
+    memset(ifbuf, 0, sizeof ifbuf);
     memcpy(ifbuf, ifname, nlen);
     ifbuf[nlen] = '\0';
     rt.rt_dev = ifbuf;
@@ -197,7 +203,18 @@ linux_reboot_cmd(int cmd)
  * the first newline.  write(2) returns when the kernel has finished
  * resuming, so a 0 return means we are awake again on the other side.
  * sync() up front so any pending /var/emacs writes hit disk before
- * the platform stops the CPU. */
+ * the platform stops the CPU.
+ *
+ * (B1, skeptic review 2026-05-12) the prior version had a short-write
+ * bug: when the first write returned w >= 0 with w != len, the inner
+ * branch set err = EIO via `else if`, then fell through to the second
+ * write which could succeed (w = w2 = 1) and mask the truncation; the
+ * outer `if (w < 0)` then never fired and the function returned 0 on
+ * a request the kernel never parsed.  the bug pre-existed in
+ * raw_suspend, the relocation only exposed it.  the fix: sysfs
+ * accepts the whole token in one write or none, so any short write is
+ * a hard failure.  no loop, no second chance; close, set errno=EIO,
+ * return -1. */
 static int
 linux_suspend(const char *state)
 {
@@ -207,19 +224,30 @@ linux_suspend(const char *state)
         return -1;
     size_t len = strlen(state);
     ssize_t w = write(fd, state, len);
-    int err = errno;
-    if (w >= 0) {
-        ssize_t w2 = write(fd, "\n", 1);
-        if (w2 < 0) err = errno;
-        else if ((size_t)w != len) err = EIO;
-        else w = w2;
-    }
-    int c = close(fd);
     if (w < 0) {
+        int err = errno;
+        (void)close(fd);
         errno = err;
         return -1;
     }
-    if (c < 0)
+    if ((size_t)w != len) {
+        (void)close(fd);
+        errno = EIO;
+        return -1;
+    }
+    ssize_t w2 = write(fd, "\n", 1);
+    if (w2 < 0) {
+        int err = errno;
+        (void)close(fd);
+        errno = err;
+        return -1;
+    }
+    if (w2 != 1) {
+        (void)close(fd);
+        errno = EIO;
+        return -1;
+    }
+    if (close(fd) < 0)
         return -1;
     return 0;
 }
@@ -237,9 +265,40 @@ const port_caps port_linux_impl = {
     .suspend           = linux_suspend,
 };
 
-/* the active pointer.  initialised to the Linux backend so a
- * caller that forgets to set it explicitly still gets a working
- * system; the boot path sets it again from main() as documentation
- * of intent, and the module path sets it from emacs_module_init()
- * for the same reason. */
-const port_caps *port = &port_linux_impl;
+/* the active pointer.  starts NULL; main() and emacs_module_init()
+ * must assign &port_linux_impl (or the Hurd equivalent) exactly once
+ * before any port-> call.
+ *
+ * (B2, skeptic review 2026-05-12) the prior version defaulted this to
+ * &port_linux_impl "so a caller that forgets to set it explicitly
+ * still gets a working system".  that is exactly the footgun the
+ * Hurd port needs to avoid: a Hurd-on-Mach build that forgets to
+ * register port_hurd_impl would silently run with Linux syscall
+ * wrappers, which would either fail with confusing errnos or, worse,
+ * appear to succeed against whatever syscalls the Hurd glibc
+ * translates.  NULL means "fail loud at first deref" and the loud
+ * fail lives in port_require_or_abort below. */
+const port_caps *port = NULL;
+
+/* call this once at startup from main() / emacs_module_init() after
+ * assigning `port`.  enforces the "exactly one assignment before any
+ * port-> call" invariant declared in port_layer.h.  on failure we
+ * abort instead of trying to recover: a missing port table is a
+ * build-config bug, not a runtime condition, and the only safe move
+ * from PID 1 is to crash early enough that the kernel still has
+ * /dev/console open. */
+void
+port_require_or_abort(void)
+{
+    if (port == NULL) {
+        /* write directly: console() lives in emacs-init.c behind
+         * !PID1_MODULE, and from here we cannot tell which TU we are
+         * linked into.  the message is what the post-mortem needs to
+         * see; the abort() that follows is what the kernel needs to
+         * panic on cleanly. */
+        static const char m[] =
+            "pid1: port table not registered before first call; aborting\n";
+        ssize_t r = write(2, m, sizeof m - 1); (void)r;
+        abort();
+    }
+}

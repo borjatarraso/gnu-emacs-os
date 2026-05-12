@@ -1134,11 +1134,14 @@ dump_xorg_log(void)
 int
 main(int argc, char **argv)
 {
-    /* pick the kernel backend before any port-> call.  the linux
-     * impl is also port_layer.c's default initialiser; the explicit
-     * assignment is documentation, and gives us a single grep target
-     * the day a kernel switch becomes runtime-selectable. */
+    /* pick the kernel backend before any port-> call.  `port` is now
+     * NULL at file scope (B2, skeptic review 2026-05-12); the
+     * port_require_or_abort guard right after this assignment turns a
+     * forgotten registration into a loud crash at boot instead of a
+     * silent Linux-default fallback that would mask a missing Hurd
+     * backend registration on the side branch. */
     port = &port_linux_impl;
+    port_require_or_abort();
 
     /* argv layout from the guix boot gexp:
      *   argv[1] = absolute store path of the emacs binary
@@ -2826,12 +2829,14 @@ pid1_defalias(emacs_env *env, const char *name, emacs_value func)
 int
 emacs_module_init(struct emacs_runtime *ert)
 {
-    /* pick the kernel backend before any port-> call.  the linux
-     * impl is also port_layer.c's default initialiser; the explicit
-     * assignment here mirrors main()'s for the standalone PID 1 and
-     * gives us a single grep target if a kernel switch ever needs
-     * to become runtime-selectable. */
+    /* pick the kernel backend before any port-> call.  same contract
+     * as main()'s assignment: `port` starts NULL, we assign exactly
+     * once here, and port_require_or_abort() turns a missed
+     * assignment into an abort at module-load time rather than a
+     * NULL-deref crash on the first pid1-* call from elisp (B2,
+     * skeptic review 2026-05-12). */
     port = &port_linux_impl;
+    port_require_or_abort();
 
     /* version sanity: the runtime struct can grow over emacs releases.
      * if it shrinks below what we compiled against, refuse to load. */
