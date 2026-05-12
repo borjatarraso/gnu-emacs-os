@@ -211,4 +211,14 @@ void port_require_or_abort(void);
 /* the Linux backend instance.  defined in port_linux.c. */
 extern const port_caps port_linux_impl;
 
+/* the Hurd backend instance.  defined in port_hurd.c on the hurd side
+ * branch; the Linux build never links port_hurd.c so referring to
+ * this symbol from a Linux TU would fail at the linker stage.  the
+ * extern declaration is conditional on PORT_HURD so a Linux build
+ * with -Wundef does not see a dangling declaration: the Makefile
+ * defines PORT_HURD only when PORT=hurd. */
+#ifdef PORT_HURD
+extern const port_caps port_hurd_impl;
+#endif
+
 #endif /* GEOS_PID1_PORT_LAYER_H */
