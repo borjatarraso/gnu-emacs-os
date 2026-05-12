@@ -128,9 +128,34 @@ PORT ?= linux
 ifeq ($(PORT),hurd)
 PORT_SRC  := port_hurd.c
 PORT_DEFS := -DPORT_HURD
+# Hurd link dependencies for port_hurd.c.  the Mach RPC surface
+# (host_reboot, mach_port_deallocate, mach_host_self, mach_task_self)
+# is in -lmach; the Hurd userland RPC stubs (file_set_translator,
+# file_name_lookup, the pfinet ioctl mux entry points) live in -lhurd
+# and -lhurduser.  ordering matters on a non-LTO link: -lhurduser
+# before -lhurd before -lmach reflects the dependency direction (the
+# user-side stubs call into libhurd which calls into libmach).
+#
+# the pfinet networking verbs (bring_up_lo / set_address /
+# set_route_default) go through plain socket() + ioctl() in glibc, so
+# they do NOT add a third-party dep here: glibc's ioctl mux in
+# sysdeps/mach/hurd/ioctl.c is what translates SIOC* into the pfinet
+# RPCs, and that mux ships inside libc itself on a Hurd glibc.  no
+# -lpfinet, no separate stub library.
+#
+# the Linux build path never sees these libs: the link line below is
+# scoped to PORT=hurd only.  attribute-style "ldflags += ..." would
+# work too but the explicit assignment is harder to misread when the
+# v0.8 cross-toolchain runner picks this up.
+PORT_BOOT_LIBS   := -lhurduser -lhurd -lmach
+PORT_MODULE_LIBS := -lhurduser -lhurd -lmach
 else ifeq ($(PORT),linux)
 PORT_SRC  := port_linux.c
 PORT_DEFS :=
+# Linux backend has no extra link deps; everything it needs is in
+# libc (or, for the module, libcrypt added below).
+PORT_BOOT_LIBS   :=
+PORT_MODULE_LIBS :=
 else
 $(error pid1/Makefile: PORT must be linux or hurd, got $(PORT))
 endif
@@ -166,7 +191,7 @@ module: pid1-module.so
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 emacs-init: $(BOOT_OBJS)
-	$(CC) $(CFLAGS) $(STATIC_FLAG) -o $@ $(BOOT_OBJS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $(STATIC_FLAG) -o $@ $(BOOT_OBJS) $(LDFLAGS) $(PORT_BOOT_LIBS)
 
 # module objects.  -fPIC and -DPID1_MODULE come from MODULE_CFLAGS so
 # the same .c files compile differently from the boot variant.
@@ -178,7 +203,7 @@ emacs-init: $(BOOT_OBJS)
 # the resulting .so carries both port_linux_impl and the Fpid1_*
 # bindings.
 pid1-module.so: $(MODULE_OBJS)
-	$(CC) $(MODULE_CFLAGS) $(MODULE_LDFLAGS) -o $@ $(MODULE_OBJS) $(MODULE_LIBS)
+	$(CC) $(MODULE_CFLAGS) $(MODULE_LDFLAGS) -o $@ $(MODULE_OBJS) $(MODULE_LIBS) $(PORT_MODULE_LIBS)
 
 install: emacs-init
 	install -d $(DESTDIR)$(SBINDIR)

@@ -4,12 +4,13 @@
 /* port_hurd.c, the Hurd backend for port_layer.h.
  *
  * step 4 of the hurd port work order (docs/v04-item11-hurd-spike.md
- * lines 161-163): "port_hurd.c mount + reboot, enough to boot".  the
- * networking surfaces (bring_up_lo / set_address / set_route_default)
- * are stubbed to ENOSYS here and get their real pfinet RPC bodies in
- * step 5.  the suspend surface stays ENOSYS forever on this port:
- * Hurd has no /sys/power/state equivalent and the elisp layer is
- * supposed to render that as "not on this kernel".
+ * lines 161-163) shipped mount + reboot + set_hostname.  step 5
+ * (line 164: "port_hurd.c networking", ~2 weeks of pfinet RPC
+ * learning curve) lands here: bring_up_lo, set_address, and
+ * set_route_default route through Hurd's pfinet translator at
+ * /servers/socket/2.  the suspend surface stays ENOSYS forever on
+ * this port: Hurd has no /sys/power/state equivalent and the elisp
+ * layer is supposed to render that as "not on this kernel".
  *
  * invariants shared by every body in this file:
  *
@@ -33,10 +34,30 @@
 #include "port_layer.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* POSIX networking headers.  Hurd's glibc ships these with the same
+ * struct shapes as Linux's glibc (net/if.h: struct ifreq + IFNAMSIZ;
+ * net/route.h: struct rtentry; netinet/in.h: struct sockaddr_in +
+ * htonl).  the ioctl numbers (SIOCSIFFLAGS et al.) live in
+ * <sys/ioctl.h> on Hurd as well; pfinet's iioctl-ops.c implements
+ * exactly the SIOC* set Linux exposes, which is why the bodies below
+ * read like the Linux backend with the link-line swapped.
+ *
+ * reference: hurd.git pfinet/iioctl-ops.c (S_iioctl_siocsifflags,
+ * S_iioctl_siocsifaddr, S_iioctl_siocsifnetmask, S_iioctl_siocaddrt;
+ * the ioctl mux in hurd/libtrivfs translates the userland ioctl(2)
+ * to those RPCs transparently). */
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <net/route.h>
+#include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 
 /* Hurd-specific headers.  these only exist on a Hurd glibc toolchain.
  * a Linux build that accidentally pulled this TU in would fail at
@@ -245,34 +266,210 @@ hurd_set_hostname(const char *name, size_t len)
     return sethostname(name, len);
 }
 
-/* bring_up_lo: pfinet RPC, step 5.  for step 4 we return ENOSYS so
- * the supervisor's network init logs cleanly and the boot proceeds
- * without networking.  this is acceptable for the console-only
- * profile we are aiming at; the elisp side already prints a panic
- * entry when the call fails and otherwise carries on. */
+/* pfinet socket-open helper.  every networking verb wants a UDP/IPv4
+ * socket on the pfinet translator at /servers/socket/2; the
+ * AF_INET / SOCK_DGRAM path goes through glibc's hurd/sockets.c which
+ * does a `file_name_lookup ("/servers/socket/2", ...)` and a
+ * `socket_create` Mach RPC against the resulting translator port.  the
+ * cost is one RPC round trip per open versus Linux's direct in-kernel
+ * fd allocation, but pid1 calls these verbs only at boot and from
+ * *network* user actions; the round trip is irrelevant.
+ *
+ * reference: glibc.git/sysdeps/mach/hurd/socket.c, which is the
+ * implementation socket(2) resolves to on Hurd.  glibc sets errno via
+ * __hurd_fail when the underlying RPC fails, so callers can use plain
+ * errno semantics; we do NOT need to translate kern_return_t here.
+ *
+ * returning -1 with errno preserved on failure matches the linux
+ * backend exactly, which lets the supervisor-side panic-handle path
+ * render the same diagnostic regardless of kernel. */
+static int
+hurd_pfinet_open(void)
+{
+    /* AF_INET + SOCK_DGRAM is the standard pfinet entry point; the
+     * dummy protocol arg is 0 (IPPROTO_IP) per POSIX, which pfinet
+     * accepts for both UDP and the ioctl-only "no transport" use we
+     * actually want here.  the fd is O_CLOEXEC-equivalent on Hurd by
+     * default (the Mach port is not inherited across a posix_spawn
+     * unless explicitly placed in the file_actions), so we do not
+     * have to FD_CLOEXEC after the fact the way a Linux build might. */
+    return socket(AF_INET, SOCK_DGRAM, 0);
+}
+
+/* bring up the loopback interface via pfinet.  the linux backend
+ * (port_linux.c:linux_bring_up_lo) does SIOCGIFFLAGS / OR in
+ * IFF_UP|IFF_RUNNING / SIOCSIFFLAGS against a UDP socket.  the Hurd
+ * path is identical in shape: pfinet's iioctl-ops.c implements both
+ * SIOCGIFFLAGS (S_iioctl_siocgifflags) and SIOCSIFFLAGS
+ * (S_iioctl_siocsifflags) with the same ifreq layout, and glibc's
+ * ioctl-mux in sysdeps/mach/hurd/ioctl.c translates the userland
+ * ioctl(fd, SIOC*, &ifreq) into the appropriate RPC on the file port
+ * bound to the fd.
+ *
+ * reference: hurd.git/pfinet/iioctl-ops.c (the S_iioctl_siocgifflags
+ * and S_iioctl_siocsifflags handlers; both take a struct ifreq with
+ * ifr_name populated and read/write ifr_flags).
+ *
+ * the read-modify-write discipline matches the linux body: pfinet
+ * preserves flags pid1 does not know about (NOARP, PROMISC, ...) and
+ * we must too, so we read, OR in UP|RUNNING, and write back.  fd is
+ * always closed on every exit path; PID 1 lives forever and a leaked
+ * Mach port is just as bad as a leaked Linux fd. */
 static int
 hurd_bring_up_lo(void)
 {
-    errno = ENOSYS;
-    return -1;
+    int s = hurd_pfinet_open();
+    if (s < 0) return -1;
+    struct ifreq r;
+    memset(&r, 0, sizeof r);
+    /* IFNAMSIZ is 16 on Hurd as well (net/if.h matches the Linux ABI
+     * here; pfinet pulls the same upper bound in iioctl-ops.c).  "lo"
+     * is 3 bytes incl. NUL.  memcpy + explicit terminator instead of
+     * strncpy: the same trap that bit the Linux backend bites here
+     * too if a future change extends this to a longer iface name. */
+    memcpy(r.ifr_name, "lo", 3);
+    r.ifr_name[IFNAMSIZ - 1] = '\0';
+    if (ioctl(s, SIOCGIFFLAGS, &r) < 0) {
+        int saved = errno;
+        (void)close(s);
+        errno = saved;
+        return -1;
+    }
+    r.ifr_flags |= IFF_UP | IFF_RUNNING;
+    if (ioctl(s, SIOCSIFFLAGS, &r) < 0) {
+        int saved = errno;
+        (void)close(s);
+        errno = saved;
+        return -1;
+    }
+    (void)close(s);
+    return 0;
 }
 
-/* set_address: pfinet RPC, step 5.  see bring_up_lo. */
+/* assign IPv4 address + netmask to IFNAME and bring it up.  same
+ * three-ioctl sequence as the linux backend (SIOCSIFADDR /
+ * SIOCSIFNETMASK / SIOCSIFFLAGS), routed through pfinet.  pfinet
+ * handles all three: hurd.git/pfinet/iioctl-ops.c ships
+ * S_iioctl_siocsifaddr, S_iioctl_siocsifnetmask, and
+ * S_iioctl_siocsifflags as the corresponding RPC handlers, and
+ * glibc's ioctl mux dispatches based on the SIOC* number.
+ *
+ * the ordering invariant (address before netmask before flags-up) is
+ * the same on Hurd as on Linux: pfinet rejects a netmask set before
+ * the address with errno=EADDRNOTAVAIL, which mirrors the Linux 5.x
+ * kernel behaviour the linux backend documents.  keeping the order
+ * matched also keeps the supervisor's elisp logging shape consistent
+ * across kernels (W4 carry-over from the port-layer refactor).
+ *
+ * CIDR-to-netmask conversion is identical to the linux backend; the
+ * shift-by-32 UB trap (prefix == 0) is special-cased the same way. */
 static int
 hurd_set_address(const char *ifname, uint32_t addr_be, int prefix)
 {
-    (void)ifname; (void)addr_be; (void)prefix;
-    errno = ENOSYS;
-    return -1;
+    if (prefix < 0 || prefix > 32) { errno = EINVAL; return -1; }
+    if (!ifname) { errno = EINVAL; return -1; }
+    size_t nlen = strnlen(ifname, IFNAMSIZ);
+    if (nlen == 0 || nlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
+    int s = hurd_pfinet_open();
+    if (s < 0) return -1;
+    struct ifreq r;
+    memset(&r, 0, sizeof r);
+    memcpy(r.ifr_name, ifname, nlen);
+    r.ifr_name[IFNAMSIZ - 1] = '\0';
+    struct sockaddr_in *sin = (struct sockaddr_in *)&r.ifr_addr;
+    sin->sin_family = AF_INET;
+    sin->sin_addr.s_addr = addr_be;
+    /* SIOCSIFADDR -> pfinet S_iioctl_siocsifaddr.  pfinet stores the
+     * address on the named device's struct device and the route table
+     * gets the implicit /prefix route from the netmask write that
+     * follows. */
+    if (ioctl(s, SIOCSIFADDR, &r) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    /* prefix == 0 special-cased: shift by 32 on a 32-bit value is
+     * undefined behavior in C; the linux backend has the same guard. */
+    uint32_t mask_host = (prefix == 0)
+        ? 0u
+        : (uint32_t)(0xFFFFFFFFu << (32 - prefix));
+    sin->sin_addr.s_addr = htonl(mask_host);
+    /* SIOCSIFNETMASK -> pfinet S_iioctl_siocsifnetmask. */
+    if (ioctl(s, SIOCSIFNETMASK, &r) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    /* read-modify-write on flags: same reason as the linux backend
+     * (do not clobber NOARP / PROMISC).  SIOCGIFFLAGS and SIOCSIFFLAGS
+     * both go through pfinet's iioctl-ops.c. */
+    if (ioctl(s, SIOCGIFFLAGS, &r) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    r.ifr_flags |= IFF_UP | IFF_RUNNING;
+    if (ioctl(s, SIOCSIFFLAGS, &r) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    (void)close(s);
+    return 0;
 }
 
-/* set_route_default: pfinet RPC, step 5.  see bring_up_lo. */
+/* install a default IPv4 route via GW_BE through IFNAME.  the linux
+ * backend uses SIOCADDRT with rt_dst=0/0; the Hurd backend uses the
+ * same ioctl through pfinet.  pfinet's iioctl-ops.c ships
+ * S_iioctl_siocaddrt (and S_iioctl_siocdelrt for the symmetric
+ * delete), accepting the same struct rtentry layout the Linux kernel
+ * does.  rt_dev points into a caller-owned buffer that must outlive
+ * the ioctl call; pfinet copies it server-side as part of the RPC
+ * marshalling, so once ioctl() returns we are free to drop the
+ * buffer.
+ *
+ * reference: hurd.git/pfinet/iioctl-ops.c S_iioctl_siocaddrt; the
+ * struct rtentry definition is the standard <net/route.h> one,
+ * shared with Linux at the ABI level.
+ *
+ * one subtlety: the Hurd struct rtentry has rt_dev as a char * (same
+ * as Linux), and pfinet treats a NULL rt_dev as "pick the iface that
+ * owns the matching local network".  pid1's caller always passes an
+ * ifname, so this branch never fires here, but the comment is for
+ * the future skeptic pass that asks "why don't we let pfinet pick
+ * the device?" - because the supervisor decides bind order, not the
+ * kernel. */
 static int
 hurd_set_route_default(uint32_t gw_be, const char *ifname)
 {
-    (void)gw_be; (void)ifname;
-    errno = ENOSYS;
-    return -1;
+    if (!ifname) { errno = EINVAL; return -1; }
+    size_t nlen = strnlen(ifname, IFNAMSIZ);
+    if (nlen == 0 || nlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
+    int s = hurd_pfinet_open();
+    if (s < 0) return -1;
+    struct rtentry rt;
+    memset(&rt, 0, sizeof rt);
+    struct sockaddr_in *dst  = (struct sockaddr_in *)&rt.rt_dst;
+    struct sockaddr_in *gw   = (struct sockaddr_in *)&rt.rt_gateway;
+    struct sockaddr_in *mask = (struct sockaddr_in *)&rt.rt_genmask;
+    dst->sin_family  = AF_INET;
+    dst->sin_addr.s_addr = 0;
+    mask->sin_family = AF_INET;
+    mask->sin_addr.s_addr = 0;
+    gw->sin_family   = AF_INET;
+    gw->sin_addr.s_addr = gw_be;
+    rt.rt_flags  = RTF_UP | RTF_GATEWAY;
+    rt.rt_metric = 1;
+    /* rt_dev is char *; we hand the kernel a buffer that lives on our
+     * stack frame for the duration of the ioctl call.  zero the whole
+     * IFNAMSIZ tail first so the trailing bytes do not leak stack
+     * garbage to pfinet; pfinet reads up to the first NUL but defence
+     * in depth is cheap and matches the W1 fix on the linux side. */
+    char ifbuf[IFNAMSIZ];
+    memset(ifbuf, 0, sizeof ifbuf);
+    memcpy(ifbuf, ifname, nlen);
+    ifbuf[nlen] = '\0';
+    rt.rt_dev = ifbuf;
+    /* SIOCADDRT -> pfinet S_iioctl_siocaddrt.  EEXIST surfaces if a
+     * default route already exists; the supervisor decides whether to
+     * delete-then-add or surface, same as on Linux. */
+    if (ioctl(s, SIOCADDRT, &rt) < 0) {
+        int saved = errno; (void)close(s); errno = saved; return -1;
+    }
+    (void)close(s);
+    return 0;
 }
 
 /* host_reboot Mach RPC.  the linux backend's reboot(2) takes a
