@@ -36,6 +36,7 @@
 #include <net/route.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,10 +51,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "port_layer.h"
+
 #ifdef PID1_MODULE
 #include <crypt.h>
 #include <emacs-module.h>
-#include <stdint.h>
 /* required by the emacs module ABI; presence of this symbol is how
  * emacs verifies the .so is licensed compatibly. */
 int plugin_is_GPL_compatible;
@@ -84,26 +86,11 @@ console(const char *msg)
 }
 #endif
 
-/* low-level mount wrapper used by both compile modes. boot path layers
- * a defensive mkdir on top via do_mount(); the module path exposes
- * this directly to elisp and lets the caller decide. invariant: caller
- * is root; returns 0 on success, -1 with errno set on failure. */
-static int
-raw_mount(const char *src, const char *tgt, const char *type,
-          unsigned long flags, const char *opts)
-{
-    return mount(src, tgt, type, flags, opts);
-}
-
-/* sethostname wrapper. shared between two callers: the boot path
- * (set_hostname_at_boot, below) and the elisp module entry point
- * (Fpid1_set_hostname, gated on PID1_MODULE). invariant: returns 0
- * on success, -1 with errno set on failure. */
-static int
-raw_set_hostname(const char *name, size_t len)
-{
-    return sethostname(name, len);
-}
+/* the kernel-specific surfaces (mount, set_hostname, ifconfig, reboot,
+ * suspend) used to live here as raw_* helpers.  they now live behind
+ * port->X() in port_layer.h / port_linux.c, so the Hurd backend can
+ * substitute its own implementations on the side branch without
+ * touching this file.  see docs/v04-item11-hurd-spike.md step 1. */
 
 #ifndef PID1_MODULE
 /* read /etc/hostname (which guix's etc-service-type writes from the
@@ -173,7 +160,7 @@ set_hostname_at_boot(void)
         len = 6;
         console("pid1: /etc/hostname unreadable or empty, defaulting to lambda");
     }
-    if (raw_set_hostname(name, len) < 0) {
+    if (port->set_hostname(name, len) < 0) {
         char msg[384];
         (void)snprintf(msg, sizeof msg,
                        "pid1: sethostname(%s) failed: %s",
@@ -189,132 +176,9 @@ set_hostname_at_boot(void)
 }
 #endif
 
-/* brings up the loopback interface via ioctl; touches no other iface.
- * invariant: returns 0 on success, -1 with errno set on the first
- * failing syscall. fd is always closed on every exit path. */
-static int
-raw_bring_up_lo(void)
-{
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) return -1;
-    struct ifreq r;
-    memset(&r, 0, sizeof r);
-    /* IFNAMSIZ is 16 on linux; "lo" is 3 bytes incl. NUL.  memcpy +
-     * explicit terminator instead of strncpy: if a future change
-     * extends this to a longer name, strncpy can leave the field
-     * un-NUL-terminated when the source is exactly IFNAMSIZ long, and
-     * the audit caught it as a latent trap. */
-    memcpy(r.ifr_name, "lo", 3);
-    r.ifr_name[IFNAMSIZ - 1] = '\0';
-    if (ioctl(s, SIOCGIFFLAGS, &r) < 0) {
-        int saved = errno;
-        (void)close(s);
-        errno = saved;
-        return -1;
-    }
-    r.ifr_flags |= IFF_UP | IFF_RUNNING;
-    if (ioctl(s, SIOCSIFFLAGS, &r) < 0) {
-        int saved = errno;
-        (void)close(s);
-        errno = saved;
-        return -1;
-    }
-    (void)close(s);
-    return 0;
-}
-
-#ifdef PID1_MODULE
-/* assign IPv4 address + netmask to IFNAME and bring it up. ADDR_BE
- * is the address in network byte order; PREFIX is the CIDR length
- * 0..32 from which the netmask is computed (callers already know the
- * prefix; we avoid round-tripping the netmask through dotted-quad
- * parsing). on success returns 0 and the interface is up; on failure
- * returns -1 with errno set, fd always closed. invariant: SIOCSIFADDR
- * before SIOCSIFNETMASK before flags-up; the kernel rejects netmask
- * before address with EADDRNOTAVAIL on some 5.x trees. */
-static int
-raw_set_address(const char *ifname, uint32_t addr_be, int prefix)
-{
-    if (prefix < 0 || prefix > 32) { errno = EINVAL; return -1; }
-    size_t nlen = strnlen(ifname, IFNAMSIZ);
-    if (nlen == 0 || nlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) return -1;
-    struct ifreq r;
-    memset(&r, 0, sizeof r);
-    memcpy(r.ifr_name, ifname, nlen);
-    r.ifr_name[IFNAMSIZ - 1] = '\0';
-    struct sockaddr_in *sin = (struct sockaddr_in *)&r.ifr_addr;
-    sin->sin_family = AF_INET;
-    sin->sin_addr.s_addr = addr_be;
-    if (ioctl(s, SIOCSIFADDR, &r) < 0) {
-        int saved = errno; (void)close(s); errno = saved; return -1;
-    }
-    /* prefix == 0 special-cased: shift by 32 on a 32-bit value is
-     * undefined behavior in C, and -Wshift-count-overflow would
-     * notice on a constant. */
-    uint32_t mask_host = (prefix == 0)
-        ? 0u
-        : (uint32_t)(0xFFFFFFFFu << (32 - prefix));
-    sin->sin_addr.s_addr = htonl(mask_host);
-    if (ioctl(s, SIOCSIFNETMASK, &r) < 0) {
-        int saved = errno; (void)close(s); errno = saved; return -1;
-    }
-    /* read-modify-write: preserve whatever flags the kernel had set
-     * and only OR in UP|RUNNING. clobbering flags is how you
-     * accidentally drop NOARP or PROMISC. */
-    if (ioctl(s, SIOCGIFFLAGS, &r) < 0) {
-        int saved = errno; (void)close(s); errno = saved; return -1;
-    }
-    r.ifr_flags |= IFF_UP | IFF_RUNNING;
-    if (ioctl(s, SIOCSIFFLAGS, &r) < 0) {
-        int saved = errno; (void)close(s); errno = saved; return -1;
-    }
-    (void)close(s);
-    return 0;
-}
-
-/* install a default IPv4 route via GW_BE through IFNAME. SIOCADDRT
- * with rt_dst=0/0 is the kernel's idiom for "default gateway". if a
- * default route already exists this returns -1 with errno=EEXIST;
- * caller decides whether to delete-then-add or surface the error.
- * IFNAME may be NULL to let the kernel pick the egress interface
- * by gateway lookup, but we require it from the elisp side because
- * the *network* buffer always has one selected. */
-static int
-raw_set_route_default(uint32_t gw_be, const char *ifname)
-{
-    if (!ifname) { errno = EINVAL; return -1; }
-    size_t nlen = strnlen(ifname, IFNAMSIZ);
-    if (nlen == 0 || nlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) return -1;
-    struct rtentry rt;
-    memset(&rt, 0, sizeof rt);
-    struct sockaddr_in *dst  = (struct sockaddr_in *)&rt.rt_dst;
-    struct sockaddr_in *gw   = (struct sockaddr_in *)&rt.rt_gateway;
-    struct sockaddr_in *mask = (struct sockaddr_in *)&rt.rt_genmask;
-    dst->sin_family  = AF_INET;
-    dst->sin_addr.s_addr = 0;
-    mask->sin_family = AF_INET;
-    mask->sin_addr.s_addr = 0;
-    gw->sin_family   = AF_INET;
-    gw->sin_addr.s_addr = gw_be;
-    rt.rt_flags  = RTF_UP | RTF_GATEWAY;
-    rt.rt_metric = 1;
-    /* rt_dev is char *, not const char *, in the kernel ABI. cast is
-     * intentional and the buffer outlives the ioctl call. */
-    char ifbuf[IFNAMSIZ];
-    memcpy(ifbuf, ifname, nlen);
-    ifbuf[nlen] = '\0';
-    rt.rt_dev = ifbuf;
-    if (ioctl(s, SIOCADDRT, &rt) < 0) {
-        int saved = errno; (void)close(s); errno = saved; return -1;
-    }
-    (void)close(s);
-    return 0;
-}
-#endif /* PID1_MODULE */
+/* the loopback / address / route ioctl bodies used to live here.
+ * they now live in port_linux.c behind port->bring_up_lo,
+ * port->set_address, port->set_route_default. */
 
 /* ---- boot-only code -------------------------------------------- */
 
@@ -336,7 +200,7 @@ do_mount(const char *src, const char *tgt, const char *type,
         /* keep going, mount may still succeed if the dir was created
          * by something we did not see */
     }
-    if (raw_mount(src, tgt, type, flags, opts) < 0) {
+    if (port->mount(src, tgt, type, flags, opts) < 0) {
         char buf[256];
         if (errno == EBUSY) {
             /* the modern guix initrd already mounts /sys, /dev (and
@@ -577,8 +441,8 @@ mount_var(void)
      * do not need to stat the target. */
     const char *label_path = "/dev/disk/by-label/geos-var";
     if (access(label_path, F_OK) == 0) {
-        if (raw_mount(label_path, "/var", "ext4",
-                      MS_NOSUID, NULL) == 0) {
+        if (port->mount(label_path, "/var", "ext4",
+                        MS_NOSUID, NULL) == 0) {
             console("pid1: /var on ext4 (geos-var label)");
             return;
         }
@@ -593,8 +457,8 @@ mount_var(void)
     }
     /* fallback. tmpfs is always available; the only way this fails is
      * an OOM kernel, in which case we have bigger problems. */
-    if (raw_mount("tmpfs", "/var", "tmpfs", MS_NOSUID,
-                  "mode=0755") == 0) {
+    if (port->mount("tmpfs", "/var", "tmpfs", MS_NOSUID,
+                    "mode=0755") == 0) {
         console("pid1: /var on tmpfs (no geos-var label)");
         return;
     }
@@ -1270,6 +1134,12 @@ dump_xorg_log(void)
 int
 main(int argc, char **argv)
 {
+    /* pick the kernel backend before any port-> call.  the linux
+     * impl is also port_layer.c's default initialiser; the explicit
+     * assignment is documentation, and gives us a single grep target
+     * the day a kernel switch becomes runtime-selectable. */
+    port = &port_linux_impl;
+
     /* argv layout from the guix boot gexp:
      *   argv[1] = absolute store path of the emacs binary
      *   argv[2] = absolute store path of pid1-module.so, or "" if no
@@ -1361,7 +1231,7 @@ main(int argc, char **argv)
     link_current_system();
 
     /* loopback first so emacs's network code does not stall on probe */
-    if (raw_bring_up_lo() < 0) {
+    if (port->bring_up_lo() < 0) {
         char buf[128];
         snprintf(buf, sizeof buf,
                  "pid1: bring up lo failed: %s", strerror(errno));
@@ -1764,8 +1634,8 @@ Fpid1_mount(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
             return Qnil;
     }
 
-    int rc = raw_mount(src, tgt, type, (unsigned long)flags_im,
-                       have_opts ? opts : NULL);
+    int rc = port->mount(src, tgt, type, (unsigned long)flags_im,
+                         have_opts ? opts : NULL);
     int err = errno;
 
     if (rc < 0)
@@ -1791,7 +1661,7 @@ Fpid1_set_hostname(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     char name[256];
     if (extract_cstring_into(env, args[0], name, sizeof name) < 0)
         return Qnil;
-    int rc = raw_set_hostname(name, strlen(name));
+    int rc = port->set_hostname(name, strlen(name));
     int err = errno;
     if (rc < 0)
         return pid1_signal_errno(env, "pid1: sethostname", err);
@@ -1806,7 +1676,7 @@ Fpid1_bring_up_lo(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
                   void *data)
 {
     (void)nargs; (void)args; (void)data;
-    if (raw_bring_up_lo() < 0)
+    if (port->bring_up_lo() < 0)
         return pid1_signal_errno(env, "pid1: bring up lo", errno);
     return env->intern(env, "t");
 }
@@ -1841,7 +1711,7 @@ Fpid1_set_address(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     if (inet_pton(AF_INET, addr, &ia) != 1)
         return pid1_signal_errno(env, "pid1: pid1-set-address: bad address",
                                  EINVAL);
-    if (raw_set_address(ifname, ia.s_addr, (int)prefix) < 0)
+    if (port->set_address(ifname, ia.s_addr, (int)prefix) < 0)
         return pid1_signal_errno(env, "pid1: set-address", errno);
     return env->intern(env, "t");
 }
@@ -1872,7 +1742,7 @@ Fpid1_set_route_default(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
         return pid1_signal_errno(env,
                                  "pid1: pid1-set-route-default: bad gateway",
                                  EINVAL);
-    if (raw_set_route_default(ia.s_addr, ifname) < 0)
+    if (port->set_route_default(ia.s_addr, ifname) < 0)
         return pid1_signal_errno(env, "pid1: set-route-default", errno);
     return env->intern(env, "t");
 }
@@ -2300,63 +2170,10 @@ Fpid1_rpc_reply(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
-/* sync + reboot(2) wrapper shared by both directions. CMD is one of
- * RB_POWER_OFF or RB_AUTOBOOT. on success the kernel kills every
- * process including the caller, so a successful return is
- * unreachable; we set errno and return -1 only when reboot itself
- * fails (typically EPERM if CAP_SYS_BOOT was dropped). sync() flushes
- * dirty pages first; cheap, and cheap insurance against losing
- * /var writes on the image path. */
-static int
-raw_reboot(int cmd)
-{
-    sync();
-    return reboot(cmd);
-}
-
-/* (pid1-suspend STATE) -> t on resume, signals pid1-error on failure.
- * STATE is one of "mem" (S3 suspend-to-RAM), "freeze" (S0 idle),
- * "standby" (S1), or "disk" (S4 hibernate). writes the literal
- * string + newline to /sys/power/state, which is the kernel's
- * uniform suspend interface. write(2) returns when the kernel has
- * finished resuming, so a t return means we are awake again on the
- * other side. EPERM here means the kernel was built without
- * CONFIG_SUSPEND or the requested state is not in
- * /sys/power/state's valid list (read /sys/power/state to see what
- * the running kernel actually supports). EBUSY means another
- * suspend is already in flight. sync() up front so any pending
- * /var/emacs writes hit ext4 before the platform stops the CPU;
- * suspend-to-RAM should be safe but suspend-to-disk on a flaky
- * battery is exactly the case where you find out you forgot. */
-static int
-raw_suspend(const char *state)
-{
-    sync();
-    int fd = open("/sys/power/state", O_WRONLY | O_CLOEXEC);
-    if (fd < 0)
-        return -1;
-    size_t len = strlen(state);
-    /* write the state string then a newline. the kernel parses up to
-     * the first newline or EOF and ignores trailing bytes, but the
-     * conventional userspace contract (see Documentation/admin-guide/
-     * pm/sleep-states.rst) is to write the bare token plus \n. */
-    ssize_t w = write(fd, state, len);
-    int err = errno;
-    if (w >= 0) {
-        ssize_t w2 = write(fd, "\n", 1);
-        if (w2 < 0) err = errno;
-        else if ((size_t)w != len) err = EIO;
-        else w = w2;
-    }
-    int c = close(fd);
-    if (w < 0) {
-        errno = err;
-        return -1;
-    }
-    if (c < 0)
-        return -1;
-    return 0;
-}
+/* the reboot and suspend bodies used to live here as raw_reboot /
+ * raw_suspend.  they now live in port_linux.c behind port->reboot
+ * and port->suspend.  the elisp-facing wrappers below are unchanged
+ * except for the call through the port struct. */
 
 static emacs_value
 Fpid1_suspend(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
@@ -2383,7 +2200,7 @@ Fpid1_suspend(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     if (!ok)
         return pid1_signal_errno(env, "pid1: suspend: unknown state",
                                  EINVAL);
-    if (raw_suspend(state) < 0)
+    if (port->suspend(state) < 0)
         return pid1_signal_errno(env, "pid1: suspend", errno);
     return env->intern(env, "t");
 }
@@ -2398,7 +2215,7 @@ Fpid1_poweroff(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
 {
     (void)nargs; (void)args; (void)data;
     emacs_value Qnil = env->intern(env, "nil");
-    if (raw_reboot(RB_POWER_OFF) < 0)
+    if (port->reboot(RB_POWER_OFF) < 0)
         return pid1_signal_errno(env, "pid1: poweroff", errno);
     return Qnil;
 }
@@ -2413,7 +2230,7 @@ Fpid1_reboot(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
 {
     (void)nargs; (void)args; (void)data;
     emacs_value Qnil = env->intern(env, "nil");
-    if (raw_reboot(RB_AUTOBOOT) < 0)
+    if (port->reboot(RB_AUTOBOOT) < 0)
         return pid1_signal_errno(env, "pid1: reboot", errno);
     return Qnil;
 }
@@ -3009,6 +2826,13 @@ pid1_defalias(emacs_env *env, const char *name, emacs_value func)
 int
 emacs_module_init(struct emacs_runtime *ert)
 {
+    /* pick the kernel backend before any port-> call.  the linux
+     * impl is also port_layer.c's default initialiser; the explicit
+     * assignment here mirrors main()'s for the standalone PID 1 and
+     * gives us a single grep target if a kernel switch ever needs
+     * to become runtime-selectable. */
+    port = &port_linux_impl;
+
     /* version sanity: the runtime struct can grow over emacs releases.
      * if it shrinks below what we compiled against, refuse to load. */
     if ((size_t)ert->size < sizeof (struct emacs_runtime)) {

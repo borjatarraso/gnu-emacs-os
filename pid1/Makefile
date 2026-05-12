@@ -103,6 +103,12 @@ ifneq ($(LIBXCRYPT_STOREPATH),)
 MODULE_LDFLAGS += -Wl,-rpath,$(LIBXCRYPT_STOREPATH)/lib
 endif
 
+# shared sources.  port_layer.h is the kernel-portability seam; the
+# Linux bodies live in port_linux.c.  the Hurd port (side branch)
+# adds port_hurd.c with the same shape and an alternate build line.
+COMMON_SRCS := emacs-init.c port_linux.c
+COMMON_HDRS := port_layer.h
+
 .PHONY: all default module clean install
 
 default: emacs-init
@@ -111,13 +117,15 @@ all: emacs-init pid1-module.so
 
 module: pid1-module.so
 
-emacs-init: emacs-init.c
-	$(CC) $(CFLAGS) $(STATIC_FLAG) -o $@ $< $(LDFLAGS)
+emacs-init: $(COMMON_SRCS) $(COMMON_HDRS)
+	$(CC) $(CFLAGS) $(STATIC_FLAG) -o $@ $(COMMON_SRCS) $(LDFLAGS)
 
 # the module is loaded into a running emacs; do not pass -static, do
-# not link any helper objects, just one translation unit -> .so.
-pid1-module.so: emacs-init.c
-	$(CC) $(MODULE_CFLAGS) $(MODULE_LDFLAGS) -o $@ $< $(MODULE_LIBS)
+# pass -fPIC (already in MODULE_CFLAGS).  feed both TUs in one go so
+# the resulting .so carries both port_linux_impl and the Fpid1_*
+# bindings.
+pid1-module.so: $(COMMON_SRCS) $(COMMON_HDRS)
+	$(CC) $(MODULE_CFLAGS) $(MODULE_LDFLAGS) -o $@ $(COMMON_SRCS) $(MODULE_LIBS)
 
 install: emacs-init
 	install -d $(DESTDIR)$(SBINDIR)
