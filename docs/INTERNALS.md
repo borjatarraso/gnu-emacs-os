@@ -198,20 +198,20 @@ emacs-init/core/network.el        bring up lo, /proc/net/* parsers
 emacs-init/core/hostname.el       read /etc/hostname, sethostname(2)
 emacs-init/core/supervise.el      defservice macro, registry, restart policy
 emacs-init/buffers/network.el     *network* buffer + 2s refresh timer
-emacs-init/wm/multimon.el         xrandr-driven workspace placement
-emacs-init/wm/fonts.el            default face + emoji + CJK fontset
-emacs-init/wm/input.el            quail input methods
-emacs-init/wm/exwm-config.el      (exwm-enable), s-&, s-r, s-0..3
-emacs-init/userland/files.el      dired
-emacs-init/userland/shell.el      eshell
-emacs-init/userland/uname.el      eshell/uname rebrand to GEOS
-emacs-init/userland/git.el        magit
-emacs-init/userland/web.el        eww
-emacs-init/userland/mail.el       notmuch
-emacs-init/userland/chat.el       erc
-emacs-init/userland/notes.el      org
-emacs-init/userland/pdf.el        pdf-tools
-emacs-init/userland/init.el       verify all userland-* features loaded
+emacs-init/user/multimon.el       xrandr-driven workspace placement
+emacs-init/user/fonts.el          default face + emoji + CJK fontset
+emacs-init/user/input.el          quail input methods
+emacs-init/user/exwm-config.el    (exwm-enable), s-&, s-r, s-0..3
+emacs-init/user/userland/files.el dired
+emacs-init/user/userland/shell.el eshell
+emacs-init/user/userland/uname.el eshell/uname rebrand to GEOS
+emacs-init/user/userland/git.el   magit
+emacs-init/user/userland/web.el   eww
+emacs-init/user/userland/mail.el  notmuch
+emacs-init/user/userland/chat.el  erc
+emacs-init/user/userland/notes.el org
+emacs-init/user/userland/pdf.el   pdf-tools
+emacs-init/user/userland/init.el  verify all userland-* features loaded
 emacs-init/buffers/processes.el   *processes* buffer
 emacs-init/buffers/journal.el     *journal* (dd-on-/dev/kmsg)
 emacs-init/buffers/services.el    *services* (live supervise.el registry)

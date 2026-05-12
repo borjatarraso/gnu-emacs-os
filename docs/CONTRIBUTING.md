@@ -205,8 +205,8 @@ Different parts of the tree have different review expectations.
 ```
 pid1/                     skeptic mandatory before merge.
 emacs-init/core/          skeptic mandatory before merge.
-emacs-init/wm/            EXWM regressions are user-visible; smoke
-                          and freeze tests both required.
+emacs-init/user/          EXWM and userland; regressions are
+                          user-visible. smoke + freeze required.
 emacs-init/buffers/       new buffers go through /buffer-it.
 guix-system/              channel pin must agree across the two
                           channels.scm files.

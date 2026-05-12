@@ -3,10 +3,11 @@
 
 ;; runs in the per-user emacs, NOT the supervisor.  this is the v0.6
 ;; foothold for user-side userland: the per-user emacs gets exactly
-;; one defun and one keybinding for now, geos-logout.  future v0.6+
-;; work moves dired/eshell/notes/etc out of emacs-init/userland/
-;; (where they currently load into the supervisor) into this file
-;; tree instead.
+;; one defun and one keybinding for now, geos-logout.  the rest of
+;; the user-side tree (exwm-config.el, multimon/fonts/input.el, and
+;; userland/*.el) is now colocated under emacs-init/user/ but still
+;; loaded by the supervisor via -l.  v0.6 item 1.2 wires this file as
+;; the chain loader so the boundary actually moves.
 ;;
 ;; loaded by session--child-argv via `-l /etc/geos/user-init.el',
 ;; the path extra-special-file'd in system.scm to point at this

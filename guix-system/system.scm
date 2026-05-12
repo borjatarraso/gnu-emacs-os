@@ -196,7 +196,7 @@
     ;; can panic-handle uncaught wm errors. must come after panic.el in
     ;; the -l chain. only takes effect when emacs has DISPLAY set; on a
     ;; raw QEMU smoke test (no Xorg) the file degrades to a no-op.
-    (local-file "../emacs-init/wm/exwm-config.el" "exwm-config.el"))
+    (local-file "../emacs-init/user/exwm-config.el" "exwm-config.el"))
 
 ;; phase 5c additions. these three are (require)d from exwm-config.el
 ;; AFTER (exwm-enable) returns, so they need to be on load-path before
@@ -206,11 +206,11 @@
 ;; the no-DISPLAY degradation path: each module's -apply guards on
 ;; display-graphic-p / DISPLAY before doing any work.
 (define multimon-el
-    (local-file "../emacs-init/wm/multimon.el" "multimon.el"))
+    (local-file "../emacs-init/user/multimon.el" "multimon.el"))
 (define fonts-el
-    (local-file "../emacs-init/wm/fonts.el" "fonts.el"))
+    (local-file "../emacs-init/user/fonts.el" "fonts.el"))
 (define input-el
-    (local-file "../emacs-init/wm/input.el" "input.el"))
+    (local-file "../emacs-init/user/input.el" "input.el"))
 
 ;; phase 5b userland files. each one wires up one user-facing package
 ;; via use-package. they are loaded by userland-init-el below, AFTER
@@ -218,36 +218,36 @@
 ;; packages spawn buffers. order inside the chain is cosmetic; nothing
 ;; here depends on anything else here.
 (define userland-files-el
-    (local-file "../emacs-init/userland/files.el" "userland-files.el"))
+    (local-file "../emacs-init/user/userland/files.el" "userland-files.el"))
 (define userland-shell-el
-    (local-file "../emacs-init/userland/shell.el" "userland-shell.el"))
+    (local-file "../emacs-init/user/userland/shell.el" "userland-shell.el"))
 (define userland-uname-el
     ;; eshell/uname override: rebrand sysname to GEOS, keep the real
     ;; kernel visible in parens. depends on eshell being loaded so
     ;; eshell/<name> dispatch is actually consulted; load AFTER
     ;; userland-shell.el.
-    (local-file "../emacs-init/userland/uname.el" "userland-uname.el"))
+    (local-file "../emacs-init/user/userland/uname.el" "userland-uname.el"))
 (define userland-git-el
-    (local-file "../emacs-init/userland/git.el" "userland-git.el"))
+    (local-file "../emacs-init/user/userland/git.el" "userland-git.el"))
 (define userland-web-el
-    (local-file "../emacs-init/userland/web.el" "userland-web.el"))
+    (local-file "../emacs-init/user/userland/web.el" "userland-web.el"))
 (define userland-mail-el
-    (local-file "../emacs-init/userland/mail.el" "userland-mail.el"))
+    (local-file "../emacs-init/user/userland/mail.el" "userland-mail.el"))
 (define userland-chat-el
-    (local-file "../emacs-init/userland/chat.el" "userland-chat.el"))
+    (local-file "../emacs-init/user/userland/chat.el" "userland-chat.el"))
 (define userland-notes-el
-    (local-file "../emacs-init/userland/notes.el" "userland-notes.el"))
+    (local-file "../emacs-init/user/userland/notes.el" "userland-notes.el"))
 (define userland-pdf-el
-    (local-file "../emacs-init/userland/pdf.el" "userland-pdf.el"))
+    (local-file "../emacs-init/user/userland/pdf.el" "userland-pdf.el"))
 (define userland-audio-el
     ;; v0.4 item 8 userland.  ALSA wrappers via amixer/aplay through
     ;; make-process.  must load before userland-init.el verifies the
     ;; manifest.
-    (local-file "../emacs-init/userland/audio.el" "userland-audio.el"))
+    (local-file "../emacs-init/user/userland/audio.el" "userland-audio.el"))
 (define userland-init-el
     ;; thin entry point that requires each of the above. loaded LAST so
     ;; exwm has already claimed the root frame.
-    (local-file "../emacs-init/userland/init.el" "userland-init.el"))
+    (local-file "../emacs-init/user/userland/init.el" "userland-init.el"))
 
 ;; phase 6 system-concept buffers. each one shows a piece of the
 ;; running OS (processes, kernel log, supervised services, block
@@ -890,7 +890,7 @@
     ;; no extra package.
     ;; phase 5c adds:
     ;;   font-google-noto             monospace + Latin coverage. the
-    ;;                                emacs-init/wm/fonts.el default family
+    ;;                                emacs-init/user/fonts.el default family
     ;;                                falls back to DejaVu, which Guix
     ;;                                ships via the noto closure's deps,
     ;;                                so this package gives us both at
