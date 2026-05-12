@@ -45,6 +45,7 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -1989,6 +1990,316 @@ Fpid1_chown(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
+/* ---- v0.6 item 3: supervisor RPC channel ------------------------ */
+/*
+ * the user-emacs has no `pid1-*' access by design; privileged operations
+ * (reboot, package install, passwd-set, etc.) are reachable only via
+ * this socket.  authentication is SO_PEERCRED (the kernel records the
+ * uid/gid/pid of the connecting process at connect time and the
+ * supervisor reads them off the accepted fd); authorisation lives in
+ * elisp (rpc-server.el's verb dispatcher).
+ *
+ * wire format:
+ *   request:  4-byte big-endian length, then LENGTH bytes of sexp text.
+ *   reply:    same shape, supervisor -> client.
+ *   cap:      RPC_PAYLOAD_MAX bytes (64 KiB).
+ *
+ * connection lifecycle:
+ *   client connect(), send(len+payload), shutdown(SHUT_WR), read reply.
+ *   server accept4(non-blocking), set blocking with SO_RCVTIMEO/
+ *   SO_SNDTIMEO so a stalled client cannot wedge the supervisor for
+ *   more than RPC_TIMEOUT_SEC seconds.
+ *
+ * single-listener: a supervisor has at most one rpc listen socket; the
+ * static fd below holds it.  the listen fd is created by
+ * pid1-rpc-listen and never closed (the supervisor lives until reboot).
+ */
+
+#define RPC_PAYLOAD_MAX (64 * 1024)
+#define RPC_TIMEOUT_SEC 2
+
+static int rpc_listen_fd = -1;
+
+/* read exactly N bytes from FD into BUF, with the timeout already
+ * configured via SO_RCVTIMEO.  returns 0 on success, -1 on any short
+ * read or error; errno is set per read(2).  EOF mid-buffer reports
+ * EPIPE. */
+static int
+rpc_read_full(int fd, void *buf, size_t n)
+{
+    uint8_t *p = buf;
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(fd, p + got, n - got);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) {
+            errno = EPIPE;
+            return -1;
+        }
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+/* write exactly N bytes from BUF to FD.  same shape as rpc_read_full. */
+static int
+rpc_write_full(int fd, const void *buf, size_t n)
+{
+    const uint8_t *p = buf;
+    size_t sent = 0;
+    while (sent < n) {
+        ssize_t w = write(fd, p + sent, n - sent);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        sent += (size_t)w;
+    }
+    return 0;
+}
+
+/* (pid1-rpc-listen PATH MODE) -> t or signal pid1-error.
+ * creates an AF_UNIX SOCK_STREAM socket bound to PATH, listens with
+ * backlog 8.  if PATH already exists it is unlink()ed first: the
+ * supervisor is the canonical owner of the socket and a leftover from
+ * a previous boot or a stale socket file would prevent bind.  this is
+ * safe under the v0.6 deployment because /run is tmpfs (wiped each
+ * boot) and the only writer to /run/geos/ is the supervisor itself.
+ *
+ * MODE is the file mode applied via chmod after bind.  bind respects
+ * umask, which can clear group/other bits and break client connect
+ * for non-root users; chmod-after-bind makes the mode explicit.  pass
+ * #o666 if non-root clients need to connect (SO_PEERCRED is the real
+ * authentication gate, the DAC mode is mostly cosmetic).
+ *
+ * the listen fd is stored in the module-static `rpc_listen_fd' and
+ * lives until supervisor exit.  re-binding while already listening
+ * returns EBUSY rather than silently replacing the fd, because a
+ * second listen would race with whatever connections are still in
+ * the kernel's accept queue. */
+static emacs_value
+Fpid1_rpc_listen(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                 void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 2)
+        return pid1_signal_errno(env, "pid1: pid1-rpc-listen needs 2 args",
+                                 EINVAL);
+    char path[EXTRACT_BUF_MAX];
+    if (extract_cstring_into(env, args[0], path, sizeof path) < 0)
+        return Qnil;
+    intmax_t mode_im = env->extract_integer(env, args[1]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (mode_im < 0 || mode_im > 0777)
+        return pid1_signal_errno(env, "pid1: rpc-listen: bad mode",
+                                 EINVAL);
+    if (rpc_listen_fd >= 0)
+        return pid1_signal_errno(env, "pid1: rpc-listen: already listening",
+                                 EBUSY);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    if (strlen(path) >= sizeof addr.sun_path)
+        return pid1_signal_errno(env, "pid1: rpc-listen: path too long",
+                                 ENAMETOOLONG);
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, path, strlen(path));
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return pid1_signal_errno(env, "pid1: rpc-listen: socket", errno);
+    if (unlink(path) < 0 && errno != ENOENT) {
+        int err = errno;
+        close(fd);
+        return pid1_signal_errno(env, "pid1: rpc-listen: unlink", err);
+    }
+    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+        int err = errno;
+        close(fd);
+        return pid1_signal_errno(env, "pid1: rpc-listen: bind", err);
+    }
+    if (chmod(path, (mode_t)mode_im) < 0) {
+        int err = errno;
+        close(fd);
+        unlink(path);
+        return pid1_signal_errno(env, "pid1: rpc-listen: chmod", err);
+    }
+    if (listen(fd, 8) < 0) {
+        int err = errno;
+        close(fd);
+        unlink(path);
+        return pid1_signal_errno(env, "pid1: rpc-listen: listen", err);
+    }
+    rpc_listen_fd = fd;
+    return env->intern(env, "t");
+}
+
+/* (pid1-rpc-poll) -> nil or (:fd FD :uid UID :gid GID :payload STRING).
+ * non-blocking accept on the listen socket; if no pending connection,
+ * returns nil and the caller (the 200ms timer in rpc-server.el) tries
+ * again next tick.  on a successful accept, switches the new fd to
+ * blocking with SO_RCVTIMEO/SO_SNDTIMEO equal to RPC_TIMEOUT_SEC so a
+ * slow client cannot wedge the supervisor; reads the 4-byte big-
+ * endian length prefix; reads LENGTH payload bytes; reads peer
+ * credentials via SO_PEERCRED.
+ *
+ * the returned :fd is owned by the caller: it MUST call pid1-rpc-reply
+ * (or, on error, pid1-rpc-close-fd, which v0.6 omits in favor of always
+ * replying with `(:status error ...)`) to close it.  leaked fds
+ * accumulate against the supervisor's RLIMIT_NOFILE; a hardening pass
+ * in v0.7 grows a generation counter or a finalizer.
+ *
+ * pid is deliberately not returned: a pid would let elisp dispatch on
+ * "which process" which is racy under pid reuse.  uid/gid are stable
+ * for the lifetime of the connection. */
+static emacs_value
+Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
+{
+    (void)nargs; (void)args; (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (rpc_listen_fd < 0)
+        return pid1_signal_errno(env, "pid1: rpc-poll: not listening", EBADF);
+    int conn = accept4(rpc_listen_fd, NULL, NULL, SOCK_CLOEXEC);
+    if (conn < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return Qnil;
+        return pid1_signal_errno(env, "pid1: rpc-poll: accept", errno);
+    }
+    /* blocking + timeout: bound the wedge time a slow client can cause. */
+    struct timeval tv;
+    tv.tv_sec = RPC_TIMEOUT_SEC;
+    tv.tv_usec = 0;
+    if (setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0 ||
+        setsockopt(conn, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) < 0) {
+        int err = errno;
+        close(conn);
+        return pid1_signal_errno(env, "pid1: rpc-poll: timeout setup", err);
+    }
+    /* peer credentials.  SO_PEERCRED is linux-specific; returns the
+     * ucred snapshot taken at connect().  uid/gid are what the kernel
+     * had for the peer at that instant, so a setuid race window does
+     * not exist (the peer cannot have been a different uid when it
+     * connect()ed than when accept() saw it). */
+    struct ucred peer;
+    socklen_t plen = sizeof peer;
+    if (getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &peer, &plen) < 0) {
+        int err = errno;
+        close(conn);
+        return pid1_signal_errno(env, "pid1: rpc-poll: SO_PEERCRED", err);
+    }
+    uint8_t lbuf[4];
+    if (rpc_read_full(conn, lbuf, 4) < 0) {
+        int err = errno;
+        close(conn);
+        return pid1_signal_errno(env, "pid1: rpc-poll: read length", err);
+    }
+    uint32_t plen32 =
+        ((uint32_t)lbuf[0] << 24) | ((uint32_t)lbuf[1] << 16) |
+        ((uint32_t)lbuf[2] <<  8) | ((uint32_t)lbuf[3]);
+    if (plen32 == 0 || plen32 > RPC_PAYLOAD_MAX) {
+        close(conn);
+        return pid1_signal_errno(env, "pid1: rpc-poll: bad length", EMSGSIZE);
+    }
+    /* read on stack up to 64 KiB.  larger main loop frame than the
+     * other Fpid1_* but pid1 has 8 MiB default stack and is not
+     * recursive in this path. */
+    char payload[RPC_PAYLOAD_MAX];
+    if (rpc_read_full(conn, payload, plen32) < 0) {
+        int err = errno;
+        close(conn);
+        return pid1_signal_errno(env, "pid1: rpc-poll: read payload", err);
+    }
+    /* build the plist (:fd FD :uid U :gid G :payload "BYTES"). */
+    emacs_value Qcons = env->intern(env, "cons");
+    emacs_value kw_fd      = env->intern(env, ":fd");
+    emacs_value kw_uid     = env->intern(env, ":uid");
+    emacs_value kw_gid     = env->intern(env, ":gid");
+    emacs_value kw_payload = env->intern(env, ":payload");
+    emacs_value v_fd  = env->make_integer(env, conn);
+    emacs_value v_uid = env->make_integer(env, peer.uid);
+    emacs_value v_gid = env->make_integer(env, peer.gid);
+    emacs_value v_pl  = env->make_string(env, payload, (ptrdiff_t)plen32);
+    /* (list :fd FD :uid U :gid G :payload P) via cons chain. */
+    emacs_value list_args[8] = {
+        kw_fd, v_fd, kw_uid, v_uid, kw_gid, v_gid, kw_payload, v_pl
+    };
+    emacs_value plist = env->funcall(env, env->intern(env, "list"),
+                                     8, list_args);
+    (void)Qcons;
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+        close(conn);
+        return Qnil;
+    }
+    return plist;
+}
+
+/* (pid1-rpc-reply FD PAYLOAD) -> t or signal pid1-error.
+ * writes the 4-byte length prefix + PAYLOAD bytes back to FD, then
+ * closes FD.  PAYLOAD is the reply sexp serialised by elisp (the C
+ * side does not parse it).  FD must be a value previously returned
+ * by pid1-rpc-poll's :fd slot; using anything else is undefined and
+ * may close an unrelated fd (the supervisor's own).  the elisp
+ * caller is expected to keep the integer opaque. */
+static emacs_value
+Fpid1_rpc_reply(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 2)
+        return pid1_signal_errno(env, "pid1: pid1-rpc-reply needs 2 args",
+                                 EINVAL);
+    intmax_t fd_im = env->extract_integer(env, args[0]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (fd_im < 0 || fd_im > 0x7fffffff)
+        return pid1_signal_errno(env, "pid1: rpc-reply: bad fd", EBADF);
+    int fd = (int)fd_im;
+    ptrdiff_t need = 0;
+    if (!env->copy_string_contents(env, args[1], NULL, &need))
+        return Qnil;
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (need < 1) {
+        close(fd);
+        return pid1_signal_errno(env, "pid1: rpc-reply: empty payload",
+                                 EINVAL);
+    }
+    /* copy_string_contents returns N+1 (includes trailing NUL).  the
+     * wire payload is the bytes WITHOUT the NUL; subtract one. */
+    size_t plen = (size_t)(need - 1);
+    if (plen > RPC_PAYLOAD_MAX) {
+        close(fd);
+        return pid1_signal_errno(env, "pid1: rpc-reply: payload too big",
+                                 EMSGSIZE);
+    }
+    char payload[RPC_PAYLOAD_MAX + 1];
+    if (!env->copy_string_contents(env, args[1], payload, &need)) {
+        close(fd);
+        return Qnil;
+    }
+    uint8_t lbuf[4];
+    lbuf[0] = (uint8_t)(plen >> 24);
+    lbuf[1] = (uint8_t)(plen >> 16);
+    lbuf[2] = (uint8_t)(plen >> 8);
+    lbuf[3] = (uint8_t)(plen);
+    if (rpc_write_full(fd, lbuf, 4) < 0) {
+        int err = errno;
+        close(fd);
+        return pid1_signal_errno(env, "pid1: rpc-reply: write length", err);
+    }
+    if (rpc_write_full(fd, payload, plen) < 0) {
+        int err = errno;
+        close(fd);
+        return pid1_signal_errno(env, "pid1: rpc-reply: write payload", err);
+    }
+    close(fd);
+    return env->intern(env, "t");
+}
+
 /* sync + reboot(2) wrapper shared by both directions. CMD is one of
  * RB_POWER_OFF or RB_AUTOBOOT. on success the kernel kills every
  * process including the caller, so a successful return is
@@ -2772,6 +3083,24 @@ emacs_module_init(struct emacs_runtime *ert)
         "pid1-spawn-as-uid: spawn child as uid/gid per v0.5 ABI",
         NULL);
     pid1_defalias(env, "pid1-spawn-as-uid", spw);
+
+    emacs_value rlsn = env->make_function(env, 2, 2, Fpid1_rpc_listen,
+        "Bind an AF_UNIX SOCK_STREAM socket at PATH with file MODE. "
+        "Return t.  Singleton; second call returns EBUSY.",
+        NULL);
+    pid1_defalias(env, "pid1-rpc-listen", rlsn);
+
+    emacs_value rpol = env->make_function(env, 0, 0, Fpid1_rpc_poll,
+        "Non-blocking accept on the rpc socket.  Return nil or a "
+        "plist (:fd FD :uid UID :gid GID :payload STRING).",
+        NULL);
+    pid1_defalias(env, "pid1-rpc-poll", rpol);
+
+    emacs_value rrep = env->make_function(env, 2, 2, Fpid1_rpc_reply,
+        "Write PAYLOAD back on FD and close.  FD must come from "
+        "pid1-rpc-poll's :fd slot.  Return t.",
+        NULL);
+    pid1_defalias(env, "pid1-rpc-reply", rrep);
 
     /* provide the feature so (require 'pid1-module) works after
      * (module-load ...) without a separate elisp wrapper. */

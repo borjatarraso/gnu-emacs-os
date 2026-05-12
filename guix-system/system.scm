@@ -175,6 +175,29 @@
     ;; supervisor is root and the bindings here are user-scope.
     (local-file "../emacs-init/user/user-init.el" "user-init.el"))
 
+(define rpc-server-el
+    ;; v0.6 item 3: supervisor side of the user/supervisor RPC.
+    ;; binds /run/geos/super.sock, polls every 200ms, dispatches
+    ;; verbs (ping, journal-tail, reboot, poweroff).  bottom-of-load
+    ;; auto-start gated on pid1-as-emacs-p, so loading this file in
+    ;; the supervisor boot path is enough to bring the socket up.
+    ;; supervisor-side ONLY: do NOT lay this on /etc/geos/core/ for
+    ;; the per-user emacs, the verb handlers call pid1-* which the
+    ;; user-emacs lacks.  must load after session-el so any future
+    ;; verb that touches the session table sees a finalised registry.
+    (local-file "../emacs-init/core/rpc-server.el" "rpc-server.el"))
+
+(define rpc-client-el
+    ;; v0.6 item 3: user side of the user/supervisor RPC.  one-shot
+    ;; client over AF_UNIX SOCK_STREAM, blocks for the reply.  defines
+    ;; geos-rpc (the dispatcher) plus geos-rpc-ping / geos-rpc-journal-
+    ;; tail / geos-rpc-reboot / geos-rpc-poweroff convenience commands
+    ;; and binds C-c e R / C-c e P at the user-emacs level.  laid down
+    ;; under /etc/geos/core/ so user-init--chain can `load' it by
+    ;; absolute path.  requires 'panic, so user-init--chain orders it
+    ;; AFTER panic.el.
+    (local-file "../emacs-init/core/rpc-client.el" "rpc-client.el"))
+
 (define boot-marker-el
     ;; smoke-test gate.  writes "geos: emacs userland up" to
     ;; /dev/console at load time and arms an exwm-init-hook that
@@ -613,6 +636,15 @@
                                "-l" #$hostname-el
                                "-l" #$passwd-el
                                "-l" #$session-el
+                               ;; v0.6 item 3: supervisor RPC server.
+                               ;; loads after session-el so future verbs
+                               ;; that read the session table see a
+                               ;; finalised registry.  bottom-of-load
+                               ;; auto-start in rpc-server.el binds
+                               ;; /run/geos/super.sock and arms the
+                               ;; 200ms poll timer; no separate call is
+                               ;; needed from boot-marker.el.
+                               "-l" #$rpc-server-el
                                "-l" #$network-buffer-el
                                ;; phase 5c modules -l'd BEFORE
                                ;; exwm-config so the (require 'multimon)
@@ -978,6 +1010,12 @@
             (extra-special-file "/etc/geos/core/panic.el" panic-el)
             (extra-special-file "/etc/geos/core/use-package-shim.el"
                                 use-package-shim-el)
+            ;; v0.6 item 3: rpc-client.el laid down for the per-user
+            ;; emacs to load via user-init--chain.  rpc-server.el is
+            ;; NOT laid down user-side: the verb handlers call pid1-*
+            ;; primitives that the per-user emacs deliberately lacks.
+            (extra-special-file "/etc/geos/core/rpc-client.el"
+                                rpc-client-el)
             (extra-special-file "/etc/geos/user/userland/files.el"
                                 userland-files-el)
             (extra-special-file "/etc/geos/user/userland/shell.el"

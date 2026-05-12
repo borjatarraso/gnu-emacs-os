@@ -87,6 +87,7 @@ chain has been loaded by `user-init--load-core')."
 
 (defconst user-init--chain
   '("/etc/geos/core/panic.el"
+    "/etc/geos/core/rpc-client.el"
     "/etc/geos/core/use-package-shim.el"
     "/etc/geos/user/userland/files.el"
     "/etc/geos/user/userland/shell.el"
@@ -102,7 +103,10 @@ chain has been loaded by `user-init--load-core')."
   "Ordered list of files the per-user emacs loads.
 each path is laid down by extra-special-file in guix-system/
 system.scm and resolves to a store entry.  panic.el FIRST so the
-rest of the chain can panic-handle; use-package-shim SECOND
+rest of the chain can panic-handle; rpc-client.el SECOND so M-x
+geos-rpc-* commands are usable as soon as the rest of the chain
+errors (the user can still talk to the supervisor over the unix
+socket even if userland/ load fails); use-package-shim THIRD
 because every userland/*.el wraps its package in use-package
 with the :comment keyword the shim adds; then the userland files
 in the same order the supervisor used to -l them (shell before

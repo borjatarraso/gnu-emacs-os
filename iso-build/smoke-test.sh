@@ -158,7 +158,16 @@ QPID=$!
 #     least journal-tail registered.
 #       both modes:   "supervise: registry loaded N entries"
 #
-# pass = (any pid1 marker) AND userland AND var AND state AND supervise.
+#   RPC marker (v0.6 item 3): rpc-server.el bound /run/geos/super.sock
+#     via pid1-rpc-listen.  missing this line means the supervisor came
+#     up but the user-emacs has no privileged channel; geos-rpc-* will
+#     time out on the client side.  this gate would have caught the
+#     libcrypt.so.2 module-load miss in v0.5.1 (where module-load
+#     silently failed and every pid1-* primitive was unbound).
+#       both modes:   "rpc: listening on /run/geos/super.sock"
+#
+# pass = (any pid1 marker) AND userland AND var AND state AND supervise
+#        AND rpc.
 #
 # we do NOT gate on "geos: exwm up" headlessly. exwm-init-hook only
 # fires once EXWM processes its first real X event, which depends on
@@ -171,6 +180,7 @@ SUCCESS_USERLAND_RE='geos: emacs userland up'
 SUCCESS_VAR_RE='pid1: /var on (ext4|tmpfs)'
 SUCCESS_STATE_RE='geos: state-mode='
 SUCCESS_SUPERVISE_RE='supervise: registry loaded [0-9]+ entries'
+SUCCESS_RPC_RE='rpc: listening on /run/geos/super\.sock'
 
 # failure markers (any one means hard fail, do not wait for timeout):
 #   xorg parse errors, screen-discovery failures
@@ -192,7 +202,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
        && grep -Eq "$SUCCESS_USERLAND_RE" "$LOG" \
        && grep -Eq "$SUCCESS_VAR_RE" "$LOG" \
        && grep -Eq "$SUCCESS_STATE_RE" "$LOG" \
-       && grep -Eq "$SUCCESS_SUPERVISE_RE" "$LOG"; then
+       && grep -Eq "$SUCCESS_SUPERVISE_RE" "$LOG" \
+       && grep -Eq "$SUCCESS_RPC_RE" "$LOG"; then
         if grep -Eq "$SUCCESS_PID1_UI_RE" "$LOG"; then
             echo "smoke-test: PASS (ui)"
             echo "--- matched pid1 markers ---"
@@ -205,6 +216,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             grep -En "$SUCCESS_STATE_RE" "$LOG" || true
             echo "--- matched supervise markers ---"
             grep -En "$SUCCESS_SUPERVISE_RE" "$LOG" || true
+            echo "--- matched rpc markers ---"
+            grep -En "$SUCCESS_RPC_RE" "$LOG" || true
             exit 0
         elif grep -Eq "$SUCCESS_PID1_CONSOLE_RE" "$LOG"; then
             echo "smoke-test: PASS (console)"
@@ -218,6 +231,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             grep -En "$SUCCESS_STATE_RE" "$LOG" || true
             echo "--- matched supervise markers ---"
             grep -En "$SUCCESS_SUPERVISE_RE" "$LOG" || true
+            echo "--- matched rpc markers ---"
+            grep -En "$SUCCESS_RPC_RE" "$LOG" || true
             exit 0
         fi
     fi

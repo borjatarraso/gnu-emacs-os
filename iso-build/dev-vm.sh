@@ -77,11 +77,21 @@ if [ "$BUILD" = 1 ]; then
     # the path on the final stdout line is the contract.  any echo on
     # stdout above that line poisons QCOW with multi-line garbage.
     echo "dev-vm.sh: building host-side binaries (pid1, shstub)" >&2
-    # `all` builds both emacs-init AND pid1-module.so. system.scm
-    # references both as local-file inputs; the default `make` target
-    # only produces emacs-init, which leaves the .so missing and the
-    # build fails with canonicalize-path on pid1-module.so.
-    make -C pid1 all >&2
+    # emacs-init: static, built on the host (no shared deps to resolve).
+    # pid1-module.so: dlopen'd from inside the booted guix image, so it
+    # must link against guix's libxcrypt (libcrypt.so.1) and bake that
+    # store path into RUNPATH.  building on the bare host yields a .so
+    # with NEEDED libcrypt.so.2 and no RUNPATH, which dlopen inside the
+    # image cannot resolve.  the module build therefore runs inside
+    # `guix shell --pure` with gcc-toolchain + libxcrypt + emacs.  the
+    # LIBXCRYPT_STOREPATH var is passed in because pure shell strips
+    # `guix` itself, so the Makefile cannot shell out to find it.
+    make -C pid1 emacs-init >&2
+    LIBXCRYPT_STOREPATH=$(guix build libxcrypt 2>/dev/null)
+    guix shell --pure coreutils bash gcc-toolchain libxcrypt \
+        emacs-no-x-toolkit make -- \
+        env LIBXCRYPT_STOREPATH="$LIBXCRYPT_STOREPATH" \
+        make CC=gcc -C "$REPO_ROOT/pid1" module >&2
     make -C shstub >&2
     echo "dev-vm.sh: building qcow2 from $REPO_ROOT/guix-system/system.scm" >&2
     # filter for the /gnu/store/... line.  guix prints status messages

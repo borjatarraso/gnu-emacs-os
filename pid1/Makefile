@@ -38,17 +38,27 @@ LDFLAGS ?=
 PREFIX  ?= /
 SBINDIR ?= $(PREFIX)/sbin
 
-# locate emacs-module.h. probe order matters: prefer guix when this is
-# a guix system (so a stale fedora emacs-devel does not shadow the
-# pinned guix emacs), otherwise fall through to fedora's /usr/include,
-# otherwise ask pkg-config. a guix system is detected by the presence
-# of /run/current-system, not by the existence of the include dir
-# alone.
+# locate emacs-module.h. probe order matters: prefer the active guix
+# shell (GUIX_ENVIRONMENT) when present, then the booted guix system
+# profile, then fedora's /usr/include, then pkg-config as last resort.
+# the guix-shell branch is what the module build wants, since the .so
+# must dlopen inside the booted guix image; building against fedora
+# headers risks pulling glibc C23-isms (_Float32x, MS_NOUSER) that
+# -Werror -Wpedantic refuses, and yields a libcrypt.so.2 DT_NEEDED
+# with no RUNPATH that the booted system cannot resolve.
+EMACS_MODULE_H_SHELL  := $(GUIX_ENVIRONMENT)/include
 EMACS_MODULE_H_GUIX   := /run/current-system/profile/include
 EMACS_MODULE_H_FEDORA := /usr/include
+ifneq ($(GUIX_ENVIRONMENT),)
+ifneq ($(wildcard $(EMACS_MODULE_H_SHELL)/emacs-module.h),)
+EMACS_MODULE_INC := -I$(EMACS_MODULE_H_SHELL)
+endif
+endif
+ifndef EMACS_MODULE_INC
 ifneq ($(wildcard /run/current-system),)
 ifneq ($(wildcard $(EMACS_MODULE_H_GUIX)/emacs-module.h),)
 EMACS_MODULE_INC := -I$(EMACS_MODULE_H_GUIX)
+endif
 endif
 endif
 ifndef EMACS_MODULE_INC
@@ -65,10 +75,33 @@ MODULE_CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
                  -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
                  -fno-strict-aliasing \
                  -fPIC -DPID1_MODULE $(EMACS_MODULE_INC)
-# -lcrypt is libxcrypt on guix; needed by Fpid1_crypt.  module-only,
-# the standalone PID 1 has no crypt path.
+# libcrypt (libxcrypt) is needed by Fpid1_crypt.  module-only, the
+# standalone PID 1 has no crypt path.  build inside `guix shell
+# gcc-toolchain libxcrypt make` so the resulting .so picks up
+# libxcrypt from the store; we then bake libxcrypt's own store path
+# into RUNPATH (via `guix build libxcrypt`) so dlopen inside the
+# booted guix image can resolve libcrypt.so.N off a path that
+# actually exists in the image (the guix-shell profile dir, which
+# LIBRARY_PATH points at during build, does NOT exist in the booted
+# image).  building on the bare host (fedora) yields a .so with a
+# NEEDED for libcrypt.so.2 and no RUNPATH, which dlopen inside the
+# guix image cannot resolve and module-load fails with
+# "libcrypt.so.2: cannot open shared object".
 MODULE_LDFLAGS := -shared
 MODULE_LIBS    := -lcrypt
+# LIBXCRYPT_STOREPATH: caller may pass it in (e.g. from a guix-build
+# wrapper running outside the pure shell), or we shell out to `guix
+# build libxcrypt` from inside the shell.  pure `guix shell` strips
+# guix itself, so the env-var path is the working one in CI; the
+# shell-out is a convenience for non-pure shells on a dev host.
+ifndef LIBXCRYPT_STOREPATH
+ifneq ($(GUIX_ENVIRONMENT),)
+LIBXCRYPT_STOREPATH := $(shell guix build libxcrypt 2>/dev/null)
+endif
+endif
+ifneq ($(LIBXCRYPT_STOREPATH),)
+MODULE_LDFLAGS += -Wl,-rpath,$(LIBXCRYPT_STOREPATH)/lib
+endif
 
 .PHONY: all default module clean install
 

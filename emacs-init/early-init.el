@@ -50,14 +50,24 @@ wiring. Plain `emacs -Q` invocations on a dev host see nil here.")
         ;; that signals (ABI mismatch, missing dep, wrong libc) at
         ;; PID 1 with panic.el not yet loaded means uncaught error,
         ;; which means kernel panic. a console without supervision is
-        ;; still better than a panic, so we degrade and message.
+        ;; still better than a panic, so we degrade and message.  the
+        ;; FAILED branch writes /dev/console because the framebuffer
+        ;; may not be lit yet and *Messages* is invisible on a serial
+        ;; boot; keeping that line is how a future libcrypt-style
+        ;; resolution miss gets surfaced.
         (condition-case err
             (progn
               (message "early-init: loading pid1 module from %s" mod)
               (module-load mod))
           (error
            (message "early-init: module-load failed: %S, continuing without supervision primitives"
-                    err)))
+                    err)
+           (condition-case _
+               (let ((write-region-inhibit-fsync t))
+                 (write-region
+                  (format "early-init: module-load FAILED: %S\n" err)
+                  nil "/dev/console" 'append 'nomsg))
+             (error nil))))
       (message "early-init: PID1_MODULE_PATH unset or file missing (%s), skipping module"
                mod))))
 
