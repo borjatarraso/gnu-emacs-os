@@ -106,8 +106,11 @@ document I would actually rather you read first.
 
 ## what does not work yet
 
-The Hurd variant in code (the spike report is in; the actual port
-lives on a side branch and is 6-8 weeks of work, see
+The Hurd variant end-to-end (the port-layer abstraction landed on
+main in the v0.7.x cycle and the Hurd backend skeleton lives on the
+`hurd` side branch with mount/reboot/hostname and three pfinet
+verbs implemented; boot verification waits on a Hurd cross-toolchain
+and the v0.8 self-hosted runner, see
 [docs/HURD_PORT.md](docs/HURD_PORT.md)). Real hardware (only QEMU
 is exercised; KVM-gated boot smoke on a self-hosted runner is the
 v0.8 follow-up). Bluetooth. Wayland. DNS UI (static IPv4 and DHCP

@@ -7,6 +7,20 @@ the tagged commit. The signed tag for each release carries the
 full per-slice commit list; this file is the short version. The
 matching GitHub release page mirrors each entry.
 
+## unreleased
+
+Hurd port skeleton landed since v0.7.
+
+  - main: pid1 port-layer abstraction (`pid1/port_layer.h` +
+    `pid1/port_linux.c`), elisp port seam
+    (`emacs-init/core/port.el` + adapter branch points).
+  - `hurd` side branch: `pid1/port_hurd.c` with mount, reboot,
+    set_hostname implemented and three pfinet RPC stubs written
+    against the public Hurd headers. `guix-system/system-hurd.scm`
+    skeleton, `iso-build/hurd-smoke-test.sh` scaffold.
+  - boot to multi-user on Hurd: pending the v0.8 self-hosted
+    runner with a Hurd cross-toolchain.
+
 ## v0.7 (2026-05-12)
 
 user-side surfaces, input methods, audio, RPC views, CI gate.
