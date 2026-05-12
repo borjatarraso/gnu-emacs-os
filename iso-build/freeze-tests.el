@@ -2672,6 +2672,110 @@ contract:
         (set 'x-display--released sav-released)))
     (freeze-test--record 'x-display-idempotent result)))
 
+(defun freeze-test-input-chooser ()
+  "Pin v0.7 item 2.1: `input-apply' dispatches on `geos-input-method'.
+
+four cases, each shadowing the side-effecting bits with cl-letf so
+the test runs in batch without an X server, an ibus bus, or a real
+quail registry:
+
+  :quail forced
+    -> input--quail-apply called exactly once
+    -> input--ibus-apply NOT called
+
+  :ibus forced
+    -> input--ibus-apply called exactly once
+    -> input--quail-apply NOT called (fail-closed contract)
+
+  :auto with DISPLAY=:0 AND input--ibus-available-p -> t
+    -> input--ibus-apply called first
+    -> input--ibus-apply stubbed to return t means quail NOT called
+
+  :auto with DISPLAY=nil (no X)
+    -> input--ibus-apply NOT called
+    -> input--quail-apply called once
+
+these four cover the matrix the slice 2.1 contract documents.  the
+:auto+ibus-fails-back branch (ibus reports available, then apply
+returns nil) is exercised implicitly via the dispatcher's `or' form
+but is not asserted here; slice 2.3 grows a fifth case when the
+real ibus probe lands."
+  (interactive)
+  (require 'input)
+  (let ((result 'fail)
+        (sav-method geos-input-method)
+        (sav-display (getenv "DISPLAY")))
+    (unwind-protect
+        (condition-case err
+            (let ((q-calls 0)
+                  (i-calls 0)
+                  (ibus-ok nil)
+                  (display-val nil))
+              (cl-letf (((symbol-function 'input--quail-apply)
+                         (lambda () (cl-incf q-calls) t))
+                        ((symbol-function 'input--ibus-apply)
+                         (lambda () (cl-incf i-calls) ibus-ok))
+                        ((symbol-function 'input--ibus-available-p)
+                         (lambda () ibus-ok))
+                        ((symbol-function 'getenv)
+                         (lambda (k)
+                           (if (equal k "DISPLAY") display-val nil)))
+                        ((symbol-function 'input--trace)
+                         (lambda (_msg) nil)))
+                ;; case 1: :quail forced.
+                (setq q-calls 0 i-calls 0 ibus-ok nil display-val nil
+                      geos-input-method :quail)
+                (input-apply)
+                (cond
+                 ((not (= q-calls 1))
+                  (setq result (format ":quail q-calls=%d, want 1" q-calls)))
+                 ((not (= i-calls 0))
+                  (setq result (format ":quail i-calls=%d, want 0" i-calls)))
+                 (t
+                  ;; case 2: :ibus forced.
+                  (setq q-calls 0 i-calls 0 ibus-ok nil display-val nil
+                        geos-input-method :ibus)
+                  (input-apply)
+                  (cond
+                   ((not (= i-calls 1))
+                    (setq result (format ":ibus i-calls=%d, want 1" i-calls)))
+                   ((not (= q-calls 0))
+                    (setq result (format ":ibus q-calls=%d, want 0" q-calls)))
+                   (t
+                    ;; case 3: :auto with DISPLAY + ibus reachable.
+                    (setq q-calls 0 i-calls 0 ibus-ok t display-val ":0"
+                          geos-input-method :auto)
+                    (input-apply)
+                    (cond
+                     ((not (= i-calls 1))
+                      (setq result
+                            (format ":auto+x i-calls=%d, want 1" i-calls)))
+                     ((not (= q-calls 0))
+                      (setq result
+                            (format ":auto+x q-calls=%d, want 0" q-calls)))
+                     (t
+                      ;; case 4: :auto with no DISPLAY.
+                      (setq q-calls 0 i-calls 0 ibus-ok nil display-val nil
+                            geos-input-method :auto)
+                      (input-apply)
+                      (cond
+                       ((not (= q-calls 1))
+                        (setq result
+                              (format ":auto-x q-calls=%d, want 1"
+                                      q-calls)))
+                       ((not (= i-calls 0))
+                        (setq result
+                              (format ":auto-x i-calls=%d, want 0"
+                                      i-calls)))
+                       (t
+                        (setq result 'pass)))))))))))
+          (error
+           (panic-handle err 'freeze-test-input-chooser)
+           (setq result (format "raised: %S" err))))
+      (setq geos-input-method sav-method)
+      (when sav-display (setenv "DISPLAY" sav-display)))
+    (freeze-test--record 'input-chooser result)))
+
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.
 two simulated 'running sessions, A on workspace 1 and B on
@@ -2831,6 +2935,7 @@ back via state-read to confirm the persist landed."
   (freeze-test-session-workspace-allocator)
   (freeze-test-session-end-isolation)
   (freeze-test-x-display-idempotent)
+  (freeze-test-input-chooser)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
