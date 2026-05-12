@@ -3243,8 +3243,9 @@ up the shadow correctly."
   "Pin df7fb92: the GEOS_KERNEL=hurd code paths in the elisp port seam.
 shadows `geos-kernel' to 'hurd and asserts every adapter branch point
 (`network-read-proc-net-{dev,route}', `state--detect-mode',
-`disks-buffer--render', `install-disk-list', `geos-port-unimplemented'
-itself) behaves as documented in `emacs-init/core/port.el'.
+`disks-buffer--render', `install-disk-list', `geos--uname',
+`geos-port-unimplemented' itself) behaves as documented in
+`emacs-init/core/port.el'.
 
 real-world failure mode being caught: a refactor of the linux arm
 silently flattens or removes the hurd arm.  nothing in CI runs the
@@ -3254,6 +3255,7 @@ surface until the side-branch port attempts to boot."
   (require 'port nil 'noerror)
   (require 'disks-buffer nil 'noerror)
   (require 'install-disk nil 'noerror)
+  (require 'userland-uname nil 'noerror)
   ;; network is already a hard require from earlier in the boot.
   (let ((sav-state-mode (and (boundp 'state-mode) state-mode)))
     (unwind-protect
@@ -3272,6 +3274,8 @@ surface until the side-branch port attempts to boot."
           (freeze-test--record 'port/disks-render-no-sysblock
                                "port.el not loaded")
           (freeze-test--record 'port/install-disk-list-nil-and-panic
+                               "port.el not loaded")
+          (freeze-test--record 'port/uname-hurd-synth
                                "port.el not loaded"))
          (t
           (freeze-test--port-unimplemented-route)
@@ -3279,7 +3283,8 @@ surface until the side-branch port attempts to boot."
           (freeze-test--port-network-route-nil)
           (freeze-test--port-state-detect-mode-safe)
           (freeze-test--port-disks-render-no-sysblock)
-          (freeze-test--port-install-disk-list-nil-and-panic)))
+          (freeze-test--port-install-disk-list-nil-and-panic)
+          (freeze-test--port-uname-hurd-synth)))
       ;; never leave state-mode mutated; state--detect-mode setq's it
       ;; as a side effect and a hurd-arm run would otherwise leave the
       ;; rest of the suite seeing the hurd answer.
@@ -3438,6 +3443,41 @@ nil, and the *panic* buffer grew with a record mentioning the
        (panic-handle err 'freeze-test--port-install-disk-list-nil-and-panic)
        (setq result (format "raised: %S" err))))
     (freeze-test--record 'port/install-disk-list-nil-and-panic result)))
+
+(defun freeze-test--port-uname-hurd-synth ()
+  "Sub-check: `geos--uname' on hurd returns a synth plist, no /proc reads.
+asserts the hurd arm produces a non-nil plist with at least a :kernel
+string containing \"GNU\".  the linux arm on a fresh-boot dev host
+returns \"Linux\" for :kernel, so the substring test also serves as a
+no-regression check that the dispatcher actually flipped arms instead
+of falling through to the linux backend.  also asserts the call does
+not raise: the four /proc/sys/kernel/* reads vanish on hurd and a
+regression that drops the hurd arm would surface as an empty plist
+(harmless) or, worse, as a let-bind failure in `eshell/uname'."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'geos--uname))
+          (setq result "geos--uname unbound"))
+         (t
+          (let ((got (let ((geos-kernel 'hurd))
+                       (geos--uname))))
+            (cond
+             ((not (listp got))
+              (setq result (format "returned %S, want plist" got)))
+             ((not (stringp (plist-get got :kernel)))
+              (setq result
+                    (format ":kernel = %S, want string"
+                            (plist-get got :kernel))))
+             ((not (string-match-p "GNU" (plist-get got :kernel)))
+              (setq result
+                    (format ":kernel = %S, want substring \"GNU\""
+                            (plist-get got :kernel))))
+             (t (setq result 'pass))))))
+      (error
+       (panic-handle err 'freeze-test--port-uname-hurd-synth)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/uname-hurd-synth result)))
 
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.

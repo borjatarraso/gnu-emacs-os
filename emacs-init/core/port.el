@@ -115,6 +115,16 @@ one missing-feature event must not abort the rest of the boot."
 ;;   - early-init.el reads /proc/cmdline.  hurd's procfs translator
 ;;     exposes /proc/cmdline too, so the existing reader works as-is.
 ;;     no branch needed.
+;;
+;;   - user/userland/uname.el reads /proc/sys/kernel/{ostype,osrelease,
+;;     version,hostname} to synthesize the eshell `uname' output.  the
+;;     hurd procfs translator does not expose those four nodes (only
+;;     /proc/<pid>/* and a handful of summary nodes).  branch lives in
+;;     `geos--uname': linux arm reads /proc as before, hurd arm
+;;     synthesizes from Emacs built-ins (`system-name',
+;;     `emacs-build-time', literal "GNU"/"0.9" placeholders).  the
+;;     placeholder release will get a real source once the side-branch
+;;     port wires a Mach-RPC equivalent.
 
 (provide 'port)
 ;;; port.el ends here

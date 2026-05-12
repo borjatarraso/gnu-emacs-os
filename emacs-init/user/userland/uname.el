@@ -22,8 +22,19 @@
 ;; if a future tool calls uname(2) directly, it will still see
 ;; "Linux". that is correct behavior: the kernel IS Linux. GEOS is
 ;; the OS that runs ON Linux. only the user-facing CLI is rebranded.
+;;
+;; on hurd the /proc/sys/kernel/* nodes do not exist: hurd's procfs
+;; translator only exposes /proc/<pid>/* and a handful of summary
+;; nodes.  the four reads below would silently return "" for every
+;; field, and the user would see a uname line of bare hostnames.  the
+;; port seam in core/port.el carries the branch: on hurd we synthesize
+;; the four UTS fields from Emacs built-ins (system-name,
+;; emacs-build-time, system-configuration) so eshell/uname still has
+;; something to print.  the branch lives at the data-source layer
+;; (geos--uname), the eshell entry point geos/uname is unchanged.
 
 (require 'panic)
+(require 'port)
 
 (defun geos--uts-field (file)
   "Read FILE and return its trimmed contents as a string.
@@ -41,6 +52,62 @@ the leading hyphen-separated component is what `uname -m' would
 return on this build."
   (or (car-safe (split-string (or system-configuration "") "-"))
       "unknown"))
+
+(defun geos--uname-linux ()
+  "Linux backend for `geos--uname'.
+Pulls the four UTS fields from /proc/sys/kernel/{ostype,osrelease,
+version,hostname}, the same paths uname(2) reads under the hood.
+Returns a plist (:kernel STRING :release STRING :version STRING
+:host STRING).  the strings are trimmed; an unreadable node degrades
+to \"\" via `geos--uts-field' and the caller renders an empty column,
+which is what coreutils uname does too on a stripped /proc."
+  (list :kernel  (geos--uts-field "/proc/sys/kernel/ostype")
+        :release (geos--uts-field "/proc/sys/kernel/osrelease")
+        :version (geos--uts-field "/proc/sys/kernel/version")
+        :host    (geos--uts-field "/proc/sys/kernel/hostname")))
+
+(defun geos--uname-hurd ()
+  "Hurd backend for `geos--uname'.
+The /proc/sys/kernel/* nodes do not exist on hurd's procfs translator,
+so we synthesize the four UTS fields from Emacs built-ins:
+
+  :kernel  literal \"GNU\"  (mach + hurd servers, no kernel string
+                              file to read; matches what `uname -s'
+                              prints on a real hurd box)
+  :release placeholder \"0.9\".  hurd has no userland-readable
+                              equivalent of /proc/sys/kernel/osrelease;
+                              the side-branch port will substitute the
+                              real release once a Mach-RPC source lands.
+  :version `emacs-build-time' formatted as a coreutils-style date.
+                              correct enough for an audit of WHEN this
+                              userland was built; not the kernel's
+                              build date, but no userland source for
+                              that either.
+  :host    `(system-name)', which on a booted GEOS is what
+                              /etc/hostname applied via pid1's
+                              sethostname(2) call.
+
+No shelling-out, no /proc reads.  the eshell uname rebrand prefers
+something over nothing here."
+  (list :kernel  "GNU"
+        :release "0.9"
+        :version (format-time-string "%a %b %e %H:%M:%S %Y"
+                                     (or emacs-build-time
+                                         (current-time)))
+        :host    (or (system-name) "")))
+
+(defun geos--uname ()
+  "Return the four UTS fields as a plist, dispatching on `geos-kernel'.
+Plist shape: (:kernel STRING :release STRING :version STRING :host
+STRING).  Linux arm reads /proc/sys/kernel/*; hurd arm synthesizes
+from Emacs built-ins.  the branch lives here (data-source layer),
+not in `eshell/uname' (render layer); that file builds output
+strings out of whatever this returns and never asks which kernel
+it is on."
+  (cond
+   ((geos-kernel-linux-p) (geos--uname-linux))
+   ((geos-kernel-hurd-p)  (geos--uname-hurd))
+   (t                     (geos--uname-linux))))
 
 (defun geos--uname-flags (argv)
   "Parse a uname-style ARGV list and return a string of flag chars.
@@ -62,10 +129,11 @@ treated as -s, which matches GNU coreutils behavior."
   (condition-case err
       (let* ((argv (flatten-tree args))
              (flags (geos--uname-flags argv))
-             (kernel  (geos--uts-field "/proc/sys/kernel/ostype"))
-             (release (geos--uts-field "/proc/sys/kernel/osrelease"))
-             (version (geos--uts-field "/proc/sys/kernel/version"))
-             (host    (geos--uts-field "/proc/sys/kernel/hostname"))
+             (fields  (geos--uname))
+             (kernel  (or (plist-get fields :kernel)  ""))
+             (release (or (plist-get fields :release) ""))
+             (version (or (plist-get fields :version) ""))
+             (host    (or (plist-get fields :host)    ""))
              (mach    (geos--machine))
              (sysname "GEOS")
              (osname  "GNU/Emacs"))
