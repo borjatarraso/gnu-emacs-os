@@ -7,12 +7,15 @@
 ;; (dired/eshell/magit/eww/notmuch/erc/org/pdf-tools).  the supervisor
 ;; no longer -l's any of these.  the boundary has actually moved.
 ;;
-;; what is NOT moved yet (deferred to v0.6 item 1.3, the exwm display
-;; handover): exwm-config.el, multimon.el, fonts.el, input.el.  the
-;; supervisor still runs exwm-enable at boot, and the per-user emacs
-;; rides as an X client on the supervisor's display.  the audio
-;; userland (userland-audio.el) also stays supervisor-side because
-;; the *audio* buffer in emacs-init/buffers/audio.el requires it.
+;; v0.7 item 1.2: the EXWM stack (exwm-config / multimon / fonts /
+;; input) moved from the supervisor's -l chain into this file's
+;; user-init--chain.  the supervisor no longer runs exwm-enable; the
+;; per-user emacs does, becoming the X window manager for the duration
+;; of its session.  the audio userland (userland-audio.el) still
+;; double-loads because the *audio* buffer in emacs-init/buffers/audio.el
+;; requires it supervisor-side.  the supervisor-side X frame for *login*
+;; is still drawn on :0 but unmanaged; slice 1.3 closes that connection
+;; across a session via x-display-release.
 ;;
 ;; loaded by session--child-argv via `-l /etc/geos/user-init.el',
 ;; the path extra-special-file'd in system.scm.  loads BEFORE any
@@ -89,6 +92,15 @@ chain has been loaded by `user-init--load-core')."
   '("/etc/geos/core/panic.el"
     "/etc/geos/core/rpc-client.el"
     "/etc/geos/core/use-package-shim.el"
+    ;; v0.7 item 1.2: the EXWM stack.  multimon / fonts / input come
+    ;; first so exwm-config's `(require 'multimon)` etc resolve
+    ;; without a fresh load; exwm-config.el is the last of the four
+    ;; and is the file that actually calls (exwm-enable), making this
+    ;; emacs the X window manager.
+    "/etc/geos/user/multimon.el"
+    "/etc/geos/user/fonts.el"
+    "/etc/geos/user/input.el"
+    "/etc/geos/user/exwm-config.el"
     "/etc/geos/user/userland/files.el"
     "/etc/geos/user/userland/shell.el"
     "/etc/geos/user/userland/uname.el"
@@ -114,12 +126,12 @@ uname because uname adds an eshell/uname override).  the verifier
 init.el is LAST and walks (featurep ...) for each userland
 module.
 
-NOT in the chain (v0.6 item 1.3 will move them):
-  exwm-config.el, multimon.el, fonts.el, input.el        wm side
-audio.el IS in the chain so the verifier sees it user-side; it
-is also -l'd supervisor-side because buffers/audio.el requires
-it there.  the file's load is idempotent (use-package + a
-defconst); double-load is harmless.
+v0.7 item 1.2 added exwm-config / multimon / fonts / input to the
+chain after use-package-shim and before the userland files.  the
+user-emacs is now the X window manager.  audio.el IS in the chain
+so the verifier sees it user-side; it is also -l'd supervisor-side
+because buffers/audio.el requires it there.  the file's load is
+idempotent (use-package + a defconst); double-load is harmless.
 
 if site-lisp expansion fails or panic itself fails to load, the
 remaining entries still try.  loud failure beats silent partial

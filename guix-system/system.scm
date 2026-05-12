@@ -663,28 +663,21 @@
                                ;; needed from boot-marker.el.
                                "-l" #$rpc-server-el
                                "-l" #$network-buffer-el
-                               ;; phase 5c modules -l'd BEFORE
-                               ;; exwm-config so the (require 'multimon)
-                               ;; etc inside that file resolve without
-                               ;; a fresh load. the order between these
-                               ;; three doesn't matter, none depends on
-                               ;; another.
-                               "-l" #$multimon-el
-                               "-l" #$fonts-el
-                               "-l" #$input-el
-                               "-l" #$exwm-config-el
-                               ;; v0.6 item 1.2: every -l for the
-                               ;; userland chain except audio is
-                               ;; gone.  the per-user emacs loads
-                               ;; them itself via user-init.el (see
-                               ;; emacs-init/user/user-init.el).
-                               ;; userland-audio stays here because
-                               ;; emacs-init/buffers/audio.el (which
-                               ;; IS supervisor-side) requires
-                               ;; userland-audio at load time; until
-                               ;; the *audio* buffer moves user-
-                               ;; side, the wrapper has to be
-                               ;; reachable from the supervisor.
+                               ;; v0.7 item 1.2: the EXWM stack
+                               ;; (exwm-config / multimon / fonts /
+                               ;; input) is no longer -l'd here.  the
+                               ;; per-user emacs loads them itself via
+                               ;; user-init--chain.  the supervisor
+                               ;; still has DISPLAY=:0 in its env (pid1
+                               ;; sets it) but does NOT call exwm-enable;
+                               ;; *login* draws into a plain unmanaged
+                               ;; X frame between sessions, and the
+                               ;; user-emacs grabs WM duties.  slice 1.3
+                               ;; closes the supervisor's X connection
+                               ;; across a session via x-display-release.
+                               ;; userland-audio stays supervisor-side
+                               ;; because buffers/audio.el requires it
+                               ;; at load time.
                                "-l" #$userland-audio-el
                                ;; phase 6 buffers. lazy-loaded entry
                                ;; points; touching any of these via M-x
@@ -1060,6 +1053,19 @@
                                 userland-audio-el)
             (extra-special-file "/etc/geos/user/userland/init.el"
                                 userland-init-el)
+            ;; v0.7 item 1.2: the EXWM stack now lives user-side.  the
+            ;; per-user emacs loads exwm-config / multimon / fonts /
+            ;; input from /etc/geos/user/ via user-init--chain.  the
+            ;; supervisor no longer -l's these files; this is what
+            ;; finishes the v0.6 item 1 trim that left wm/ in place.
+            (extra-special-file "/etc/geos/user/exwm-config.el"
+                                exwm-config-el)
+            (extra-special-file "/etc/geos/user/multimon.el"
+                                multimon-el)
+            (extra-special-file "/etc/geos/user/fonts.el"
+                                fonts-el)
+            (extra-special-file "/etc/geos/user/input.el"
+                                input-el)
             %base-services))
 
     (name-service-switch %mdns-host-lookup-nss)))
