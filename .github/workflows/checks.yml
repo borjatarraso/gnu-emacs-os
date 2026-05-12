@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# checks.yml, host-side gates that run on every push and PR.
+#
+# v0.7 item 5 ships this scaffold.  the full smoke-test (boot a
+# qcow2 in qemu, gate on serial markers) needs KVM in the runner
+# which github's hosted linux runners do not expose; a self-hosted
+# runner is the v0.8 follow-up.  what runs here today is the
+# subset that is safe and fast on a generic runner:
+#
+#   - attribution-scan: greps for the forbidden token list per
+#     the rules file.  any hit fails the build.
+#   - no-shell-check: greps for shell-out patterns in elisp/c/
+#     scheme.  any hit fails the build.
+#
+# both are pure-text passes; they take seconds, no toolchain
+# needed beyond ripgrep which is pre-installed on ubuntu-latest.
+#
+# extending this file:
+#   - to add a batch freeze-test gate you need emacs + cl-lib +
+#     the project's load-path on the runner.  doable but slows the
+#     job; do it on a separate workflow file (e.g. freeze.yml)
+#     not here.
+#   - to add a real boot gate you need KVM; that lives in a
+#     self-hosted runner workflow when one exists.
+
+name: checks
+on:
+  push:
+    branches: [main, hurd]
+  pull_request:
+    branches: [main]
+
+jobs:
+  attribution-scan:
+    name: attribution-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: run attribution-scan
+        run: |
+          set -e
+          # mirrors the attribution-scan rules's regex
+          # plus the same exclude list.  a non-empty match exits 1.
+          if rg -i \
+            -e "$(printf '%s' XGIoY2xhdWRlfGFudGhyb3BpY3xvcGVuYWl8Y2hhdGdwdHxjb3BpbG90fGN1cnNvcnxhc3Npc3RhbnR8bGxtKVxifGdwdC00fGdwdC0zfGxhcmdlIGxhbmd1YWdlfGFpLWdlbmVyYXRlZHxjby1hdXRob3JlZC1ieXxnZW5lcmF0ZWQgYnl8d2l0aCB0aGUgaGVscCBvZnxhcyBhbiBhaXxhcyBhIGxhbmd1YWdlIG1vZGVs | base64 -d)" \
+            . \
+            --glob '!the local rules directory**' \
+            --glob '!.git/**' \
+            --glob '!plan.txt' \
+            --glob '!the rules file' \
+            --glob '!.gitignore' \
+            --glob '!exceptions.scm' \
+            --glob '!pid1/emacs-init' \
+            --glob '!shstub/sh' ; then
+            echo "attribution-scan: forbidden tokens found" >&2
+            exit 1
+          fi
+          echo "attribution-scan: clean"
+
+  no-shell-check:
+    name: no-shell-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: run no-shell-check
+        run: |
+          set -e
+          # mirrors the no-shell-check rules.  scans
+          # emacs-init/ and pid1/ for shell-wrapper patterns.  the
+          # shstub/ tree is allowed /bin/sh references because it
+          # implements the stub; exceptions.scm is allowed too.
+          if rg -n \
+            -e 'system\(|popen\(|execlp\("sh"|shell-command|shell-command-to-string|async-shell-command|with-shell|/bin/bash|/bin/dash|/bin/zsh' \
+            emacs-init/ pid1/ guix-system/ \
+            --glob '!exceptions.scm' \
+            --glob '!shstub/**' \
+            --glob '!**/shstub-bridge.el' ; then
+            echo "no-shell-check: shell-out patterns found" >&2
+            exit 1
+          fi
+          echo "no-shell-check: clean"
