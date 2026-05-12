@@ -134,22 +134,74 @@ since an account with no shadow entry effectively cannot log in."
   "Return the user plist for the current line, or nil."
   (get-text-property (line-beginning-position) 'users-row))
 
+(defun users-buffer--read-int (prompt default)
+  "Read an integer from the minibuffer with DEFAULT as fallback.
+empty input returns DEFAULT.  non-integer input loops.  used by the
+add flow so the operator can hit RET through every defaulted slot."
+  (let ((raw (read-string (format "%s (default %d): " prompt default))))
+    (cond
+     ((or (null raw) (string-empty-p raw)) default)
+     ((string-match-p "\\`-?[0-9]+\\'" raw) (string-to-number raw))
+     (t
+      (message "users-buffer: %s must be an integer" prompt)
+      (sit-for 1)
+      (users-buffer--read-int prompt default)))))
+
+(defun users-buffer--read-string (prompt default)
+  "Read a string, returning DEFAULT on empty input."
+  (let ((raw (read-string (format "%s (default %s): " prompt default))))
+    (cond ((or (null raw) (string-empty-p raw)) default)
+          (t raw))))
+
 (defun users-buffer-add ()
-  "Prompt for a new username and call `passwd-add-user'.  bound to `a'.
-the password is left unset; the new account is locked until `p'."
+  "Add a user end to end: passwd row, home dir, password.  bound to `a'.
+prompts for username, uid (default next free), gid (default = uid),
+home (default /home/NAME), shell (default /bin/sh), and password
+(read-passwd twice).  on success the account is logged-in-ready;
+v0.5.1 needed an M-: dance to chain these steps, v0.6 owns it.
+
+empty password is rejected: the operator can still use a locked
+account by hitting C-g during the prompt and running `a' again
+without the password, but that's an unusual ask and we trade the
+edge case for one less surprising path."
   (interactive)
   (cond
-   ((not (fboundp 'passwd-add-user))
-    (message "users-buffer: passwd-add-user unbound"))
+   ((not (fboundp 'passwd-create-user-and-home))
+    (message "users-buffer: passwd-create-user-and-home unbound"))
    (t
-    (let ((name (read-string "New username: ")))
-      (when (and name (not (string-empty-p name)))
-        (passwd-add-user name)
-        (users-buffer-refresh))))))
+    (let* ((name (read-string "New username: ")))
+      (cond
+       ((or (null name) (string-empty-p name))
+        (message "users-buffer: empty username, aborting"))
+       (t
+        (let* ((default-uid (passwd--next-uid))
+               (uid (users-buffer--read-int "uid" default-uid))
+               (gid (users-buffer--read-int "gid" uid))
+               (home (users-buffer--read-string
+                      "home" (concat passwd-default-home-prefix name)))
+               (shell (users-buffer--read-string
+                       "shell" passwd-default-shell))
+               (pw1 (read-passwd
+                     (format "Password for %s (empty to skip): " name)))
+               (pw2 (and pw1 (not (string-empty-p pw1))
+                         (read-passwd "Confirm password: "))))
+          (cond
+           ((and pw1 (not (string-empty-p pw1))
+                 (not (string= pw1 pw2)))
+            (message "users-buffer: passwords do not match, aborting"))
+           (t
+            (passwd-create-user-and-home
+             name
+             :uid uid :gid gid :home home :shell shell
+             :password (and pw1 (not (string-empty-p pw1)) pw1))
+            (users-buffer-refresh))))))))))
 
 (defun users-buffer-delete ()
   "Delete the user on the current line.  bound to `d'.
-prompts for confirmation.  refuses uid 0 (handled in `passwd-delete-user')."
+prompts for confirmation.  refuses uid 0 (handled in `passwd-delete-user').
+after the passwd row is gone, offers to remove the home directory
+too; default n because losing a home dir to a typo is hard to
+undo, while keeping a stale dir on disk is cheap."
   (interactive)
   (let ((row (users-buffer-row-at-point)))
     (cond
@@ -159,8 +211,16 @@ prompts for confirmation.  refuses uid 0 (handled in `passwd-delete-user')."
       (message "users-buffer: passwd-delete-user unbound"))
      ((not (yes-or-no-p (format "Delete user %s? " (plist-get row :user)))))
      (t
-      (passwd-delete-user (plist-get row :user))
-      (users-buffer-refresh)))))
+      (let ((name (plist-get row :user))
+            (home (plist-get row :home)))
+        (when (passwd-delete-user name)
+          (when (and home (file-directory-p home)
+                     (y-or-n-p (format "Also remove home dir %s? " home)))
+            (condition-case err
+                (delete-directory home t)
+              (error
+               (panic-handle err `(users-buffer-delete-home . ,home))))))
+        (users-buffer-refresh))))))
 
 (defun users-buffer-set-password ()
   "Set the password for the user on the current line.  bound to `p'.

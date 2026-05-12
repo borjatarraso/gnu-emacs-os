@@ -382,6 +382,59 @@ until `passwd-set-password' runs."
                  (message "passwd: added user %s uid=%d gid=%d" name uid gid)
                  t)))))))))
 
+(defun passwd-create-user-and-home (name &rest plist)
+  "Add user NAME, make their home directory, and chown it to them.
+recognised plist keys: same set `passwd-add-user' takes (:uid :gid
+:gecos :home :shell), plus :password STRING which, when non-nil and
+non-empty, sets the new account's password as the final step.
+
+bundles three calls that v0.5.1 forced operators to chain by hand
+through M-: (passwd-add-user + make-directory + set-file-modes).
+the M-: dance worked but had two smells: it used `set-file-modes
+... 511' (0777) to dodge an ownership problem, and the operator
+had to remember the order.  this helper owns the order and uses
+pid1-chown for the right answer.
+
+returns t iff every step succeeded.  failure routes through
+panic-handle and returns nil; the home dir may end up half-created
+(passwd-add-user is the load-bearing step and it is atomic), but
+the operator can rerun: `passwd-add-user' detects the existing
+user and bails, while `make-directory ... t' and pid1-chown are
+idempotent.
+
+pid1-chown is gated on fboundp so a dev-host load (where the pid1
+module is not loaded) degrades to a leave-as-root home dir with a
+visible message rather than a stacktrace."
+  (let* ((uid (or (plist-get plist :uid) (passwd--next-uid)))
+         (gid (or (plist-get plist :gid) uid))
+         (home  (or (plist-get plist :home)
+                    (concat passwd-default-home-prefix name)))
+         (shell (or (plist-get plist :shell) passwd-default-shell))
+         (gecos (or (plist-get plist :gecos) ""))
+         (password (plist-get plist :password))
+         (add-args (list :uid uid :gid gid :gecos gecos
+                         :home home :shell shell)))
+    (condition-case err
+        (cond
+         ((not (apply #'passwd-add-user name add-args))
+          nil)
+         (t
+          (make-directory home t)
+          (set-file-modes home #o700)
+          (cond
+           ((fboundp 'pid1-chown)
+            (funcall (symbol-function 'pid1-chown) home uid gid))
+           (t
+            (message "passwd: pid1-chown unbound, %s left owned by root"
+                     home)))
+          (cond
+           ((and password (not (string-empty-p password)))
+            (passwd-set-password name password))
+           (t t))))
+      (error
+       (panic-handle err `(passwd-create-user-and-home . ,name))
+       nil))))
+
 (defun passwd-delete-user (name)
   "Remove NAME from /etc/passwd, /etc/shadow, and the same-name group.
 refuses to remove uid 0.  does NOT delete the home directory; the

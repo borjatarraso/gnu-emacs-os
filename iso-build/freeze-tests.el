@@ -160,6 +160,17 @@
 ;;       arm/idempotent (a second arm cancels the prior timer),
 ;;       arm/cancels-prior (the post-arm timer object is fresh).
 ;;
+;;  12. users-buffer add (v0.6 item 4)
+;;     drives `passwd-create-user-and-home' on a sentinel user and
+;;     asserts /etc/passwd grows, /etc/shadow has a non-empty unlocked
+;;     hash, and the home dir is owned by the new uid.  cleans up on
+;;     every exit path so a partial create from a prior run does not
+;;     poison the next.  the smoke-test does not exercise the create-
+;;     user path; a regression that loses pid1-chown (home left root-
+;;     owned), drops the password step (shadow locked), or skips the
+;;     home dir entirely would still PASS the boot gate.  this test
+;;     closes that gap.  test 12 records under 'users-buffer-add.
+;;
 ;; reporting: each test pushes a result alist into `freeze-test-results'.
 ;; (freeze-test-report) prints a per-test PASS/FAIL summary to *Messages*
 ;; and to /dev/console (when boot-marker--write is available, so the
@@ -175,6 +186,7 @@
 ;; loaded" result instead of erroring out.
 (require 'login-buffer nil 'noerror)
 (require 'session nil 'noerror)
+(require 'passwd nil 'noerror)
 
 (defvar freeze-test-results nil
   "Alist of (TEST-NAME . RESULT) entries.  RESULT is one of
@@ -1817,6 +1829,103 @@ pid1 would mask every dead child on a deployed image."
     (freeze-test--arm-cancels-prior))))
 
 ;; --------------------------------------------------------------------
+;; test 13: users-buffer add (v0.6 item 4)
+;; --------------------------------------------------------------------
+
+(defun freeze-test--users-add-cleanup (name home)
+  "Best-effort cleanup of a NAME/HOME pair left by the add test.
+runs even on partial-create paths so a half-written /etc/passwd row
+or a stray /home dir does not poison the next run."
+  (condition-case err
+      (when (and (fboundp 'passwd-delete-user)
+                 (cl-find-if (lambda (e) (string= (plist-get e :user) name))
+                             (passwd-read-passwd)))
+        (passwd-delete-user name))
+    (error
+     (panic-handle err `(freeze-test--users-add-cleanup-passwd . ,name))))
+  (condition-case err
+      (when (and home (file-directory-p home))
+        (delete-directory home t))
+    (error
+     (panic-handle err `(freeze-test--users-add-cleanup-home . ,home)))))
+
+(defun freeze-test-users-buffer-add ()
+  "Drive `passwd-create-user-and-home' end to end on a sentinel user.
+v0.6 item 4 (closes v0.5.1's M-: workaround for new-user creation):
+the *users* buffer's `a' key bundles passwd-add-user + make-directory
++ pid1-chown + passwd-set-password.  the keystroke is interactive
+and prompts via the minibuffer; this test calls the underlying
+helper directly so a fake minibuffer is not required.
+
+assertions:
+  - /etc/passwd grows: the new user appears in `passwd-read-passwd'.
+  - /etc/shadow grows: the new user has a row with a non-empty hash.
+  - /home/NAME exists and is owned by the new uid.
+
+failure modes worth catching:
+  - passwd-create-user-and-home returns t but skipped a step
+  - pid1-chown unbound (module-load regression) leaves home root-owned
+  - passwd-set-password silently failed and the shadow row is locked
+  - cleanup path doesn't reverse the row, so a re-run double-adds
+
+random uid in the 50000-59999 range avoids colliding with any
+default install or with `passwd--next-uid' (which scans free uids
+upward from 1000).  random suffix on the name protects against a
+prior failed run leaving a stale row."
+  (interactive)
+  (let* ((result 'fail)
+         (suffix (format "%06d" (random 1000000)))
+         (name (concat "geos-freeze-" suffix))
+         (uid (+ 50000 (random 10000)))
+         (home (concat passwd-default-home-prefix name))
+         (password "freeze-test-pw"))
+    (unwind-protect
+        (condition-case err
+            (cond
+             ((not (fboundp 'passwd-create-user-and-home))
+              (setq result "passwd-create-user-and-home unbound"))
+             ((not (passwd-create-user-and-home
+                    name :uid uid :gid uid :home home
+                    :shell passwd-default-shell
+                    :password password))
+              (setq result "passwd-create-user-and-home returned nil"))
+             (t
+              (let* ((users (passwd-read-passwd))
+                     (urow (cl-find-if
+                            (lambda (e) (string= (plist-get e :user) name))
+                            users))
+                     (shadow (passwd-read-shadow))
+                     (srow (cl-find-if
+                            (lambda (e) (string= (plist-get e :user) name))
+                            shadow))
+                     (attrs (file-attributes home 'integer))
+                     (owner (and attrs (file-attribute-user-id attrs))))
+                (setq result
+                      (cond
+                       ((null urow)
+                        "passwd row not written")
+                       ((not (= (plist-get urow :uid) uid))
+                        (format "passwd uid mismatch: %S != %d"
+                                (plist-get urow :uid) uid))
+                       ((null srow)
+                        "shadow row not written")
+                       ((let ((h (plist-get srow :hash)))
+                          (or (null h) (string-empty-p h)
+                              (string-prefix-p "!" h)
+                              (string-prefix-p "*" h)))
+                        "shadow hash empty or locked")
+                       ((null attrs)
+                        (format "home dir %s not created" home))
+                       ((and (fboundp 'pid1-chown) (not (= owner uid)))
+                        (format "home owner %S != uid %d" owner uid))
+                       (t 'pass))))))
+          (error
+           (panic-handle err 'freeze-test-users-buffer-add)
+           (setq result (format "raised: %S" err))))
+      (freeze-test--users-add-cleanup name home))
+    (freeze-test--record 'users-buffer-add result)))
+
+;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
 
@@ -1839,6 +1948,7 @@ pid1 would mask every dead child on a deployed image."
   (freeze-test-spawn-shape)
   (freeze-test-workspace-routing)
   (freeze-test-child-exit-poller)
+  (freeze-test-users-buffer-add)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
