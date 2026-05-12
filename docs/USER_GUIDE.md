@@ -83,7 +83,13 @@ auto-refreshing on a short timer. Press `g` to refresh on demand,
 The kernel process table, parsed from `/proc/[0-9]+/stat`. Columns:
 PID, state, RSS, command. Kill with `k` (sends SIGTERM), force-kill
 with `K` (SIGKILL). `RET` on a row opens that PID's `/proc/<pid>/`
-directory in dired.
+directory in dired. Bound to `C-c e p`.
+
+Lives in both the supervisor TTY and the per-user emacs. `/proc` is
+world-readable so the user-side renderer walks the same kernel data
+the supervisor does, no RPC indirection. A user can signal their own
+pids; the kernel rejects the rest. The pid-1 guard refuses to
+signal init from this buffer regardless of who owns it.
 
 ### `*network*`
 
@@ -95,9 +101,25 @@ refreshes every two seconds.
 
 ### `*journal*`
 
-A live tail of `/dev/kmsg` (kernel ring buffer) via a `dd` subprocess
-supervised by core/supervise.el. `f` follows the tail, `F` stops
-following, `/` prompts for a substring filter.
+The supervisor's elisp audit log: every RPC event, every supervised-
+service state change, every `panic-handle` landing. Tails the
+supervisor's `*Messages*` buffer over the v0.7 item 4 RPC channel.
+Refreshes every 3 seconds; `g` forces an immediate fetch. Bound to
+`C-c e j`.
+
+Keys: `g` refresh, `+` ask for 100 more lines (cap 500, the
+supervisor-side clamp), `-` 100 fewer (floor 10), `q` bury. Prefix
+arg to `C-c e j` (e.g. `C-u 500 C-c e j`) sets the line count at
+open time.
+
+When the supervisor is unreachable (RPC socket gone, timeout) the
+header flips to "RPC down" and the last good snapshot stays visible
+below an error line. The timer keeps polling; once the supervisor
+returns, the next tick repaints.
+
+Note: this is NOT the kernel ring buffer (`/dev/kmsg`). That lives
+only on the supervisor side today; a future RPC verb can lift it
+user-side without disturbing this view.
 
 ### `*services*`
 
@@ -108,6 +130,14 @@ restart policy, restart count, and last-death timestamp. `r`
 requests an immediate restart. `D` deregisters (the supervisor will
 not respawn it). Xorg is supervised by PID 1 directly, not by this
 registry, because it has to come up before Emacs.
+
+User-side rendering as of v0.7 item 4: bound to `C-c e s`. The
+client polls the supervisor's `services-list` RPC verb every 3
+seconds and shows name, status, pid, kind, restart count, uptime.
+Read-only on the user side: `r` and `D` work only from the
+supervisor's TTY because they mutate the registry. When the RPC is
+down the buffer keeps the last good snapshot visible and flips its
+header to "RPC down".
 
 ### `*disks*`
 
