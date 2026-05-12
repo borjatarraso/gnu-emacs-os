@@ -44,13 +44,13 @@ that was timing out the headless smoke-test got deferred to
 `exwm-init-hook`. Added `iso-build/freeze-tests.el`, AUTHORS,
 docs/CONTRIBUTING.md, docs/USER_GUIDE.md.
 
-## v0.4 in flight
+## v0.4 recap (done)
 
 The detailed plan lives in [v04-plan.md](v04-plan.md). Eleven items
-ordered into four phases, with dependency notes per item. Eleven
-items closed (item 3 in MVP form, items 9 and 11 as documented
-deliverables); the user-login split is the one remaining piece,
-deferred to v0.5. The top-level shape:
+ordered into four phases, with dependency notes per item. All
+eleven closed (item 3 in MVP form, items 9 and 11 as documented
+deliverables); the user-login split moved to v0.5. The top-level
+shape:
 
 ### Phase A (foundational, done)
 
@@ -124,20 +124,72 @@ deferred to v0.5. The top-level shape:
   work order. The actual port lives on a side branch (per the v0.4
   plan), not main.
 
-## explicitly punted to v0.5 or later
+## v0.5 recap (done)
 
-  - Wayland. EXWM is X11-only. A Wayland equivalent is a different
-    project.
-  - Bluetooth. bluez is its own dependency mountain.
-  - Microphone capture and webcam. Same reason as Bluetooth.
+Multi-user login. Per-user emacs sessions spawned from the root
+supervisor via `pid1-spawn-as-uid` (the twelfth bound module
+function). `*login*` buffer presents at boot when no session is
+running, throttles 3-in-30s, renders a structured error from the
+session layer on failure. `session-spawn` rejects a bad HOME
+before allocating any state; the C-side `chdir` fallback to `/`
+stays as defense-in-depth.
 
-## the meta-task
+## v0.5.1 recap (done)
 
-After v0.4 is functionally complete, I want to actually ship GEOS as
-a daily driver. That means:
+Per-user session polish. passwd salt read from `/dev/urandom`,
+session boot-rehydrate moved to `emacs-startup-hook`, workspace
+routing and login re-prompt land after teardown, `user-init.el`
+and the `/usr/bin/emacs` symlink laid down from the boot gexp,
+`exwm-manage-finish-hook` installed after `(require 'exwm)` so
+the hook actually attaches.
 
-  - real install media that boots on a non-virtualized x86_64 laptop
-  - a one-page "is this for you" landing page on the manifesto
-  - a `git tag v0.4` that I am willing to point friends at
+## v0.6 recap (done)
 
-That is the actual goal. Everything above is the path to get there.
+Multi-user, RPC, workspace-split. Phase A: per-user dotfiles
+under `/var/emacs/users/NAME/` (0700, chowned), supervisor RPC
+over AF_UNIX `/run/geos/super.sock` with verbs `ping`,
+`journal-tail`, `reboot`, `poweroff`. Phase B: `*users*` adds /
+deletes / sets passwords via `passwd-create-user-and-home`;
+login hardening with per-user lockout writing
+`/var/emacs/lockouts/NAME` (15min expiry), global cap 5-in-60s,
+last-login footer, audit log under
+`/var/emacs/journal/auth.log`; concurrent sessions with
+`:workspace` slot on `geos-session`, multi-session UI on
+`*login*` (`n` adds another, `s` switches), allocator in
+`session.el` authoritative, capped at 3. Phase C deferred to
+v0.7. Phase D: Hurd remains on its own side branch.
+
+## v0.7 recap (done)
+
+User-side surfaces, input methods, audio, RPC views, CI gate.
+`session.el` releases the EXWM display on logout and reclaims it
+on next login. Input methods: chooser dispatcher with the quail
+builtin, per-user persistence under
+`/var/emacs/users/NAME/input-method`, real IBus launcher, pid1
+`ibus-daemon` respawn with inline crashloop cap. `*audio*`
+lifted user-side; pcm stream parser takes an optional path arg
+so user emacs walks `/proc/asound` without supervisor mediation.
+Supervisor views over RPC: new `services-list` verb,
+`services-client.el` and `journal-client.el` under
+`user/userland/`, both 3s-tick with RPC-down fallback that pins
+the last-good rows. `*processes*` lifted user-side without RPC
+because `/proc` is world-readable. Host-side CI gate at
+`.github/workflows/checks.yml` runs `attribution-scan` and
+`no-shell-check` on push to `main` and `hurd` and on PRs.
+KVM-gated boot smoke deferred to v0.8. Port status is in
+[HURD_PORT.md](HURD_PORT.md).
+
+## what's next
+
+The detailed v0.7.1 / v0.8 list is not yet a plan file; the
+current candidates are:
+
+  - QEMU interactive validation pass for the v0.7 items
+    (currently shipped on freeze-tests + smoke markers).
+  - KVM-gated boot smoke test on a self-hosted runner.
+  - `kmsg-tail` RPC verb to lift `/dev/kmsg` user-side without
+    touching the existing `journal-tail` shape.
+  - Real install media on a non-virtualized x86_64 laptop.
+  - Hurd port: boot to multi-user on the side branch.
+  - Bluetooth, Wayland, microphone capture, and webcam stay
+    punted; the reasons listed above still apply.

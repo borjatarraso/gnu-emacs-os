@@ -17,7 +17,8 @@ dynamic module, so the supervisor lives inside the supervised process.
 Every system concept (`top`, `ip a`, `journalctl`, `df`, `apt`) is a
 buffer with a major mode and a refresh timer.
 
-This is v0.3.1. It runs. I use it.
+This is v0.7. It runs. I use it. Per-release notes in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## try it
 
@@ -106,16 +107,17 @@ document I would actually rather you read first.
 ## what does not work yet
 
 The Hurd variant in code (the spike report is in; the actual port
-lives on a side branch and is 6-8 weeks of work). Real hardware
-(only QEMU is exercised). The login flow (account store is in,
-per-user emacs split is not). Bluetooth. Wayland. DNS UI (static IPv4 and DHCP land packets but the resolver
-configuration is manual). Partition-from-scratch in the install
-wizard (MVP requires pre-partitioned disk; full parted-driven
-partitioning is v0.4.1). LUKS-rooted boot is documented as a
-config-edit path (see [docs/INSTALL.md](docs/INSTALL.md)) but
-integration-tested only by a future install-wizard pass. The list
-lives in [docs/ROADMAP.md](docs/ROADMAP.md), with the detailed v0.4
-plan in [docs/v04-plan.md](docs/v04-plan.md).
+lives on a side branch and is 6-8 weeks of work, see
+[docs/HURD_PORT.md](docs/HURD_PORT.md)). Real hardware (only QEMU
+is exercised; KVM-gated boot smoke on a self-hosted runner is the
+v0.8 follow-up). Bluetooth. Wayland. DNS UI (static IPv4 and DHCP
+land packets but the resolver configuration is manual).
+Partition-from-scratch in the install wizard (MVP requires a
+pre-partitioned disk; full parted-driven partitioning is v0.4.1).
+LUKS-rooted boot is documented as a config-edit path (see
+[docs/INSTALL.md](docs/INSTALL.md)) but integration-tested only
+by a future install-wizard pass. The list lives in
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## the failure mode I have accepted
 
@@ -128,25 +130,44 @@ you, this is not your OS, and I will not be offended.
 
 ## status
 
+Per-release notes are in [CHANGELOG.md](CHANGELOG.md). Short
+version:
+
   - v0.1: tagged, ISO is 1.57 GB, boots in QEMU. Xvfb only.
-  - v0.2: tagged. Real Xorg, working input, poweroff, hostname. Same
-    ISO build flow.
+  - v0.2: tagged. Real Xorg, working input, poweroff, hostname.
   - v0.3.1: tagged. Round-5 hardening across the pid1 ABI, the
     supervision throttle, and the buffer renderers. Long-standing
     fullscreen-pre-WM hang in `exwm-config.el` fixed (was making
     headless smoke-tests time out). Freeze-test suite, AUTHORS,
     contributor docs, user guide.
-  - v0.4: in flight. All eleven items closed (item 3 in MVP form,
-    items 9 and 11 as documented deliverables): persistent state,
+  - v0.4: tagged. All eleven items closed: persistent state,
     `core/supervise.el`, network UI (static IPv4 + DHCP),
-    `*packages*`, suspend/resume, `passwd.el` + `*users*`, audio
-    preview, the three-way GRUB boot menu (ui / console / recovery),
-    LUKS-rooted boot as a config-edit path (see
-    [docs/INSTALL.md](docs/INSTALL.md)), the `*install*` wizard
-    (MVP: assumes pre-partitioned disk), and the Hurd feasibility
-    spike (see [docs/v04-item11-hurd-spike.md](docs/v04-item11-hurd-spike.md)).
-    Remaining: the login flow, deferred to v0.5. Plan in
-    [docs/v04-plan.md](docs/v04-plan.md).
+    `*packages*`, suspend/resume, `passwd.el` + `*users*`,
+    `*audio*` preview, the three-way GRUB boot menu (ui / console
+    / recovery), LUKS-rooted boot as a config-edit path, the
+    `*install*` MVP wizard, and the Hurd feasibility spike.
+  - v0.5: tagged. Multi-user login. Per-user emacs sessions
+    spawned from the root supervisor via `pid1-spawn-as-uid`.
+    `*login*` buffer with abuse throttle.
+  - v0.5.1: tagged. Per-user session polish: passwd salt off
+    `/dev/urandom`, boot-rehydrate moved to
+    `emacs-startup-hook`, `user-init.el` and `/usr/bin/emacs`
+    laid down from the boot gexp, EXWM finish-hook actually
+    attached.
+  - v0.6: tagged. Multi-user, RPC, workspace-split. Per-user
+    dotfiles under `/var/emacs/users/NAME/`, AF_UNIX RPC at
+    `/run/geos/super.sock`, `*users*` buffer with bundled
+    passwd-create, login hardening (lockout + audit log),
+    concurrent sessions on separate workspaces capped at 3.
+  - v0.7: tagged. User-side surfaces, input methods, audio
+    promotion, supervisor views over RPC, host-side CI gate.
+    `session.el` releases the X display on logout and reclaims
+    on next login. IBus / quail chooser with per-user
+    persistence. `*audio*` / `*services*` / `*journal*` /
+    `*processes*` all run in user-emacs.
+    `.github/workflows/checks.yml` runs `attribution-scan` and
+    `no-shell-check` on every push. See
+    [docs/HURD_PORT.md](docs/HURD_PORT.md) for the port status.
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
