@@ -2984,6 +2984,86 @@ emacs during startup; a global shadow hangs `--batch'."
       (when (file-exists-p zero)  (delete-file zero)))
     (freeze-test--record 'audio-pcm-parser result)))
 
+(defun freeze-test-rpc-services-list ()
+  "Pin v0.7 item 4.1: rpc verb `services-list' wire shape.
+
+calls `rpc-server--verb-services-list' directly (bypassing the
+socket; the C-side RPC poll is exercised by the booted smoke
+test, not in --batch) and checks:
+
+  - empty registry / unbound supervise-registry returns nil.
+  - one fake service comes back as a plist with :name (string,
+    converted from symbol), :kind, :status, :pid, :restarts,
+    :started-at.
+  - :process is NOT present (a process object would fail to print
+    across the wire).
+  - the returned name string matches the registered symbol's
+    `symbol-name', round-trip safe.
+
+we shadow `supervise-registry' with `cl-letf' so the test does
+not depend on the supervisor actually being booted.  the verb's
+internal `funcall (symbol-function 'supervise-registry)' picks
+up the shadow correctly."
+  (interactive)
+  (require 'rpc-server)
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'rpc-server--verb-services-list))
+          (setq result "rpc-server--verb-services-list unbound"))
+         (t
+          (let* ((empty (cl-letf (((symbol-function 'supervise-registry)
+                                    (lambda () nil)))
+                          (rpc-server--verb-services-list 0 0 nil)))
+                 (fake-svc (list :name 'xorg
+                                  :kind 'process
+                                  :status 'running
+                                  :pid 1234
+                                  :restarts 2
+                                  :started-at 1700000000
+                                  :process 'fake-proc))
+                 (one (cl-letf (((symbol-function 'supervise-registry)
+                                  (lambda () (list fake-svc))))
+                        (rpc-server--verb-services-list 0 0 nil)))
+                 (row (car one)))
+            (cond
+             ((not (null empty))
+              (setq result (format "empty-registry = %S, want nil" empty)))
+             ((not (= 1 (length one)))
+              (setq result (format "one-svc length = %d, want 1"
+                                   (length one))))
+             ((not (equal (plist-get row :name) "xorg"))
+              (setq result (format ":name = %S, want \"xorg\""
+                                   (plist-get row :name))))
+             ((not (eq (plist-get row :kind) 'process))
+              (setq result (format ":kind = %S, want 'process"
+                                   (plist-get row :kind))))
+             ((not (eq (plist-get row :status) 'running))
+              (setq result (format ":status = %S, want 'running"
+                                   (plist-get row :status))))
+             ((not (eql (plist-get row :pid) 1234))
+              (setq result (format ":pid = %S, want 1234"
+                                   (plist-get row :pid))))
+             ((not (eql (plist-get row :restarts) 2))
+              (setq result (format ":restarts = %S, want 2"
+                                   (plist-get row :restarts))))
+             ((not (eql (plist-get row :started-at) 1700000000))
+              (setq result (format ":started-at = %S, want 1700000000"
+                                   (plist-get row :started-at))))
+             ((plist-member row :process)
+              (setq result ":process leaked into wire payload"))
+             ;; round-trip through prin1+read to prove it survives
+             ;; the wire.  uninterned-symbol-safe: :name is a string.
+             ((not (equal row
+                          (car (read-from-string
+                                (prin1-to-string row)))))
+              (setq result "row does not round-trip prin1/read"))
+             (t (setq result 'pass))))))
+      (error
+       (panic-handle err 'freeze-test-rpc-services-list)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'rpc-services-list result)))
+
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.
 two simulated 'running sessions, A on workspace 1 and B on
@@ -3147,6 +3227,7 @@ back via state-read to confirm the persist landed."
   (freeze-test-input-persist)
   (freeze-test-input-ibus-throttle)
   (freeze-test-audio-pcm-parser)
+  (freeze-test-rpc-services-list)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

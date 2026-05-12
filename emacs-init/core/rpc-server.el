@@ -338,10 +338,62 @@ ephemeral but still visible to an operator with serial console."
       (funcall (symbol-function 'pid1-poweroff))
       'powering-off))))
 
-(rpc-server-register "ping"         #'rpc-server--verb-ping)
-(rpc-server-register "journal-tail" #'rpc-server--verb-journal-tail)
-(rpc-server-register "reboot"       #'rpc-server--verb-reboot)
-(rpc-server-register "poweroff"     #'rpc-server--verb-poweroff)
+(defun rpc-server--svc-name-string (svc)
+  "Return SVC's :name as a plain string for the wire.
+the registry stores :name as a symbol (sometimes uninterned, see
+supervise.el's audit-round-5 note).  symbol-name handles both
+interned and uninterned cases, so the wire shape is the same
+regardless of registration path."
+  (let ((n (plist-get svc :name)))
+    (cond
+     ((symbolp n) (symbol-name n))
+     ((stringp n) n)
+     (t (format "%S" n)))))
+
+(defun rpc-server--verb-services-list (_uid _gid _args)
+  "Return the supervised-service registry sanitised for the wire.
+v0.7 item 4.  any uid.  ARGS is ignored.
+
+shape per service (plist, in registry order which is name-sorted):
+
+  :name      string  (was symbol in the registry)
+  :kind      symbol  ('process today; 'timer/'sentinel land later)
+  :status    symbol  ('running 'dead 'disabled 'held ...)
+  :pid       integer or nil
+  :restarts  integer
+  :started-at integer (unix epoch seconds) or nil
+
+we DROP :process from the registry plist because emacs process
+objects are not `print'able across the wire and the client has no
+way to act on a process handle living in the supervisor's address
+space anyway.  the :name slot is converted from symbol to string
+for the same reason: an uninterned symbol survives prin1 but the
+reader on the client side may re-intern it as a different obarray
+entry; sending a string sidesteps the question entirely.
+
+degrades cleanly: if supervise.el is not loaded (no registry)
+returns nil rather than signal.  a fresh-boot supervisor exposes
+an empty registry while services are still registering and the
+client sees nil, which equals the supervisor's view RIGHT NOW."
+  (cond
+   ((not (fboundp 'supervise-registry))
+    nil)
+   (t
+    (mapcar
+     (lambda (svc)
+       (list :name      (rpc-server--svc-name-string svc)
+             :kind      (plist-get svc :kind)
+             :status    (plist-get svc :status)
+             :pid       (plist-get svc :pid)
+             :restarts  (plist-get svc :restarts)
+             :started-at (plist-get svc :started-at)))
+     (funcall (symbol-function 'supervise-registry))))))
+
+(rpc-server-register "ping"          #'rpc-server--verb-ping)
+(rpc-server-register "journal-tail"  #'rpc-server--verb-journal-tail)
+(rpc-server-register "reboot"        #'rpc-server--verb-reboot)
+(rpc-server-register "poweroff"      #'rpc-server--verb-poweroff)
+(rpc-server-register "services-list" #'rpc-server--verb-services-list)
 
 ;; bottom-of-load auto-start under the same gate the rest of core/ uses
 ;; (state.el, supervise.el).  dev-host loads (pid1-as-emacs-p unbound or
