@@ -31,6 +31,7 @@
 ;; /var/emacs/journal/seq prints something a human can parse.
 
 (require 'panic)
+(require 'port)
 
 (defconst state-root "/var/emacs/"
   "Root of the persistent state tree.
@@ -53,21 +54,43 @@ called from `state--ensure-layout'.  buffer modes display this in
 the header line so the user knows whether their actions survive a
 poweroff.")
 
+(defun state--detect-mode-linux ()
+  "Linux backend for `state--detect-mode'.
+Reads /proc/mounts to find what is on /var.  /proc may be missing on
+a degraded dev host; degrade to nil silently."
+  (condition-case _
+      (with-temp-buffer
+        (insert-file-contents "/proc/mounts")
+        (goto-char (point-min))
+        (cond
+         ((re-search-forward "^[^ ]+ /var tmpfs " nil t) 'tmpfs)
+         ((re-search-forward "^[^ ]+ /var ext4 " nil t) 'persistent)
+         ((file-writable-p state-root) 'tmpfs)
+         (t nil)))
+    (error nil)))
+
 (defun state--detect-mode ()
   "Set `state-mode' to \\='persistent, \\='tmpfs, or nil.
-Reads /proc/mounts to find what is on /var.  /proc may be missing on
-non-linux dev hosts; degrade to nil silently."
+Dispatches on `geos-kernel'.  on linux, reads /proc/mounts to find
+what is on /var.  on hurd, the mount-list surface is different
+(walking /servers or the procfs translator); for now we route the
+miss through `geos-port-unimplemented' and fall back to a writable-
+probe of state-root so persistence-aware buffers still get a usable
+answer.  the buffer header lines will read \"none\" or \"tmpfs\" on
+hurd, which is the documented degraded mode."
   (setq state-mode
-        (condition-case _
-            (with-temp-buffer
-              (insert-file-contents "/proc/mounts")
-              (goto-char (point-min))
-              (cond
-               ((re-search-forward "^[^ ]+ /var tmpfs " nil t) 'tmpfs)
-               ((re-search-forward "^[^ ]+ /var ext4 " nil t) 'persistent)
-               ((file-writable-p state-root) 'tmpfs)
-               (t nil)))
-          (error nil))))
+        (cond
+         ((geos-kernel-linux-p)
+          (state--detect-mode-linux))
+         ((geos-kernel-hurd-p)
+          (geos-port-unimplemented 'state-detect-mode)
+          ;; best-effort fallback: if state-root is writable, treat
+          ;; it as tmpfs (everything works but writes do not survive
+          ;; reboot).  if not, nil (no persistence at all).
+          (if (file-writable-p state-root) 'tmpfs nil))
+         (t
+          (geos-port-unimplemented 'state-detect-mode)
+          nil))))
 
 (defun state-path (key)
   "Return the absolute path for state KEY.

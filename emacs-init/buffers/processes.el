@@ -33,6 +33,19 @@
   (error
    (message "processes-buffer: require panic failed: %S" err)))
 
+;; port.el for `geos-kernel'.  this file reads /proc/<pid>/{stat,
+;; status,cmdline}.  hurd has a procfs translator that approximates
+;; /proc, so the existing reader is expected to work; column ordering
+;; in /proc/<pid>/stat may differ on hurd and an end-to-end smoke test
+;; on a hurd boot is the right place to find out.  we do NOT branch
+;; the parsers here; the comment in port.el's consumer notes captures
+;; the assumption.  tolerate a missing port feature the same way we
+;; tolerate panic.
+(condition-case err
+    (require 'port)
+  (error
+   (message "processes-buffer: require port failed: %S" err)))
+
 ;; cl-position lives in cl-lib.  emacs ships it preloaded most days,
 ;; but byte-compile and -Q without site-load do not, so be explicit.
 (require 'cl-lib)

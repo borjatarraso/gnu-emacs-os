@@ -16,6 +16,7 @@
 ;; nothing that mutates state.
 
 (require 'panic)
+(require 'port)
 (require 'subr-x)
 
 (define-error 'install-disk-error
@@ -167,21 +168,34 @@ function returns nil; the caller can render an empty list and the
 operator will see the disk-pick state is dry, prompting them to
 investigate.  routing through panic-handle (rather than signalling)
 matches the rest of the userland: a parse glitch in sysfs must not
-take the supervisor down."
-  (require 'cl-lib)
-  (condition-case err
-      (mapcar
-       (lambda (name)
-         (list :name name
-               :path (concat "/dev/" name)
-               :size-bytes (install-disk--size-bytes name)
-               :model (install-disk--model name)
-               :removable (install-disk--removable-p name)
-               :mounted (install-disk-mounted-p name)))
-       (install-disk--all-names))
-    (error
-     (panic-handle err 'install-disk-list)
-     nil)))
+take the supervisor down.
+
+Hurd guard: the install wizard is linux-only.  the implementation
+reads /sys/block (no sysfs on hurd) and the wizard's downstream
+steps (mkfs / grub-install i386-pc) also do not port.  per the hurd
+spike work order, install/ is NOT branched; it refuses with a clear
+error.  routed through `geos-port-unimplemented' for the *panic*
+trail and returns nil so the *install* buffer renders an empty
+disk list with a banner."
+  (cond
+   ((not (geos-kernel-linux-p))
+    (geos-port-unimplemented 'install-wizard)
+    nil)
+   (t
+    (require 'cl-lib)
+    (condition-case err
+        (mapcar
+         (lambda (name)
+           (list :name name
+                 :path (concat "/dev/" name)
+                 :size-bytes (install-disk--size-bytes name)
+                 :model (install-disk--model name)
+                 :removable (install-disk--removable-p name)
+                 :mounted (install-disk-mounted-p name)))
+         (install-disk--all-names))
+      (error
+       (panic-handle err 'install-disk-list)
+       nil)))))
 
 (defun install-disk-format-bytes (n)
   "Human-readable rendering of byte count N (integer or nil).

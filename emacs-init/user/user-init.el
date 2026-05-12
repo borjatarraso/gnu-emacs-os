@@ -90,6 +90,13 @@ chain has been loaded by `user-init--load-core')."
 
 (defconst user-init--chain
   '("/etc/geos/core/panic.el"
+    ;; step 2 of the hurd port: kernel-portability seam.  must come
+    ;; after panic.el (port.el requires it) and before anything that
+    ;; branches on `geos-kernel'.  processes-buffer.el later in the
+    ;; chain is the current user-side consumer; future user buffers
+    ;; with kernel-aware data sources will pick up the predicate
+    ;; here without re-ordering the chain.
+    "/etc/geos/core/port.el"
     "/etc/geos/core/rpc-client.el"
     "/etc/geos/core/use-package-shim.el"
     ;; v0.7 item 1.2: the EXWM stack.  multimon / fonts / input come

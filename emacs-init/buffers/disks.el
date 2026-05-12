@@ -27,6 +27,7 @@
 ;; row to "?" rather than poisoning the whole render.
 
 (require 'panic)
+(require 'port)
 
 (defvar disks-buffer-name "*disks*"
   "Name of the canonical disks state buffer.
@@ -228,7 +229,14 @@ isn't, push it to a process-filter pipeline."
 (defun disks-buffer--render ()
   "Repaint the current buffer from /proc and /sys.
 Wrapped in `condition-case' so a parse glitch does not stop the
-timer or kill the buffer."
+timer or kill the buffer.
+
+On non-linux kernels the data sources do not exist: /proc/mounts is
+linux's mount-list surface (hurd has a different one) and /sys/block
+is sysfs (hurd has no sysfs at all).  per the hurd port spike, we
+render a single-line `not implemented' banner on hurd and skip the
+expensive sections entirely.  the render still updates the header
+line so the timer is observably alive."
   (let ((inhibit-read-only t)
         (start-line (line-number-at-pos))
         (start-col (current-column)))
@@ -236,16 +244,25 @@ timer or kill the buffer."
     (setq header-line-format
           (format "*disks*  refreshed %s"
                   (format-time-string "%Y-%m-%d %H:%M:%S")))
-    (condition-case err
-        (let ((mounts (disks-buffer--read-proc-mounts))
-              (devs   (disks-buffer--list-block-devices)))
-          (disks-buffer--render-block-devices devs mounts)
-          (disks-buffer--render-mounts mounts))
-      (error
-       (if (fboundp 'panic-handle)
-           (panic-handle err 'disks-buffer-render)
-         (message "disks-buffer render failed: %S" err))
-       (insert "render failed, see *panic*\n")))
+    (cond
+     ((not (geos-kernel-linux-p))
+      ;; route through panic-handle so a post-mortem can tell whether
+      ;; the user actually opened *disks* on a non-linux kernel.
+      (geos-port-unimplemented 'disks-buffer-render)
+      (insert (format
+               "*disks* is not implemented on kernel %s.\n\nthe disks view reads /proc/mounts and /sys/block, both linux-specific surfaces.  a hurd backend would walk /servers and the libstore translators; that work is tracked under the hurd port effort.\n"
+               geos-kernel)))
+     (t
+      (condition-case err
+          (let ((mounts (disks-buffer--read-proc-mounts))
+                (devs   (disks-buffer--list-block-devices)))
+            (disks-buffer--render-block-devices devs mounts)
+            (disks-buffer--render-mounts mounts))
+        (error
+         (if (fboundp 'panic-handle)
+             (panic-handle err 'disks-buffer-render)
+           (message "disks-buffer render failed: %S" err))
+         (insert "render failed, see *panic*\n")))))
     (goto-char (point-min))
     (forward-line (1- start-line))
     (move-to-column start-col)))

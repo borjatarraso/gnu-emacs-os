@@ -88,6 +88,18 @@
     ;; killing the user-facing emacs.
     (local-file "../emacs-init/core/panic.el" "panic.el"))
 
+(define port-el
+    ;; companion to pid1/port_layer.h on the elisp side.  defines
+    ;; `geos-kernel' (defaults to 'linux until pid1 exports GEOS_KERNEL),
+    ;; predicates `geos-kernel-linux-p' / `geos-kernel-hurd-p', and
+    ;; `geos-port-unimplemented' for buffers whose data source has no
+    ;; equivalent on this kernel.  loaded right after panic.el because
+    ;; every later core/buffer file that branches on kernel needs the
+    ;; predicates available, and panic-handle must already be defined
+    ;; (port.el requires it).  step 2 of the hurd port work order;
+    ;; see docs/v04-item11-hurd-spike.md.
+    (local-file "../emacs-init/core/port.el" "port.el"))
+
 (define cmdline-el
     ;; /proc/cmdline parser shared by boot-marker.el and session.el.
     ;; tiny, no deps beyond what emacs gives us; load early so any
@@ -654,6 +666,7 @@
                                ;; replace that crutch with use-package.
                                "-l" #$early-init-el
                                "-l" #$panic-el
+                               "-l" #$port-el
                                "-l" #$cmdline-el
                                "-l" #$state-el
                                "-l" #$supervise-el
@@ -1049,6 +1062,13 @@
             ;; supervisor's -l chain no longer references these files;
             ;; the user-emacs side does.
             (extra-special-file "/etc/geos/core/panic.el" panic-el)
+            ;; step 2 of the hurd port: the per-user emacs needs the
+            ;; same `geos-kernel' predicate the supervisor uses, since
+            ;; buffers/processes.el (and any future kernel-aware user
+            ;; buffer) load on both sides.  laid down right after
+            ;; panic so user-init--chain can load it in the same
+            ;; relative position the supervisor does.
+            (extra-special-file "/etc/geos/core/port.el" port-el)
             (extra-special-file "/etc/geos/core/use-package-shim.el"
                                 use-package-shim-el)
             ;; v0.6 item 3: rpc-client.el laid down for the per-user

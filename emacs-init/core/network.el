@@ -16,6 +16,7 @@
 ;; dlsym SIOCSIFFLAGS from elisp.
 
 (require 'panic)
+(require 'port)
 (require 'subr-x)
 
 (define-error 'network-error
@@ -190,12 +191,10 @@ handles it but i want the no-empty-trailing behavior consistent
 across emacs versions."
   (split-string line "[ \t]+" t))
 
-(defun network-read-proc-net-dev ()
-  "Parse /proc/net/dev into a list of plists, one per interface.
-Each plist: (:iface STRING :rx-bytes N :rx-packets N :rx-errs N
-:rx-drop N :tx-bytes N :tx-packets N :tx-errs N :tx-drop N).
-Skips the two header lines. Signals `network-error' if a data
-line does not have the expected column count."
+(defun network--read-proc-net-dev-linux ()
+  "Linux backend for `network-read-proc-net-dev'.
+Parses /proc/net/dev directly.  signals `network-error' on a short
+row.  see `network-read-proc-net-dev' for the plist shape."
   (let* ((raw (network--read-file "/proc/net/dev"))
          (lines (split-string raw "\n" t))
          ;; first two lines are the "Inter-|..." and "face |bytes..."
@@ -224,6 +223,30 @@ line does not have the expected column count."
                   out)))))
     (nreverse out)))
 
+(defun network-read-proc-net-dev ()
+  "Parse interface counters into a list of plists, one per interface.
+Each plist: (:iface STRING :rx-bytes N :rx-packets N :rx-errs N
+:rx-drop N :tx-bytes N :tx-packets N :tx-errs N :tx-drop N).
+Dispatches on `geos-kernel': on linux, reads /proc/net/dev; on
+hurd, the equivalent surface is the pfinet translator at
+/servers/socket/2 plus an RPC walk.  hurd backend is not wired
+yet, so the hurd arm routes through `geos-port-unimplemented'
+and returns nil; the *network* buffer renders an empty interface
+table in that case rather than dying.
+
+The function name keeps \"proc-net-dev\" for backward compatibility
+with callers and for self-documenting commit blame; on hurd it is
+a misnomer but renaming everywhere is more churn than it is worth."
+  (cond
+   ((geos-kernel-linux-p)
+    (network--read-proc-net-dev-linux))
+   ((geos-kernel-hurd-p)
+    (geos-port-unimplemented 'network-read-proc-net-dev)
+    nil)
+   (t
+    (geos-port-unimplemented 'network-read-proc-net-dev)
+    nil)))
+
 (defun network--hex-to-ipv4 (hex)
   "Convert kernel little-endian HEX (8 chars) to dotted IPv4 string.
 /proc/net/route gives addresses as 32-bit hex in host (LE on x86)
@@ -245,11 +268,10 @@ and the rest of the routing table still shows up."
                 (string-to-number (substring hex 0 2) 16))
       (error "?"))))
 
-(defun network-read-proc-net-route ()
-  "Parse /proc/net/route into a list of plists.
-Each plist: (:iface STRING :dest STRING :gw STRING :mask STRING
-:flags INT :metric INT). Addresses are converted from kernel hex
-to dotted IPv4. Signals `network-error' on malformed rows."
+(defun network--read-proc-net-route-linux ()
+  "Linux backend for `network-read-proc-net-route'.
+Parses /proc/net/route directly.  see `network-read-proc-net-route'
+for the plist shape."
   (let* ((raw (network--read-file "/proc/net/route"))
          (lines (split-string raw "\n" t))
          (data-lines (cdr lines)) ;; first line is the column header
@@ -265,6 +287,25 @@ to dotted IPv4. Signals `network-error' on malformed rows."
                       :mask   (network--hex-to-ipv4 (nth 7 cols)))
                 out))))
     (nreverse out)))
+
+(defun network-read-proc-net-route ()
+  "Parse the kernel routing table into a list of plists.
+Each plist: (:iface STRING :dest STRING :gw STRING :mask STRING
+:flags INT :metric INT). Addresses are converted from kernel hex
+to dotted IPv4 on linux.
+
+Dispatches on `geos-kernel': linux reads /proc/net/route; hurd's
+equivalent is a pfinet RPC walk and is not wired yet, so the hurd
+arm routes through `geos-port-unimplemented' and returns nil."
+  (cond
+   ((geos-kernel-linux-p)
+    (network--read-proc-net-route-linux))
+   ((geos-kernel-hurd-p)
+    (geos-port-unimplemented 'network-read-proc-net-route)
+    nil)
+   (t
+    (geos-port-unimplemented 'network-read-proc-net-route)
+    nil)))
 
 ;;;; user-facing entry points
 ;;
