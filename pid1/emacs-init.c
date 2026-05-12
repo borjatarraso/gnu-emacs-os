@@ -1272,8 +1272,22 @@ main(int argc, char **argv)
      * port_require_or_abort guard right after this assignment turns a
      * forgotten registration into a loud crash at boot instead of a
      * silent Linux-default fallback that would mask a missing Hurd
-     * backend registration on the side branch. */
+     * backend registration on the side branch.
+     *
+     * the PORT_HURD compile-time switch comes from the Makefile when
+     * the operator runs `make PORT=hurd`.  Linux builds (the default,
+     * and the main branch) keep the existing `port_linux_impl`
+     * assignment; the Hurd side branch's pid1 picks `port_hurd_impl`
+     * by way of -DPORT_HURD on the cc line.  no runtime branch, no
+     * env lookup: the choice is baked at compile time and the binary
+     * carries exactly one backend. */
+#ifdef PORT_HURD
+    port = &port_hurd_impl;
+    setenv("GEOS_KERNEL", "hurd", 1);
+#else
     port = &port_linux_impl;
+    setenv("GEOS_KERNEL", "linux", 1);
+#endif
     port_require_or_abort();
 
     /* build "GEOS_KERNEL=<name>" from the active backend's identity.
@@ -3389,8 +3403,15 @@ emacs_module_init(struct emacs_runtime *ert)
      * once here, and port_require_or_abort() turns a missed
      * assignment into an abort at module-load time rather than a
      * NULL-deref crash on the first pid1-* call from elisp (B2,
-     * skeptic review 2026-05-12). */
+     * skeptic review 2026-05-12).  PORT_HURD is set on the cc line by
+     * `make PORT=hurd module`; the Linux module build (default and
+     * the main branch) sees neither the #ifdef true-arm nor the Hurd
+     * symbol. */
+#ifdef PORT_HURD
+    port = &port_hurd_impl;
+#else
     port = &port_linux_impl;
+#endif
     port_require_or_abort();
 
     /* version sanity: the runtime struct can grow over emacs releases.

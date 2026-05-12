@@ -75,6 +75,7 @@ MODULE_CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
                  -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
                  -fno-strict-aliasing \
                  -fPIC -DPID1_MODULE $(EMACS_MODULE_INC)
+# PORT_DEFS is appended below once the PORT block has set it.
 # libcrypt (libxcrypt) is needed by Fpid1_crypt.  module-only, the
 # standalone PID 1 has no crypt path.  build inside `guix shell
 # gcc-toolchain libxcrypt make` so the resulting .so picks up
@@ -104,17 +105,53 @@ MODULE_LDFLAGS += -Wl,-rpath,$(LIBXCRYPT_STOREPATH)/lib
 endif
 
 # shared sources.  port_layer.h is the kernel-portability seam; the
-# Linux bodies live in port_linux.c.  the Hurd port (side branch)
-# adds port_hurd.c with the same shape and an alternate build line.
-COMMON_SRCS := emacs-init.c port_linux.c
+# Linux bodies live in port_linux.c, the Hurd bodies in port_hurd.c.
+# the PORT variable picks one or the other at build time; the two
+# backends are NEVER linked into the same binary.
+#
+# PORT=linux (default): the Linux backend.  identical to pre-step-4
+# behaviour.  every existing build path (iso-build, dev-vm.sh, the
+# host smoke-test) keeps working with no flag change.
+#
+# PORT=hurd: the Hurd backend.  swaps port_linux.c for port_hurd.c,
+# adds -DPORT_HURD so emacs-init.c picks the &port_hurd_impl symbol
+# (and so port_layer.h reveals the extern declaration), and skips
+# the libcrypt link line (the Hurd module build will need a separate
+# libxcrypt-on-hurd dance, not in step 4).
+#
+# this lives in pid1/Makefile (not in the system.scm gexp) because
+# the choice is a property of the C toolchain, not of the operating-
+# system record: a cross-build of pid1/ for Hurd is what
+# guix-system/system-hurd.scm would invoke before the disk-image
+# build, and that call has to be able to swap PORT cleanly.
+PORT ?= linux
+ifeq ($(PORT),hurd)
+PORT_SRC  := port_hurd.c
+PORT_DEFS := -DPORT_HURD
+else ifeq ($(PORT),linux)
+PORT_SRC  := port_linux.c
+PORT_DEFS :=
+else
+$(error pid1/Makefile: PORT must be linux or hurd, got $(PORT))
+endif
+
+# the per-TU stem (port_linux / port_hurd) drives the .o filenames so
+# a `make PORT=linux` followed by `make PORT=hurd` does not get
+# confused about which backend a stale port_*.boot.o belongs to.
+PORT_STEM := $(basename $(PORT_SRC))
+
+CFLAGS         += $(PORT_DEFS)
+MODULE_CFLAGS  += $(PORT_DEFS)
+
+COMMON_SRCS := emacs-init.c $(PORT_SRC)
 COMMON_HDRS := port_layer.h
 
 # per-TU object files.  the boot and module builds need distinct
 # names because the module build adds -DPID1_MODULE -fPIC and uses
 # its own CFLAGS; sharing a single .o between the two would silently
 # pick whichever was built last (W4, skeptic review 2026-05-12).
-BOOT_OBJS   := emacs-init.boot.o port_linux.boot.o
-MODULE_OBJS := emacs-init.mod.o port_linux.mod.o
+BOOT_OBJS   := emacs-init.boot.o $(PORT_STEM).boot.o
+MODULE_OBJS := emacs-init.mod.o $(PORT_STEM).mod.o
 
 .PHONY: all default module clean install
 
