@@ -196,6 +196,51 @@ a missing file is success; only an explicit delete failure returns nil."
            (panic-handle err `(state-delete . ,key)))
          nil))))))
 
+(defun state-append-journal (filename line)
+  "Append LINE plus a newline to /var/emacs/journal/FILENAME.
+returns t on success, nil on failure.  FILENAME is the bare basename
+(\"auth.log\", \"boot.log\"); the journal/ prefix is added here so a
+caller cannot accidentally write to /var/emacs/state.sexp.
+
+unlike `state-write' this does NOT rewrite-then-rename: it opens the
+file in append mode and appends one record.  the supervisor is the
+only writer to /var/emacs/journal/* so we do not need flock; a future
+multi-writer story (per-user emacs writes its own audit lines via
+RPC) lands here behind a pid1-flock primitive.
+
+LINE should be a printable elisp object (we prin1 it) so a reader
+can `read' the file line by line and recover the structured shape.
+embedded newlines in LINE break that contract; the helper does not
+attempt to escape them.  callers building audit records (login.el)
+emit alists whose values are short atoms, so this is safe in
+practice."
+  (cond
+   ((not (and (stringp filename)
+              (not (string-empty-p filename))
+              (not (string-match-p "/" filename))))
+    (when (fboundp 'panic-handle)
+      (panic-handle (list 'state-append-journal-bad-name filename)
+                    'state-append-journal))
+    nil)
+   (t
+    (condition-case err
+        (let* ((dir (concat state-root "journal/"))
+               (path (concat dir filename))
+               (print-length nil)
+               (print-level nil)
+               (write-region-inhibit-fsync nil)
+               (coding-system-for-write 'utf-8)
+               (rendered (with-output-to-string (prin1 line))))
+          (state--ensure-dir dir)
+          (write-region (concat rendered "\n") nil path 'append 'nomsg)
+          (when (fboundp 'pid1-fsync-dir)
+            (condition-case _ (pid1-fsync-dir dir) (error nil)))
+          t)
+      (error
+       (when (fboundp 'panic-handle)
+         (panic-handle err `(state-append-journal . ,filename)))
+       nil)))))
+
 (defun state-mode-string ()
   "Return a short string for header lines: \"persistent\", \"tmpfs\", \"none\"."
   (pcase state-mode

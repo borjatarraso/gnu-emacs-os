@@ -171,6 +171,13 @@
 ;;     home dir entirely would still PASS the boot gate.  this test
 ;;     closes that gap.  test 12 records under 'users-buffer-add.
 ;;
+;;  13. login audit log (v0.6 item 5, audit slice)
+;;     drives `state-append-journal' on a sentinel journal file and
+;;     asserts two appends land as two parseable sexp lines with the
+;;     expected :result and :reason values.  pins the line-per-record
+;;     contract that the *journal* buffer's later tailing logic will
+;;     depend on.  records under 'login-audit.
+;;
 ;; reporting: each test pushes a result alist into `freeze-test-results'.
 ;; (freeze-test-report) prints a per-test PASS/FAIL summary to *Messages*
 ;; and to /dev/console (when boot-marker--write is available, so the
@@ -1926,6 +1933,85 @@ prior failed run leaving a stale row."
     (freeze-test--record 'users-buffer-add result)))
 
 ;; --------------------------------------------------------------------
+;; test 14: login audit log (v0.6 item 5, audit slice)
+;; --------------------------------------------------------------------
+
+(defun freeze-test-login-audit ()
+  "Assert `state-append-journal' writes parseable sexp lines.
+v0.6 item 5 (audit slice): every login attempt should leave a
+record under /var/emacs/journal/auth.log; the *journal* buffer
+will tail that file in a later slice.
+
+drives `state-append-journal' directly on a sentinel journal file
+(not auth.log, so a real running audit trail is not perturbed),
+asserts the file grows, every line parses as an alist with `result',
+and the cleanup deletes only what the test wrote.
+
+failure modes worth catching:
+  - state-append-journal returns t but writes empty
+  - the file ends without a trailing newline so the last line is
+    lost on the next append
+  - prin1 truncates a long alist (print-length / print-level not nil)
+  - cleanup deletes the real auth.log because the helper accepted
+    \"../auth.log\" as a basename"
+  (interactive)
+  (let* ((result 'fail)
+         (suffix (format "%06d" (random 1000000)))
+         (filename (concat "freeze-audit-" suffix ".log"))
+         (path (concat state-root "journal/" filename))
+         (rec-ok (list (cons 'time "2026-05-12T13:00:00Z")
+                       (cons 'user "freeze-tester")
+                       (cons 'result :ok)))
+         (rec-fail (list (cons 'time "2026-05-12T13:00:01Z")
+                         (cons 'user "freeze-tester")
+                         (cons 'result :fail)
+                         (cons 'reason :wrong-password))))
+    (unwind-protect
+        (condition-case err
+            (cond
+             ((not (fboundp 'state-append-journal))
+              (setq result "state-append-journal unbound"))
+             ((not (state-append-journal filename rec-ok))
+              (setq result "first append returned nil"))
+             ((not (state-append-journal filename rec-fail))
+              (setq result "second append returned nil"))
+             ((not (file-readable-p path))
+              (setq result (format "file not readable: %s" path)))
+             (t
+              (let* ((lines
+                      (with-temp-buffer
+                        (insert-file-contents path)
+                        (split-string (buffer-string) "\n" t)))
+                     (parsed
+                      (mapcar (lambda (l)
+                                (condition-case _
+                                    (car (read-from-string l))
+                                  (error :parse-error)))
+                              lines)))
+                (setq result
+                      (cond
+                       ((/= (length parsed) 2)
+                        (format "expected 2 lines, got %d" (length parsed)))
+                       ((cl-some (lambda (p) (eq p :parse-error)) parsed)
+                        "at least one line failed to parse")
+                       ((not (equal (cdr (assq 'result (car parsed))) :ok))
+                        "first record's :result is not :ok")
+                       ((not (equal (cdr (assq 'result (cadr parsed))) :fail))
+                        "second record's :result is not :fail")
+                       ((not (equal (cdr (assq 'reason (cadr parsed)))
+                                    :wrong-password))
+                        "second record's :reason is not :wrong-password")
+                       (t 'pass))))))
+          (error
+           (panic-handle err 'freeze-test-login-audit)
+           (setq result (format "raised: %S" err))))
+      (condition-case _
+          (when (file-exists-p path)
+            (delete-file path))
+        (error nil)))
+    (freeze-test--record 'login-audit result)))
+
+;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
 
@@ -1949,6 +2035,7 @@ prior failed run leaving a stale row."
   (freeze-test-workspace-routing)
   (freeze-test-child-exit-poller)
   (freeze-test-users-buffer-add)
+  (freeze-test-login-audit)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

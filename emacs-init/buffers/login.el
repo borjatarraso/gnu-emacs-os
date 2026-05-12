@@ -40,6 +40,7 @@
 (require 'panic)
 (require 'passwd)
 (require 'session)
+(require 'state)
 
 (defvar login-buffer-name "*login*"
   "Canonical name of the login state-machine buffer.")
@@ -98,6 +99,35 @@ also trims `login--bad-attempts' to the window as a side effect."
 (defun login--note-bad-attempt ()
   "Record a bad-credential timestamp."
   (push (float-time) login--bad-attempts))
+
+;; --------------------------------------------------------------------
+;; audit log
+;; --------------------------------------------------------------------
+
+(defconst login--audit-file "auth.log"
+  "Basename under /var/emacs/journal/ where login attempts are appended.
+one sexp per line.  alist shape:
+  ((time . \"2026-05-12T13:00:00Z\") (user . \"tester\") (result . :ok))
+or
+  ((time . ...) (user . ...) (result . :fail) (reason . :wrong-password))
+on a tmpfs root the file vanishes on reboot.  the *journal* buffer
+shows `state: tmpfs' in its header so the operator knows the audit
+trail is volatile.")
+
+(defun login--audit-record (user result &optional reason)
+  "Append one audit record for USER with RESULT to the auth log.
+RESULT is :ok or :fail.  REASON, when supplied, is a keyword like
+:wrong-password, :throttled, :unknown-user, :spawn-failed."
+  (let* ((ts (format-time-string "%Y-%m-%dT%H:%M:%SZ" nil t))
+         (rec (append (list (cons 'time ts)
+                            (cons 'user (or user "?"))
+                            (cons 'result result))
+                      (and reason (list (cons 'reason reason))))))
+    (condition-case err
+        (state-append-journal login--audit-file rec)
+      (error
+       (panic-handle err 'login--audit-record)
+       nil))))
 
 ;; --------------------------------------------------------------------
 ;; render
@@ -279,9 +309,12 @@ function; clears it before returning regardless of outcome."
     ;; we have already dropped the plaintext.
     (setq login--password nil)
     (cond
-     (ok (login--enter-spawning))
+     (ok
+      (login--audit-record name :ok)
+      (login--enter-spawning))
      (t
       (login--note-bad-attempt)
+      (login--audit-record name :fail :wrong-password)
       (setq login--state :failed)
       (login--repaint)))))
 
@@ -293,6 +326,7 @@ function; clears it before returning regardless of outcome."
       (let ((sess (session-spawn login--user)))
         (cond
          ((null sess)
+          (login--audit-record login--user :fail :spawn-failed)
           (setq login--last-error
                 (or (and (boundp 'session--last-spawn-error)
                          session--last-spawn-error)
@@ -305,6 +339,7 @@ function; clears it before returning regardless of outcome."
           (login--repaint))))
     (error
      (panic-handle err (cons 'login--enter-spawning login--user))
+     (login--audit-record login--user :fail :spawn-raised)
      (setq login--last-error err
            login--state :error)
      (login--repaint))))
@@ -329,6 +364,7 @@ function; clears it before returning regardless of outcome."
     (:prompt-password
      (cond
       ((login--throttle-trips-p)
+       (login--audit-record login--user :fail :throttled)
        (setq login--state :failed)
        (login--repaint))
       (t
