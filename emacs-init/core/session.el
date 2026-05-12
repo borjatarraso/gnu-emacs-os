@@ -220,6 +220,63 @@ used by the *users* buffer's per-row login column."
         (cl-incf n)))
     n))
 
+(defconst session-max-workspaces 3
+  "Cap on the number of concurrent per-user workspaces.
+workspace 0 is reserved for the supervisor's *login* surface;
+1..session-max-workspaces are handed out to per-user emacses, one
+per logged-in user.  this cap matches the v0.6 plan's 3-user
+default; raising it is a one-liner here, but the EXWM workspace
+pool may need to be grown to match.
+
+a fourth concurrent login is refused at allocation time: the
+caller gets nil, the spawn proceeds without a workspace
+assignment, and the per-user window lands wherever EXWM places
+it (usually workspace 0, on top of *login*).  that is ugly but
+not data-destructive; the operator is meant to log somebody out
+before adding another user.")
+
+(defun session-allocate-workspace (name)
+  "Pick the EXWM workspace index that NAME should occupy.
+sticky across logout / login: if NAME's existing record carries a
+:workspace that is in range and is not currently held by another
+'running or 'starting session, return that.  otherwise walk
+1..`session-max-workspaces' and return the lowest index not held
+by any other 'running or 'starting session.  returns nil when all
+slots are taken; the caller spawns without a workspace stamp and
+lets EXWM place the window.
+
+deliberately does NOT mutate the registry: the caller stamps the
+returned index onto the session record via setf, then persists.
+this keeps the function safe to call from a probe path (e.g. a
+*users* row asking 'where would this user land')."
+  (let* ((sess (gethash name session--registry))
+         (preferred (and sess (geos-session-workspace sess)))
+         (taken
+          (let (acc)
+            (maphash
+             (lambda (k v)
+               (when (and (not (and (stringp k) (string= k name)))
+                          (memq (geos-session-status v)
+                                '(starting running))
+                          (integerp (geos-session-workspace v)))
+                 (push (geos-session-workspace v) acc)))
+             session--registry)
+            acc)))
+    (cond
+     ((and (integerp preferred)
+           (>= preferred 1)
+           (<= preferred session-max-workspaces)
+           (not (memql preferred taken)))
+      preferred)
+     (t
+      (let ((idx 1)
+            (found nil))
+        (while (and (not found) (<= idx session-max-workspaces))
+          (unless (memql idx taken)
+            (setq found idx))
+          (cl-incf idx))
+        found)))))
+
 (defun session-workspace-for-name (name)
   "Return the EXWM workspace index recorded for NAME, or nil.
 nil means either the user is not in the registry or the EXWM
@@ -559,6 +616,22 @@ steps:
               (setf (geos-session-status sess) 'starting)
               (puthash name sess session--registry)
               (session--register-with-supervise sess)
+              ;; v0.6 item 6.3: claim the workspace BEFORE the child
+              ;; spawns.  the EXWM manage-finish hook (in exwm-config)
+              ;; then reads `session-workspace-for-name' and routes the
+              ;; new window to the pre-claimed index instead of running
+              ;; its own allocator.  sticky semantics: a logout-then-
+              ;; relogin reuses the prior index when free.
+              ;;
+              ;; allocation can return nil (all slots taken).  on nil we
+              ;; let the workspace slot stay as whatever rehydrate left
+              ;; it (likely nil); the EXWM hook falls through to its
+              ;; legacy allocator and the window lands wherever it can.
+              ;; the user sees an over-the-top window on top of *login*;
+              ;; ugly, not data-destructive.  see session-max-workspaces.
+              (let ((ws (session-allocate-workspace name)))
+                (when (integerp ws)
+                  (setf (geos-session-workspace sess) ws)))
               (session--persist sess)
               (cond
                ((session--spawn-child sess)

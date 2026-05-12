@@ -2467,6 +2467,132 @@ not leave snapshot files behind."
             login--last-error saved-err))
     (freeze-test--record 'multi-session-ui result)))
 
+(defun freeze-test-session-workspace-allocator ()
+  "Pin the v0.6 item 6.3 `session-allocate-workspace' contract.
+covers four shapes:
+  - empty registry: NAME with no record allocates index 1.
+  - sticky reuse: a record with workspace=2 reallocates to 2 when
+    free, even if 1 is also free.
+  - skip-taken: when one 'running session occupies ws=1, the next
+    NAME allocates ws=2 (never ws=1).
+  - cap-saturated: with N running sessions occupying 1..N where
+    N=`session-max-workspaces', a new NAME allocates nil and the
+    caller is expected to spawn without a workspace stamp.
+
+held + exited records do NOT count as occupied: a logged-out user
+must free up its workspace for the next login.
+
+cleanup: removes the sentinel sessions on every exit path.  does
+not touch disk (the allocator is in-memory only)."
+  (interactive)
+  (let* ((result 'fail)
+         (mk (lambda (i) (format "geos-freeze-alloc-%d-%06d"
+                                 i (random 1000000))))
+         (a (funcall mk 1))
+         (b (funcall mk 2))
+         (c (funcall mk 3))
+         (d (funcall mk 4))
+         (sav-a (and (boundp 'session--registry)
+                     (gethash a session--registry)))
+         (sav-b (and (boundp 'session--registry)
+                     (gethash b session--registry)))
+         (sav-c (and (boundp 'session--registry)
+                     (gethash c session--registry)))
+         (sav-d (and (boundp 'session--registry)
+                     (gethash d session--registry))))
+    (unwind-protect
+        (condition-case err
+            (cond
+             ((not (and (fboundp 'session-allocate-workspace)
+                        (boundp 'session-max-workspaces)
+                        (fboundp 'make-geos-session)
+                        (boundp 'session--registry)))
+              (setq result "allocator primitives unbound"))
+             (t
+              (clrhash session--registry)
+              (let ((empty (session-allocate-workspace a)))
+                (cond
+                 ((not (eql empty 1))
+                  (setq result
+                        (format "empty-registry alloc = %S, want 1"
+                                empty)))
+                 (t
+                  ;; sticky: pre-stamp a record with workspace=2
+                  ;; (no other session running), reallocate and
+                  ;; expect 2 back even though 1 is free.
+                  (puthash b
+                           (make-geos-session
+                            :name b :uid 50020 :gid 50020
+                            :home "/tmp"
+                            :supervise-key (intern (concat "session:" b))
+                            :workspace 2
+                            :status 'starting)
+                           session--registry)
+                  (let ((sticky (session-allocate-workspace b)))
+                    (cond
+                     ((not (eql sticky 2))
+                      (setq result
+                            (format "sticky alloc = %S, want 2"
+                                    sticky)))
+                     (t
+                      ;; skip-taken: with b 'starting on ws=2 and
+                      ;; a NEW name allocating, expect ws=1.
+                      (let ((skip (session-allocate-workspace c)))
+                        (cond
+                         ((not (eql skip 1))
+                          (setq result
+                                (format "skip-taken alloc = %S, want 1"
+                                        skip)))
+                         (t
+                          ;; cap-saturated: fill all slots with
+                          ;; 'running entries, expect nil.
+                          (clrhash session--registry)
+                          (let ((i 1))
+                            (dolist (nm (list a b c))
+                              (puthash nm
+                                       (make-geos-session
+                                        :name nm :uid (+ 50020 i)
+                                        :gid (+ 50020 i)
+                                        :home "/tmp"
+                                        :supervise-key
+                                        (intern (concat "session:" nm))
+                                        :workspace i
+                                        :status 'running)
+                                       session--registry)
+                              (cl-incf i)))
+                          (let ((sat (session-allocate-workspace d)))
+                            (cond
+                             ((not (null sat))
+                              (setq result
+                                    (format "saturated alloc = %S, want nil"
+                                            sat)))
+                             (t
+                              ;; one of the sessions logs out
+                              ;; (status flips to 'held).  its
+                              ;; slot should now be free for d.
+                              (setf (geos-session-status
+                                     (gethash b session--registry))
+                                    'held)
+                              (let ((reuse (session-allocate-workspace d)))
+                                (cond
+                                 ((not (eql reuse 2))
+                                  (setq result
+                                        (format "post-logout alloc = %S, want 2"
+                                                reuse)))
+                                 (t
+                                  (setq result 'pass))))))))))))))))))
+          (error
+           (panic-handle err 'freeze-test-session-workspace-allocator)
+           (setq result (format "raised: %S" err))))
+      ;; cleanup.
+      (when (boundp 'session--registry)
+        (dolist (pair (list (cons a sav-a) (cons b sav-b)
+                            (cons c sav-c) (cons d sav-d)))
+          (cond
+           ((cdr pair) (puthash (car pair) (cdr pair) session--registry))
+           (t (remhash (car pair) session--registry))))))
+    (freeze-test--record 'session-workspace-allocator result)))
+
 ;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
@@ -2496,6 +2622,7 @@ not leave snapshot files behind."
   (freeze-test-login-last-success)
   (freeze-test-session-workspace)
   (freeze-test-multi-session-ui)
+  (freeze-test-session-workspace-allocator)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

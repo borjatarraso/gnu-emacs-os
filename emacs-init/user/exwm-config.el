@@ -272,7 +272,21 @@ session.el present."
                  "\\`geos-user-\\([a-zA-Z0-9_-]+\\)\\'"
                  exwm-instance-name)
             (let* ((name (match-string 1 exwm-instance-name))
-                   (idx (exwm-config--user-workspace-for name)))
+                   ;; v0.6 item 6.3: session.el is now authoritative
+                   ;; on workspace allocation.  `session-spawn' picks
+                   ;; the index BEFORE pid1-spawn-as-uid and stamps
+                   ;; the record; here we just read it back.  the
+                   ;; legacy local allocator (`exwm-config--user-
+                   ;; workspace-for') remains the fallback for an
+                   ;; unregistered window: a spoofed instance-name
+                   ;; with no matching session record still gets
+                   ;; routed, just without the supervisor's blessing.
+                   ;; the breadcrumb on the unknown-user path stays.
+                   (session-idx
+                    (and (fboundp 'session-workspace-for-name)
+                         (session-workspace-for-name name)))
+                   (idx (or session-idx
+                            (exwm-config--user-workspace-for name))))
               ;; W1 audit: log unknown-user breadcrumbs but do not
               ;; block the move. session-get returns nil for an
               ;; unregistered name; an attacker who guesses a valid
@@ -281,6 +295,19 @@ session.el present."
                 (unless (session-get name)
                   (panic-handle (list 'exwm-route-unknown-user name)
                                 'exwm-config--maybe-route-user-window)))
+              ;; if session.el picked the index, make sure the EXWM
+              ;; pool has actually grown to cover it.  the supervisor
+              ;; allocation is symbolic; the live workspace list still
+              ;; has to exist before `exwm-workspace-move-window'.
+              ;; reuse the bounded grow loop from the legacy allocator
+              ;; by piping the index through it as a cache hint: the
+              ;; function returns the same index if already cached or
+              ;; in range, otherwise grows the pool.
+              (when (and session-idx
+                         (boundp 'exwm-workspace--list)
+                         (>= session-idx (length exwm-workspace--list)))
+                (puthash name session-idx exwm-config--user-workspace)
+                (exwm-config--user-workspace-for name))
               (when (and idx (fboundp 'exwm-workspace-move-window))
                 ;; pass exwm--id explicitly. without it,
                 ;; exwm-workspace-move-window resolves the "current
@@ -296,11 +323,13 @@ session.el present."
                 (exwm-workspace-move-window idx exwm--id)
                 ;; v0.6 item 6.1: tell session.el where this user
                 ;; actually landed so the supervisor knows the
-                ;; workspace occupancy.  noop when session.el is
-                ;; not loaded (a stripped image) or when NAME has
-                ;; no registry entry (the unknown-user breadcrumb
-                ;; above already covers that case).
-                (when (fboundp 'session-record-workspace)
+                ;; workspace occupancy.  v0.6 item 6.3 made session.el
+                ;; the primary source; only stamp here when the index
+                ;; came from the local fallback allocator, so we still
+                ;; persist a record for a recovery path that had no
+                ;; pre-spawn workspace stamp.
+                (when (and (null session-idx)
+                           (fboundp 'session-record-workspace))
                   (condition-case err
                       (session-record-workspace name idx)
                     (error
