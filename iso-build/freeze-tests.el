@@ -3189,6 +3189,256 @@ up the shadow correctly."
        (setq result (format "raised: %S" err))))
     (freeze-test--record 'rpc-services-list result)))
 
+;; --------------------------------------------------------------------
+;; test: port-hurd seam (v0.7 / hurd-spike step 2, df7fb92)
+;; --------------------------------------------------------------------
+;;
+;; the elisp port seam (`emacs-init/core/port.el') landed with adapter
+;; branches in network.el, state.el, disks.el, install/disk.el.  the
+;; linux arm is exercised on every boot; the hurd arm is reached by no
+;; code that runs in CI today, so a refactor of the linux arm can
+;; silently flatten the hurd arm and no smoke test would notice.
+;;
+;; this test shadows `geos-kernel' to 'hurd via `let' (the predicates
+;; `geos-kernel-linux-p' / `geos-kernel-hurd-p' read it dynamically, so
+;; a let-binding is sufficient; no `cl-letf' on the predicates needed).
+;; the assertions:
+;;
+;;   port/unimplemented-route
+;;     `geos-port-unimplemented' itself returns nil and the panic
+;;     buffer grows.  this is the contract every adapter relies on:
+;;     a missing kernel surface must not signal up the stack.
+;;
+;;   port/network-dev-nil
+;;     `network-read-proc-net-dev' returns nil on hurd.  the linux
+;;     arm goes through `network--read-proc-net-dev-linux'; the hurd
+;;     arm routes through `geos-port-unimplemented' and returns nil.
+;;
+;;   port/network-route-nil
+;;     `network-read-proc-net-route' returns nil on hurd, same shape.
+;;
+;;   port/state-detect-mode-safe
+;;     `state--detect-mode' returns one of 'tmpfs, nil on hurd, and
+;;     does NOT signal.  the writable-probe fallback on hurd may
+;;     resolve either way depending on whether state-root exists on
+;;     the booted image; both are documented degraded modes.  we
+;;     save/restore `state-mode' because the function mutates it.
+;;
+;;   port/disks-render-no-sysblock
+;;     `disks-buffer--render' on hurd writes a banner and skips the
+;;     /sys/block enumeration.  asserts the buffer contents do NOT
+;;     contain "block devices" (the linux arm's section header) so
+;;     we know the linux path did not run.  the banner text itself
+;;     is a render-layer concern; we check for "not implemented" as
+;;     the cheap-and-cheerful signal that the hurd arm was taken.
+;;
+;;   port/install-disk-list-nil-and-panic
+;;     `install-disk-list' returns nil on hurd AND the panic buffer
+;;     records a `port-unimplemented' entry tagged with the feature
+;;     `install-wizard'.  this is the more telling half: a regression
+;;     that drops the panic-handle call would leave the wizard
+;;     silently returning nil with no audit trail.
+
+(defun freeze-test-port-hurd ()
+  "Pin df7fb92: the GEOS_KERNEL=hurd code paths in the elisp port seam.
+shadows `geos-kernel' to 'hurd and asserts every adapter branch point
+(`network-read-proc-net-{dev,route}', `state--detect-mode',
+`disks-buffer--render', `install-disk-list', `geos-port-unimplemented'
+itself) behaves as documented in `emacs-init/core/port.el'.
+
+real-world failure mode being caught: a refactor of the linux arm
+silently flattens or removes the hurd arm.  nothing in CI runs the
+hurd arm today, so without this test that regression would not
+surface until the side-branch port attempts to boot."
+  (interactive)
+  (require 'port nil 'noerror)
+  (require 'disks-buffer nil 'noerror)
+  (require 'install-disk nil 'noerror)
+  ;; network is already a hard require from earlier in the boot.
+  (let ((sav-state-mode (and (boundp 'state-mode) state-mode)))
+    (unwind-protect
+        (cond
+         ((not (and (boundp 'geos-kernel)
+                    (fboundp 'geos-kernel-hurd-p)
+                    (fboundp 'geos-port-unimplemented)))
+          (freeze-test--record 'port/unimplemented-route
+                               "port.el not loaded")
+          (freeze-test--record 'port/network-dev-nil
+                               "port.el not loaded")
+          (freeze-test--record 'port/network-route-nil
+                               "port.el not loaded")
+          (freeze-test--record 'port/state-detect-mode-safe
+                               "port.el not loaded")
+          (freeze-test--record 'port/disks-render-no-sysblock
+                               "port.el not loaded")
+          (freeze-test--record 'port/install-disk-list-nil-and-panic
+                               "port.el not loaded"))
+         (t
+          (freeze-test--port-unimplemented-route)
+          (freeze-test--port-network-dev-nil)
+          (freeze-test--port-network-route-nil)
+          (freeze-test--port-state-detect-mode-safe)
+          (freeze-test--port-disks-render-no-sysblock)
+          (freeze-test--port-install-disk-list-nil-and-panic)))
+      ;; never leave state-mode mutated; state--detect-mode setq's it
+      ;; as a side effect and a hurd-arm run would otherwise leave the
+      ;; rest of the suite seeing the hurd answer.
+      (when (boundp 'state-mode)
+        (setq state-mode sav-state-mode)))))
+
+(defun freeze-test--port-unimplemented-route ()
+  "Sub-check: `geos-port-unimplemented' returns nil and grows *panic*.
+this is the bedrock; every adapter depends on it not signalling."
+  (let ((result 'fail))
+    (condition-case err
+        (let* ((buf (panic--get-buffer))
+               (before (with-current-buffer buf (buffer-size)))
+               (rv (let ((geos-kernel 'hurd))
+                     (geos-port-unimplemented 'freeze-test-probe)))
+               (after (with-current-buffer buf (buffer-size))))
+          (cond
+           ((not (null rv))
+            (setq result (format "returned %S, want nil" rv)))
+           ((not (> after before))
+            (setq result (format "panic buffer did not grow: %d -> %d"
+                                 before after)))
+           (t (setq result 'pass))))
+      (error
+       (panic-handle err 'freeze-test--port-unimplemented-route)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/unimplemented-route result)))
+
+(defun freeze-test--port-network-dev-nil ()
+  "Sub-check: `network-read-proc-net-dev' returns nil on hurd."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'network-read-proc-net-dev))
+          (setq result "network-read-proc-net-dev unbound"))
+         (t
+          (let ((got (let ((geos-kernel 'hurd))
+                       (network-read-proc-net-dev))))
+            (setq result
+                  (if (null got)
+                      'pass
+                    (format "returned %S, want nil" got))))))
+      (error
+       (panic-handle err 'freeze-test--port-network-dev-nil)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/network-dev-nil result)))
+
+(defun freeze-test--port-network-route-nil ()
+  "Sub-check: `network-read-proc-net-route' returns nil on hurd."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'network-read-proc-net-route))
+          (setq result "network-read-proc-net-route unbound"))
+         (t
+          (let ((got (let ((geos-kernel 'hurd))
+                       (network-read-proc-net-route))))
+            (setq result
+                  (if (null got)
+                      'pass
+                    (format "returned %S, want nil" got))))))
+      (error
+       (panic-handle err 'freeze-test--port-network-route-nil)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/network-route-nil result)))
+
+(defun freeze-test--port-state-detect-mode-safe ()
+  "Sub-check: `state--detect-mode' returns 'tmpfs or nil on hurd.
+must NOT signal; the writable-probe fallback decides which of the two
+based on whether state-root exists on the running image, and both are
+documented degraded modes."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'state--detect-mode))
+          (setq result "state--detect-mode unbound"))
+         (t
+          (let ((got (let ((geos-kernel 'hurd))
+                       (state--detect-mode))))
+            (setq result
+                  (cond
+                   ((memq got '(tmpfs nil)) 'pass)
+                   (t (format "returned %S, want 'tmpfs or nil"
+                              got)))))))
+      (error
+       (panic-handle err 'freeze-test--port-state-detect-mode-safe)
+       (setq result (format "raised: %S (state--detect-mode must not signal on hurd)" err))))
+    (freeze-test--record 'port/state-detect-mode-safe result)))
+
+(defun freeze-test--port-disks-render-no-sysblock ()
+  "Sub-check: `disks-buffer--render' on hurd skips /sys/block.
+asserts the rendered buffer does NOT contain \"block devices\" (the
+linux arm's section header).  also asserts the banner mentions
+\"not implemented\" so we know the hurd arm ran and produced its
+documented output rather than e.g. silently leaving the buffer
+empty.  uses a throwaway buffer; does NOT touch the real *disks*."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'disks-buffer--render))
+          (setq result "disks-buffer--render unbound"))
+         (t
+          (with-temp-buffer
+            (let ((geos-kernel 'hurd))
+              (disks-buffer--render))
+            (let ((body (buffer-string)))
+              (cond
+               ((string-match-p "block devices" body)
+                (setq result
+                      "linux section header 'block devices' present in hurd render"))
+               ((not (string-match-p "not implemented" body))
+                (setq result
+                      (format "banner missing 'not implemented'; got: %s"
+                              (substring body 0 (min 80 (length body))))))
+               (t (setq result 'pass)))))))
+      (error
+       (panic-handle err 'freeze-test--port-disks-render-no-sysblock)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/disks-render-no-sysblock result)))
+
+(defun freeze-test--port-install-disk-list-nil-and-panic ()
+  "Sub-check: `install-disk-list' on hurd returns nil AND panics.
+the more telling half is the panic record: a regression that drops
+the `geos-port-unimplemented' call would leave the wizard returning
+nil silently with no audit trail.  asserts both halves: return value
+nil, and the *panic* buffer grew with a record mentioning the
+`install-wizard' feature tag."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'install-disk-list))
+          (setq result "install-disk-list unbound"))
+         (t
+          (let* ((buf (panic--get-buffer))
+                 (before (with-current-buffer buf (buffer-size)))
+                 (rv (let ((geos-kernel 'hurd))
+                       (install-disk-list)))
+                 (after (with-current-buffer buf (buffer-size)))
+                 (delta (with-current-buffer buf
+                          (buffer-substring-no-properties
+                           (1+ before) (point-max)))))
+            (cond
+             ((not (null rv))
+              (setq result (format "returned %S, want nil" rv)))
+             ((not (> after before))
+              (setq result
+                    (format "panic buffer did not grow: %d -> %d"
+                            before after)))
+             ((not (string-match-p "install-wizard" delta))
+              (setq result
+                    (format "new panic entry lacks 'install-wizard' tag: %s"
+                            (substring delta 0
+                                       (min 120 (length delta))))))
+             (t (setq result 'pass))))))
+      (error
+       (panic-handle err 'freeze-test--port-install-disk-list-nil-and-panic)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/install-disk-list-nil-and-panic result)))
+
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.
 two simulated 'running sessions, A on workspace 1 and B on
@@ -3355,6 +3605,7 @@ back via state-read to confirm the persist landed."
   (freeze-test-rpc-services-list)
   (freeze-test-services-client-render)
   (freeze-test-journal-client-render)
+  (freeze-test-port-hurd)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
