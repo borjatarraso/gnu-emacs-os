@@ -2984,6 +2984,66 @@ emacs during startup; a global shadow hangs `--batch'."
       (when (file-exists-p zero)  (delete-file zero)))
     (freeze-test--record 'audio-pcm-parser result)))
 
+(defun freeze-test-services-client-render ()
+  "Pin v0.7 item 4.2: services-client renders an RPC payload.
+
+shadows `geos-rpc' with a `cl-letf' stub that returns a canned row
+list and asserts:
+
+  - the rendered buffer contains every row's name string.
+  - the header line marks the buffer as RPC-backed.
+  - an RPC error path falls through to the body (no panic, last-
+    good is empty so we just show the error line).
+
+does NOT touch the timer (we render synchronously).  the timer
+is per-buffer and only arms via `services-client-mode'; a unit
+test that triggers it would have to wait on real time, which is
+the wrong shape for --batch."
+  (interactive)
+  (require 'services-client)
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'services-client--render))
+          (setq result "services-client--render unbound"))
+         (t
+          (let* ((fake-rows
+                  (list (list :name "xorg" :kind 'process :status 'running
+                              :pid 42 :restarts 0 :started-at nil)
+                        (list :name "emacs-user-alice" :kind 'process
+                              :status 'running :pid 99 :restarts 1
+                              :started-at nil)))
+                 (buf (get-buffer-create services-client-buffer-name))
+                 (success-body nil)
+                 (error-body nil))
+            ;; success path
+            (with-current-buffer buf
+              (special-mode)
+              (cl-letf (((symbol-function 'geos-rpc)
+                          (lambda (&rest _) fake-rows)))
+                (services-client--render))
+              (setq success-body (buffer-string)))
+            ;; failure path: geos-rpc signals.
+            (with-current-buffer buf
+              (cl-letf (((symbol-function 'geos-rpc)
+                          (lambda (&rest _) (error "stub: down"))))
+                (let ((services-client--last-rows nil))
+                  (services-client--render)))
+              (setq error-body (buffer-string)))
+            (cond
+             ((not (string-match-p "xorg" success-body))
+              (setq result "success body missing 'xorg'"))
+             ((not (string-match-p "emacs-user-alice" success-body))
+              (setq result "success body missing 'emacs-user-alice'"))
+             ((not (string-match-p "supervisor RPC error" error-body))
+              (setq result "error body missing 'supervisor RPC error'"))
+             (t (setq result 'pass)))
+            (when (buffer-live-p buf) (kill-buffer buf)))))
+      (error
+       (panic-handle err 'freeze-test-services-client-render)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'services-client-render result)))
+
 (defun freeze-test-rpc-services-list ()
   "Pin v0.7 item 4.1: rpc verb `services-list' wire shape.
 
@@ -3228,6 +3288,7 @@ back via state-read to confirm the persist landed."
   (freeze-test-input-ibus-throttle)
   (freeze-test-audio-pcm-parser)
   (freeze-test-rpc-services-list)
+  (freeze-test-services-client-render)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

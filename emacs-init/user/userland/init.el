@@ -39,12 +39,18 @@ raise during boot."
     userland-chat
     userland-notes
     userland-pdf
-    userland-audio)
+    userland-audio
+    services-client)
   "Ordered list of userland feature symbols that should be loaded.
 Each one corresponds to a file in this directory: e.g.
 `userland-files' lives in files.el. The boot gexp -l's each one
 before this init.el runs; this list is just the manifest we use
-to confirm that happened.")
+to confirm that happened.
+
+v0.7 item 4.2 added `services-client' (the user-side *services*
+buffer over RPC).  the file's `provide' uses the unprefixed name
+`services-client', not `userland-services-client', so the
+manifest entry tracks that shape.")
 
 (defun userland--verify-one (feature)
   "Confirm FEATURE is provided. Log via `panic-handle' if not.

@@ -115,6 +115,10 @@ chain has been loaded by `user-init--load-core')."
     ;; buffers/audio.el (require)s userland-audio at load time, so it
     ;; MUST come after userland/audio.el.
     "/etc/geos/user/audio-buffer.el"
+    ;; v0.7 item 4.2: the user-side *services* view.  fetches the
+    ;; supervisor's registry over the v0.6 RPC channel; MUST come
+    ;; after rpc-client (which is loaded at the head of the chain).
+    "/etc/geos/user/userland/services-client.el"
     "/etc/geos/user/userland/init.el")
   "Ordered list of files the per-user emacs loads.
 each path is laid down by extra-special-file in guix-system/
