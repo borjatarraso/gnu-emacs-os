@@ -71,6 +71,41 @@ loads into the supervisor. EXWM lives there too. The boundary is in
 the wrong place: a runaway regex in `M-x notes-buffer-refresh` can
 stall PID 1.
 
+**Scope trim landed mid-cycle (commit 1f3c485 landed 1.2 with this
+shape):** the userland chain (dired/eshell/uname/magit/eww/notmuch/
+erc/org/pdf-tools) ships user-side in v0.6.  EXWM, multimon, fonts,
+and input stay supervisor-side and SLIP to v0.7.  the trust-boundary
+argument the plan opened with still holds: the user-emacs has no
+`pid1-*` access, every userland buffer that could stall PID 1 now
+stalls the per-user emacs only.  the user-emacs-owns-the-WM goal
+ships when somebody is ready to prototype EXWM's release-the-
+display story (no documented path; that was the open risk this
+section called out).
+
+what 1.1+1.2 shipped:
+- `emacs-init/wm/` -> `emacs-init/user/` (4 files moved).
+- `emacs-init/userland/` -> `emacs-init/user/userland/` (11 files
+  moved).
+- supervisor's `-l` chain dropped 10 entries (every userland file
+  except audio, which buffers/audio.el still requires).
+- `user-init.el` grew a chain loader: panic.el, use-package-shim,
+  9 userland packages, audio, verifier.
+- 12 `extra-special-file` entries lay everything at `/etc/geos/
+  core/...` and `/etc/geos/user/userland/...`.
+
+what slips to v0.7 (called out here so v0.7's planner doesn't
+re-litigate it):
+- `exwm-config.el`, `multimon.el`, `fonts.el`, `input.el` stay
+  supervisor-side.
+- supervisor still calls `(exwm-enable)` at boot; per-user emacs
+  is an X client.
+- the *login* frame and the user-emacs frame share the supervisor's
+  display, which is fine for single-user; concurrent-session item 6
+  is unaffected.
+
+the rest of this section describes the ORIGINAL scope including the
+EXWM handover, kept for the v0.7 planner.
+
 **Files to touch (existing):**
 - `emacs-init/user/user-init.el` (becomes the chain loader; today
   it has one defun and one keybinding).
