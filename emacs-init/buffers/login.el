@@ -351,6 +351,37 @@ not blank the footer."
          nil))))))
 
 ;; --------------------------------------------------------------------
+;; multi-session footer (v0.6 item 6.2)
+;; --------------------------------------------------------------------
+
+(defun login--running-sessions ()
+  "Return the list of `geos-session' records currently in 'running.
+nil when session.el is not loaded or no session is live; that nil
+return suppresses the footer entirely (no \"0 sessions\" noise on
+a fresh boot)."
+  (and (fboundp 'session-list)
+       (cl-remove-if-not
+        (lambda (s) (eq (geos-session-status s) 'running))
+        (condition-case _ (session-list) (error nil)))))
+
+(defun login--render-sessions-footer ()
+  "Insert a one-line-per-session listing of every 'running record.
+intended for the :prompt-user and :running screens so an operator
+who lands on *login* sees who is already logged in and on which
+workspace.  prints nothing when the registry has no live entries."
+  (let ((live (login--running-sessions)))
+    (when live
+      (insert "\n  active sessions:\n")
+      (dolist (s live)
+        (let ((ws (geos-session-workspace s)))
+          (insert (format "    %-16s pid=%-7s ws=%s\n"
+                          (geos-session-name s)
+                          (or (geos-session-child-pid s) "?")
+                          (cond
+                           ((integerp ws) (format "%d" ws))
+                           (t "?")))))))))
+
+;; --------------------------------------------------------------------
 ;; render
 ;; --------------------------------------------------------------------
 
@@ -400,7 +431,8 @@ we don't re-print the warning here."
     (when (consp last)
       (insert (format "\n  last login: %s @ %s\n"
                       (or (car last) "?")
-                      (or (cdr last) "?"))))))
+                      (or (cdr last) "?")))))
+  (login--render-sessions-footer))
 
 (defun login--render-prompt-password ()
   "Password entry.  we never echo the password into the buffer."
@@ -411,8 +443,15 @@ we don't re-print the warning here."
   (insert "  Press RET to submit; b to back up to the username prompt.\n"))
 
 (defun login--render-running ()
-  "Running session view."
-  (insert "  q logout (SIGTERM the session emacs)\n\n")
+  "Running session view.
+the footer lists every concurrently logged-in user; v0.6 item 6.2
+allows the supervisor to host more than one session simultaneously.
+the `n' key starts a fresh login flow without ending the current
+one (the session this view documents is just the most recent
+spawn; older sessions live on under their own workspaces and
+remain reachable via EXWM)."
+  (insert "  q logout (SIGTERM this session's emacs)    "
+          "n new login    s switch to ws\n\n")
   (insert "=== session active ===\n\n")
   (cond
    ((null login--session)
@@ -435,7 +474,9 @@ we don't re-print the warning here."
                     (format-time-string
                      "%Y-%m-%d %H:%M:%S"
                      (geos-session-started-at login--session))))
-    (insert "\n  Press q to log out.\n"))))
+    (insert "\n  Press q to log out this session, "
+            "n to start another login.\n")
+    (login--render-sessions-footer))))
 
 (defun login--render-failed ()
   "Bad-credentials view.
@@ -703,7 +744,12 @@ mashing RET on :prompt-password."
 
 (defun login-logout ()
   "q handler.  in :running, end the session and return to prompt.
-in any other state, bury the buffer."
+in any other state, bury the buffer.
+
+after `session-end' on the most-recent session, if any other
+sessions remain 'running we transition back to :prompt-user so
+the operator can keep working, not to bury the buffer.  the
+multi-session footer will still list the survivors."
   (interactive)
   (pcase login--state
     (:running
@@ -717,6 +763,66 @@ in any other state, bury the buffer."
        (login--reset-prompt)))
     (_ (bury-buffer))))
 
+(defun login-new-session ()
+  "n handler.  start a new login flow without ending the current one.
+v0.6 item 6.2: the supervisor can host more than one logged-in
+user at a time.  pressing `n' from :running rolls *login* back to
+:prompt-user with `login--session' cleared.  the prior session
+keeps running under its own workspace; the multi-session footer
+lists it on the way back."
+  (interactive)
+  (pcase login--state
+    (:running
+     ;; do NOT call session-end here.  the old session lives on
+     ;; under its own workspace; n is "add another user", not
+     ;; "swap the current user".
+     (setq login--password nil
+           login--user nil
+           login--session nil
+           login--last-error nil
+           login--state :prompt-user)
+     (login--repaint))
+    (_ (message "login: n has no meaning in state %s" login--state))))
+
+(defun login-switch-workspace ()
+  "s handler.  jump to a running session's workspace.
+in UI mode the per-user emacs lives on an EXWM workspace; this
+key prompts for a session name (with completion against the
+running registry) and calls `exwm-workspace-switch' on the
+recorded index.  no-op in console mode (no EXWM).
+
+picks the *only* running session without a prompt when there is
+exactly one; this is the common case after `n' has spawned a
+second user and the operator wants to flip back to the first."
+  (interactive)
+  (let* ((live (login--running-sessions))
+         (with-ws (cl-remove-if-not
+                   (lambda (s) (integerp (geos-session-workspace s)))
+                   live)))
+    (cond
+     ((null with-ws)
+      (message "login: no running session has a recorded workspace"))
+     ((not (fboundp 'exwm-workspace-switch))
+      (message "login: exwm-workspace-switch unbound (console mode?)"))
+     (t
+      (let* ((names (mapcar #'geos-session-name with-ws))
+             (pick (cond
+                    ((= (length names) 1) (car names))
+                    (t (completing-read "switch to session: "
+                                        names nil t))))
+             (sess (cl-find-if (lambda (s)
+                                 (string= (geos-session-name s) pick))
+                               with-ws))
+             (ws (and sess (geos-session-workspace sess))))
+        (cond
+         ((not (integerp ws))
+          (message "login: no workspace for %s" pick))
+         (t
+          (condition-case err
+              (exwm-workspace-switch ws)
+            (error
+             (panic-handle err (cons 'login-switch-workspace pick)))))))))))
+
 ;; --------------------------------------------------------------------
 ;; mode + entry
 ;; --------------------------------------------------------------------
@@ -727,6 +833,8 @@ in any other state, bury the buffer."
     (define-key m (kbd "b")   #'login-back)
     (define-key m (kbd "r")   #'login-retry)
     (define-key m (kbd "q")   #'login-logout)
+    (define-key m (kbd "n")   #'login-new-session)
+    (define-key m (kbd "s")   #'login-switch-workspace)
     m)
   "Keymap for `login-mode'.")
 
@@ -757,16 +865,28 @@ either way, the buffer contents are identical."
       ;; actually 'running anymore, treat the buffer's :running as
       ;; stale and reset back to :prompt-user so the next user sees a
       ;; live prompt instead of "session active as ghost-tester".
-      (unless (and (eq login--state :running)
-                   (fboundp 'session-list)
-                   (cl-some (lambda (s)
-                              (eq (geos-session-status s) 'running))
-                            (session-list)))
-        (setq login--state :prompt-user
-              login--user nil
-              login--password nil
-              login--session nil
-              login--last-error nil))
+      ;;
+      ;; v0.6 item 6.2: under multi-user the cross-check also needs
+      ;; to confirm THIS buffer's `login--session' is still 'running.
+      ;; the prior shape was "any session running -> keep :running",
+      ;; which renders a stale record when the buffer's session died
+      ;; while a different user's session is still alive.  the
+      ;; tightened predicate refuses to keep :running unless the
+      ;; specific session this buffer holds is still in the
+      ;; registry as 'running.
+      (let ((session-still-live
+             (and (eq login--state :running)
+                  login--session
+                  (fboundp 'session-get)
+                  (let ((cur (session-get
+                              (geos-session-name login--session))))
+                    (and cur (eq (geos-session-status cur) 'running))))))
+        (unless session-still-live
+          (setq login--state :prompt-user
+                login--user nil
+                login--password nil
+                login--session nil
+                login--last-error nil)))
       (login--render))
     (display-buffer buf)
     buf))

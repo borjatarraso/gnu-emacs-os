@@ -2326,6 +2326,147 @@ every exit path.  the sentinel name is `geos-freeze-ws-NNNNNN'."
         (error nil)))
     (freeze-test--record 'session-workspace result)))
 
+(defun freeze-test-multi-session-ui ()
+  "Exercise the v0.6 item 6.2 multi-session contract.
+covers four shapes:
+  - `login--running-sessions' returns only 'running entries.
+  - `login--render-sessions-footer' prints one line per running
+    session and prints nothing on an empty registry.
+  - `login-new-session' from :running clears the buffer state to
+    :prompt-user WITHOUT calling `session-end' on the prior
+    session (so an additional user can log in alongside).
+  - the `login-show' guard refuses to keep :running when the
+    buffer-held `login--session' is no longer in the registry as
+    'running, even if some OTHER session is still alive.
+
+cleanup removes the two sentinel sessions from the registry on
+every exit path.  the test does NOT touch disk: it pokes the
+in-memory `session--registry' directly so a smoke-test run does
+not leave snapshot files behind."
+  (interactive)
+  (let* ((result 'fail)
+         (a (format "geos-freeze-ms-a-%06d" (random 1000000)))
+         (b (format "geos-freeze-ms-b-%06d" (random 1000000)))
+         (saved-a (and (boundp 'session--registry)
+                       (gethash a session--registry)))
+         (saved-b (and (boundp 'session--registry)
+                       (gethash b session--registry)))
+         (saved-state login--state)
+         (saved-user login--user)
+         (saved-pass login--password)
+         (saved-sess login--session)
+         (saved-err login--last-error))
+    (unwind-protect
+        (condition-case err
+            (cond
+             ((not (and (fboundp 'login--running-sessions)
+                        (fboundp 'login--render-sessions-footer)
+                        (fboundp 'login-new-session)
+                        (fboundp 'login-show)
+                        (boundp 'session--registry)
+                        (fboundp 'make-geos-session)))
+              (setq result "multi-session primitives unbound"))
+             (t
+              ;; baseline: empty registry, footer prints nothing.
+              (clrhash session--registry)
+              (let ((live (login--running-sessions)))
+                (cond
+                 (live
+                  (setq result
+                        (format "running-sessions on empty reg = %S"
+                                live)))
+                 (t
+                  ;; install two 'running entries.
+                  (let ((sa (make-geos-session
+                             :name a :uid 50010 :gid 50010
+                             :home "/tmp"
+                             :supervise-key (intern (concat "session:" a))
+                             :workspace 4
+                             :status 'running))
+                        (sb (make-geos-session
+                             :name b :uid 50011 :gid 50011
+                             :home "/tmp"
+                             :supervise-key (intern (concat "session:" b))
+                             :workspace 5
+                             :status 'running)))
+                    (puthash a sa session--registry)
+                    (puthash b sb session--registry)
+                    (let ((got (login--running-sessions)))
+                      (cond
+                       ((not (= (length got) 2))
+                        (setq result
+                              (format "running-sessions count = %d, want 2"
+                                      (length got))))
+                       (t
+                        ;; footer renders both names.
+                        (with-temp-buffer
+                          (login--render-sessions-footer)
+                          (let ((s (buffer-string)))
+                            (cond
+                             ((not (and (string-match-p
+                                         (regexp-quote a) s)
+                                        (string-match-p
+                                         (regexp-quote b) s)))
+                              (setq result
+                                    (format "footer missing names: %S" s)))
+                             (t
+                              ;; login-new-session from :running
+                              ;; clears state but does NOT remove
+                              ;; the session from the registry.
+                              (setq login--state :running
+                                    login--user a
+                                    login--password nil
+                                    login--session sa
+                                    login--last-error nil)
+                              (login-new-session)
+                              (cond
+                               ((not (eq login--state :prompt-user))
+                                (setq result
+                                      (format "after new-session state=%S, want :prompt-user"
+                                              login--state)))
+                               (login--session
+                                (setq result
+                                      "after new-session login--session not cleared"))
+                               ((not (gethash a session--registry))
+                                (setq result
+                                      "new-session evicted the prior session from the registry"))
+                               (t
+                                ;; login-show guard: pretend
+                                ;; :running with a stale session
+                                ;; (a vanished session, but b
+                                ;; still in registry) -> reset.
+                                (remhash a session--registry)
+                                (setq login--state :running
+                                      login--user a
+                                      login--session sa)
+                                (let ((buf (login-show)))
+                                  (cond
+                                   ((not (eq login--state :prompt-user))
+                                    (setq result
+                                          (format "login-show kept :running on stale sess, state=%S"
+                                                  login--state)))
+                                   (t
+                                    (when (buffer-live-p buf)
+                                      (kill-buffer buf))
+                                    (setq result 'pass)))))))))))))))))))
+          (error
+           (panic-handle err 'freeze-test-multi-session-ui)
+           (setq result (format "raised: %S" err))))
+      ;; cleanup.
+      (when (boundp 'session--registry)
+        (cond
+         (saved-a (puthash a saved-a session--registry))
+         (t (remhash a session--registry)))
+        (cond
+         (saved-b (puthash b saved-b session--registry))
+         (t (remhash b session--registry))))
+      (setq login--state saved-state
+            login--user saved-user
+            login--password saved-pass
+            login--session saved-sess
+            login--last-error saved-err))
+    (freeze-test--record 'multi-session-ui result)))
+
 ;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
@@ -2354,6 +2495,7 @@ every exit path.  the sentinel name is `geos-freeze-ws-NNNNNN'."
   (freeze-test-login-lockout)
   (freeze-test-login-last-success)
   (freeze-test-session-workspace)
+  (freeze-test-multi-session-ui)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
