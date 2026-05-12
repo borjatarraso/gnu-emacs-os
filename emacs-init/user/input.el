@@ -25,9 +25,18 @@
 ;;   - prefers `mozc-mode' for Japanese IF a future image ships it.
 ;;     we don't fail when it's missing, we just skip.
 ;;
-;; out of scope for slice 2.1: dbus-launch, ibus-daemon supervision,
-;; per-user persistence of the chosen method.  the IBus branch is a
-;; placeholder that fails-fall-back until slice 2.3.
+;; slice 2.2 adds per-user persistence: the chooser's value writes
+;; to /var/emacs/users/$USER/input.eld whenever `input-set-method'
+;; lands, and `input-apply' reads it back at boot before dispatching.
+;; the file is sexp data, NOT loaded as code: we read with
+;; `read-from-string' so a malformed or hostile file cannot execute.
+;; the state dir is 0700 owned by the user (the supervisor lays it
+;; down via session--ensure-user-state-dir before forking the user
+;; emacs); reading our own data back is the boundary we trust.
+;;
+;; out of scope for slice 2.2: dbus-launch, ibus-daemon supervision.
+;; the IBus branch is a placeholder that fails-fall-back until slice
+;; 2.3 lands the Guix packages.
 
 (require 'panic)
 
@@ -105,6 +114,118 @@ $IBUS_ADDRESS / ~/.config/ibus/bus/.  keeping the seam empty for
 now means :auto falls through to quail and :ibus fails closed,
 which is the documented slice 2.1 contract."
   nil)
+
+(defun input--persist-path ()
+  "Return the path of this user's input.eld, or nil.
+nil when the running user has no login name (an unusual batch run)
+or the state dir does not exist.  the dir is laid down by the
+supervisor's `session--ensure-user-state-dir' under
+/var/emacs/users/$USER/ mode 0700; if it is missing we are not on
+a real GEOS boot and persistence is a no-op."
+  (condition-case _
+      (let* ((user (user-login-name))
+             (dir  (and user (format "/var/emacs/users/%s" user))))
+        (and dir (file-directory-p dir)
+             (concat dir "/input.eld")))
+    (error nil)))
+
+(defun input--persist-save (value)
+  "Write VALUE to `input--persist-path' as `(geos-input-method . VALUE)'.
+returns the path on success, nil otherwise.  errors swallowed and
+routed through `panic-handle'; persistence is best-effort and must
+not block a `M-x input-set-method' from taking effect in-memory.
+
+the format is a single sexp `(geos-input-method . :auto)' so a
+future slice can grow the file without breaking older readers: any
+reader that doesn't know a new key just falls back to default."
+  (condition-case err
+      (let ((path (input--persist-path)))
+        (cond
+         ((null path)
+          (input--trace "persist: no state dir, skipping")
+          nil)
+         (t
+          (with-temp-buffer
+            (let ((print-length nil)
+                  (print-level  nil))
+              (prin1 (cons 'geos-input-method value) (current-buffer)))
+            (insert "\n")
+            (let ((write-region-inhibit-fsync nil))
+              (write-region (point-min) (point-max) path nil 'nomsg)))
+          (input--trace (format "persist: wrote %S to %s" value path))
+          path)))
+    (error
+     (if (fboundp 'panic-handle)
+         (panic-handle err 'input--persist-save)
+       (input--trace (format "persist save failed: %S" err)))
+     nil)))
+
+(defun input--persist-load ()
+  "Read `input--persist-path' and apply it to `geos-input-method'.
+returns the loaded value on success, nil when nothing was loaded.
+the file is parsed with `read-from-string', NOT `load': we treat
+it as data, not code.  validates the result is one of the three
+documented keywords; an unknown value is ignored with a trace so
+a stale file from a future GEOS does not break boot today."
+  (condition-case err
+      (let ((path (input--persist-path)))
+        (cond
+         ((or (null path) (not (file-readable-p path)))
+          nil)
+         (t
+          (with-temp-buffer
+            (insert-file-contents path)
+            (let* ((raw (car (read-from-string
+                              (buffer-substring-no-properties
+                               (point-min) (point-max)))))
+                   (val (and (consp raw)
+                             (eq (car raw) 'geos-input-method)
+                             (cdr raw))))
+              (cond
+               ((memq val '(:auto :ibus :quail))
+                (setq geos-input-method val)
+                (input--trace
+                 (format "persist: loaded %S from %s" val path))
+                val)
+               (t
+                (input--trace
+                 (format "persist: ignoring %S from %s (not a known value)"
+                         raw path))
+                nil)))))))
+    (error
+     (if (fboundp 'panic-handle)
+         (panic-handle err 'input--persist-load)
+       (input--trace (format "persist load failed: %S" err)))
+     nil)))
+
+(defun input-set-method (method)
+  "Interactively set `geos-input-method' to METHOD and persist.
+METHOD is one of :auto, :ibus, :quail.  after setting the variable
+this calls `input-apply' so the change takes effect in the current
+session, and `input--persist-save' so the next session sees it.
+
+bound to `C-c e M' under the project's `C-c e *' map.  the lower
+case `C-c e i' and `C-c e I' are taken by the toggle and the
+ad-hoc picker; this one is the durable chooser."
+  (interactive
+   (list (intern (completing-read
+                  "geos input method: "
+                  '(":auto" ":ibus" ":quail")
+                  nil t nil nil
+                  (symbol-name geos-input-method)))))
+  (condition-case err
+      (cond
+       ((not (memq method '(:auto :ibus :quail)))
+        (message "input-set-method: refusing unknown %S" method))
+       (t
+        (setq geos-input-method method)
+        (input-apply)
+        (input--persist-save method)
+        (message "input: method set to %S (persisted)" method)))
+    (error
+     (if (fboundp 'panic-handle)
+         (panic-handle err 'input-set-method)
+       (message "input-set-method: %S" err)))))
 
 (defun input-toggle-method ()
   "Toggle the current input method on/off.
@@ -214,7 +335,12 @@ as no input method at all, which is fine: the user can still
 M-x set-input-method or hit C-c e I."
   (interactive)
   (condition-case err
-      (pcase geos-input-method
+      (progn
+        ;; slice 2.2: per-user persistence.  read /var/emacs/users/$USER/
+        ;; input.eld and let it override the customize default.  silent
+        ;; no-op when the file is missing (first boot) or unreadable.
+        (input--persist-load)
+        (pcase geos-input-method
         (:quail
          (input--trace "chooser: quail (forced)")
          (input--quail-apply))
@@ -240,7 +366,7 @@ M-x set-input-method or hit C-c e I."
          (input--trace
           (format "chooser: unknown geos-input-method %S, using quail"
                   other))
-         (input--quail-apply)))
+         (input--quail-apply))))
     (error
      (if (fboundp 'panic-handle)
          (panic-handle err 'input-apply)
@@ -249,6 +375,7 @@ M-x set-input-method or hit C-c e I."
 
 (global-set-key (kbd "C-c e i") #'input-toggle-method)
 (global-set-key (kbd "C-c e I") #'input-pick-method)
+(global-set-key (kbd "C-c e M") #'input-set-method)
 
 (provide 'input)
 ;;; input.el ends here

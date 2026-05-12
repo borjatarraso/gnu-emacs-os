@@ -2776,6 +2776,89 @@ real ibus probe lands."
       (when sav-display (setenv "DISPLAY" sav-display)))
     (freeze-test--record 'input-chooser result)))
 
+(defun freeze-test-input-persist ()
+  "Pin v0.7 item 2.2: input-set-method writes /tmp + input-apply reads it.
+
+we cl-letf `input--persist-path' to a tmp file (the real path lives
+under /var/emacs/users/$USER/ which a batch run cannot create), then
+exercise the round-trip:
+
+  1. save :quail.  assert the file exists, parses to
+     (geos-input-method . :quail).
+  2. set `geos-input-method' to :ibus IN-MEMORY (the customize
+     default-ish state).  call `input-apply' with the dispatcher
+     stubbed so it does no real work.  assert the load step flipped
+     `geos-input-method' back to :quail (the persisted value wins).
+  3. write a malformed payload.  call `input--persist-load'.  assert
+     it returns nil and leaves `geos-input-method' unchanged.
+
+we don't exercise input-apply's actual dispatcher here; that's what
+freeze-test-input-chooser is for.  this test pins persistence shape
+only."
+  (interactive)
+  (require 'input)
+  (let* ((result 'fail)
+         (tmp (make-temp-file "geos-input-persist-"))
+         (sav-method geos-input-method))
+    (unwind-protect
+        (condition-case err
+            (cl-letf (((symbol-function 'input--persist-path)
+                       (lambda () tmp))
+                      ((symbol-function 'input--quail-apply)
+                       (lambda () t))
+                      ((symbol-function 'input--ibus-apply)
+                       (lambda () nil))
+                      ((symbol-function 'input--trace)
+                       (lambda (_msg) nil)))
+              ;; case 1: save round-trip.
+              (input--persist-save :quail)
+              (cond
+               ((not (file-exists-p tmp))
+                (setq result "save did not create file"))
+               (t
+                (let* ((raw (with-temp-buffer
+                              (insert-file-contents tmp)
+                              (car (read-from-string
+                                    (buffer-substring-no-properties
+                                     (point-min) (point-max)))))))
+                  (cond
+                   ((not (equal raw (cons 'geos-input-method :quail)))
+                    (setq result (format "save shape = %S, want (geos-input-method . :quail)"
+                                         raw)))
+                   (t
+                    ;; case 2: load overrides in-memory.
+                    (setq geos-input-method :ibus)
+                    (input-apply)
+                    (cond
+                     ((not (eq geos-input-method :quail))
+                      (setq result
+                            (format "load did not flip geos-input-method to :quail (got %S)"
+                                    geos-input-method)))
+                     (t
+                      ;; case 3: malformed payload is ignored.
+                      (with-temp-buffer
+                        (insert "(not-a-known-tag . :weird)\n")
+                        (write-region (point-min) (point-max)
+                                      tmp nil 'nomsg))
+                      (setq geos-input-method :ibus)
+                      (let ((rv (input--persist-load)))
+                        (cond
+                         (rv
+                          (setq result
+                                (format "malformed load returned %S, want nil" rv)))
+                         ((not (eq geos-input-method :ibus))
+                          (setq result
+                                (format "malformed load mutated method to %S"
+                                        geos-input-method)))
+                         (t
+                          (setq result 'pass))))))))))))
+          (error
+           (panic-handle err 'freeze-test-input-persist)
+           (setq result (format "raised: %S" err))))
+      (setq geos-input-method sav-method)
+      (when (file-exists-p tmp) (delete-file tmp)))
+    (freeze-test--record 'input-persist result)))
+
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.
 two simulated 'running sessions, A on workspace 1 and B on
@@ -2936,6 +3019,7 @@ back via state-read to confirm the persist landed."
   (freeze-test-session-end-isolation)
   (freeze-test-x-display-idempotent)
   (freeze-test-input-chooser)
+  (freeze-test-input-persist)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
