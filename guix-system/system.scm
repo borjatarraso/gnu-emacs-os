@@ -164,6 +164,15 @@
     ;; soft-requires it, login.el hard-requires it.
     (local-file "../emacs-init/core/session.el" "session.el"))
 
+(define x-display-el
+    ;; v0.7 item 1.1: supervisor side of the EXWM display-release dance.
+    ;; provides x-display-release / x-display-reclaim, panic-handled and
+    ;; idempotent.  loaded supervisor-side so M-x x-display-release is
+    ;; available for in-VM experimentation before session.el wires it
+    ;; into the spawn / end paths (slice 1.3).  no side effects at load
+    ;; time; just defun + defvar.
+    (local-file "../emacs-init/core/x-display.el" "x-display.el"))
+
 (define user-init-el
     ;; v0.6 starter: per-user emacs userland.  this file runs INSIDE
     ;; the per-user emacs (the supervisor's child), not in the
@@ -636,6 +645,14 @@
                                "-l" #$hostname-el
                                "-l" #$passwd-el
                                "-l" #$session-el
+                               ;; v0.7 item 1.1: x-display.el ships the
+                               ;; supervisor-side release / reclaim verbs
+                               ;; for :0.  load after session-el so a
+                               ;; future slice 1.3 can have session-spawn
+                               ;; call into it.  for slice 1.1 the file is
+                               ;; load-and-park: defuns are reachable from
+                               ;; M-x but no caller hits them yet.
+                               "-l" #$x-display-el
                                ;; v0.6 item 3: supervisor RPC server.
                                ;; loads after session-el so future verbs
                                ;; that read the session table see a

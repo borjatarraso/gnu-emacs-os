@@ -2593,6 +2593,85 @@ not touch disk (the allocator is in-memory only)."
            (t (remhash (car pair) session--registry))))))
     (freeze-test--record 'session-workspace-allocator result)))
 
+(defun freeze-test-x-display-idempotent ()
+  "Pin v0.7 item 1.1: x-display-release / -reclaim are idempotent.
+
+x-display.el is the v0.7 item 1 spike artifact, parked supervisor-
+side without callers.  this test runs under batch (no exwm--connection,
+no X frames), so the release path walks the no-op branches and
+just sets the released flag; the reclaim path's make-frame-on-display
+is shadowed via cl-letf so we never try to open :0 from a smoke-test
+emacs.
+
+contract:
+  - fresh state (x-display--released nil) -> release returns t and
+    flips the flag t.
+  - released state (x-display--released t) -> release returns t
+    WITHOUT touching exwm-wm-mode / x-close-connection (idempotent).
+  - released state -> mocked reclaim returns t and flips the flag
+    back to nil.
+  - fresh state -> reclaim returns t WITHOUT calling
+    make-frame-on-display (idempotent)."
+  (interactive)
+  (let* ((result 'fail)
+         (sav-released (and (boundp 'x-display--released)
+                            (symbol-value 'x-display--released)))
+         (toggled 0)
+         (made 0))
+    (unwind-protect
+        (condition-case err
+            (cond
+             ((not (and (fboundp 'x-display-release)
+                        (fboundp 'x-display-reclaim)
+                        (boundp 'x-display--released)))
+              (setq result "x-display primitives unbound"))
+             (t
+              (cl-letf* (((symbol-value 'x-display--released) nil)
+                         ((symbol-function 'exwm-wm-mode)
+                          (lambda (&rest _) (cl-incf toggled)))
+                         ((symbol-function 'make-frame-on-display)
+                          (lambda (&rest _) (cl-incf made) nil)))
+                (let ((r1 (x-display-release)))
+                  (cond
+                   ((not r1)
+                    (setq result "first release returned nil"))
+                   ((not (symbol-value 'x-display--released))
+                    (setq result "released flag still nil after release"))
+                   (t
+                    (let ((r2 (x-display-release)))
+                      (cond
+                       ((not r2)
+                        (setq result "second release returned nil"))
+                       (t
+                        (let ((r3 (x-display-reclaim)))
+                          (cond
+                           ((not r3)
+                            (setq result "first reclaim returned nil"))
+                           ((symbol-value 'x-display--released)
+                            (setq result "released flag still t after reclaim"))
+                           ((not (= made 1))
+                            (setq result
+                                  (format "reclaim called make-frame %d times, want 1"
+                                          made)))
+                           (t
+                            (let ((r4 (x-display-reclaim)))
+                              (cond
+                               ((not r4)
+                                (setq result "second reclaim returned nil"))
+                               ((not (= made 1))
+                                (setq result
+                                      (format
+                                       "idempotent reclaim re-called make-frame (%d times)"
+                                       made)))
+                               (t
+                                (setq result 'pass))))))))))))))))
+          (error
+           (panic-handle err 'freeze-test-x-display-idempotent)
+           (setq result (format "raised: %S" err))))
+      (when (boundp 'x-display--released)
+        (set 'x-display--released sav-released)))
+    (freeze-test--record 'x-display-idempotent result)))
+
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.
 two simulated 'running sessions, A on workspace 1 and B on
@@ -2751,6 +2830,7 @@ back via state-read to confirm the persist landed."
   (freeze-test-multi-session-ui)
   (freeze-test-session-workspace-allocator)
   (freeze-test-session-end-isolation)
+  (freeze-test-x-display-idempotent)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
