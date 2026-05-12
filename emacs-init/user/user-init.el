@@ -122,6 +122,13 @@ chain has been loaded by `user-init--load-core')."
     ;; v0.7 item 4.3: user-side *journal* view, polls the
     ;; journal-tail RPC verb (added in v0.6 item 3).
     "/etc/geos/user/userland/journal-client.el"
+    ;; v0.7 item 4.4: *processes* user-side.  /proc is world-
+    ;; readable so the same buffers/processes.el the supervisor
+    ;; uses works here without an RPC indirection.  having the
+    ;; view in the user-emacs means a stuck process render
+    ;; (regex backtrack on a long cmdline) stalls one session,
+    ;; not PID 1.
+    "/etc/geos/user/processes-buffer.el"
     "/etc/geos/user/userland/init.el")
   "Ordered list of files the per-user emacs loads.
 each path is laid down by extra-special-file in guix-system/

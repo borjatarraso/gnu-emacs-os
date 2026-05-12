@@ -481,6 +481,13 @@ timer if it is not already running."
 (defalias 'gnu-emacs-os-processes #'processes
   "Canonical concept entry point. See `processes'.")
 
+;; v0.7 item 4.4: bind M-x processes under C-c e p.
+;; this file loads on BOTH the supervisor (its existing -l) and
+;; the user-emacs (added to user-init--chain), so the binding is
+;; live in both contexts.  the data source is /proc, which is
+;; world-readable; no RPC, no privileged path.
+(global-set-key (kbd "C-c e p") #'processes)
+
 ;; TODO(6): when core/supervise.el lands, register here:
 ;;   (supervise-register
 ;;    :name 'processes-buffer-timer

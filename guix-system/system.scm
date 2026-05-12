@@ -1111,6 +1111,11 @@
             ;; time, so it MUST follow userland/audio.el in the chain).
             (extra-special-file "/etc/geos/user/audio-buffer.el"
                                 audio-buffer-el)
+            ;; v0.7 item 4.4: *processes* user-side.  same file the
+            ;; supervisor loads via -l; /proc is world-readable so
+            ;; no RPC indirection needed.
+            (extra-special-file "/etc/geos/user/processes-buffer.el"
+                                processes-buffer-el)
             %base-services))
 
     (name-service-switch %mdns-host-lookup-nss)))
