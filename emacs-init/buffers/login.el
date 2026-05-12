@@ -66,14 +66,30 @@ rendered at :running; cleared on logout.")
 (defvar login--last-error nil
   "Free-form description of the last failure, shown in :error.")
 
-(defconst login--throttle-window 30
-  "Rolling window in seconds for the bad-attempt throttle.")
+(defconst login--throttle-window 60
+  "Rolling window in seconds for the bad-attempt throttle.
+v0.5 had 30s.  v0.6 item 5.2 widens to 60s so a slow-typed brute
+force does not slip past the cap by spreading attempts across two
+30-second buckets.")
 
-(defconst login--throttle-cap 3
+(defconst login--throttle-cap 5
   "Max bad attempts allowed inside the throttle window.
-3-in-30s is permissive enough that a typo storm does not lock you
-out but tight enough that a brute-force from /dev/console takes
-forever.  network logins (v0.6+) will want a tighter cap.")
+v0.5 had 3.  v0.6 item 5.2 raises to 5 so an honest typo storm is
+still survivable (most people fat-finger their password 2-3 times
+before getting it right) while a brute-forcer hitting the cap eats
+a sit-for stall on every cap-trip.  network logins (v0.7+) will
+want a tighter cap when that surface lands.")
+
+(defconst login--throttle-stall-sec 5
+  "Seconds to sit-for after the throttle trips.
+the supervisor is single-threaded, so this stalls the RPC poller
+and the child-exit poller for the duration.  acceptable because:
+nobody is logged in during the *login* stall (no per-user emacs to
+keep alive); the RPC channel only serves logged-in users; the
+child-exit poller has nothing to reap when no session is running.
+the stall is the whole point: a brute-forcer trying credentials
+from a tty gets rate-limited at 1 attempt per 5 seconds once the
+cap is hit, not bounded only by serial-line bandwidth.")
 
 (defvar login--bad-attempts nil
   "List of float-time entries for recent bad-credential attempts.
@@ -99,6 +115,172 @@ also trims `login--bad-attempts' to the window as a side effect."
 (defun login--note-bad-attempt ()
   "Record a bad-credential timestamp."
   (push (float-time) login--bad-attempts))
+
+;; --------------------------------------------------------------------
+;; per-user lockout (v0.6 item 5.3)
+;; --------------------------------------------------------------------
+;;
+;; the throttle above counts ALL bad attempts in one global ring.  a
+;; targeted attack against one user is therefore amplified by typos
+;; from other users (one user's typos help the attacker's count
+;; nothing; it counts toward the same global cap).  the per-user
+;; lockout below is the answer: 10 fails against ONE username inside
+;; 5 minutes flips that username to a `:locked-until' record under
+;; /var/emacs/lockouts/NAME.  while the lock is active the verify
+;; path refuses without even hashing the candidate password (so an
+;; attacker cannot use timing to confirm the lock is in place).
+;;
+;; the lockout file is supervisor-owned because /var/emacs/lockouts/
+;; is laid down by state.el's --ensure-layout, which runs as the
+;; supervisor (root).  the user themselves cannot tamper with it
+;; without already being logged in (a fresh per-user emacs has no
+;; write access to /var/emacs/lockouts/).
+;;
+;; unlock paths:
+;;   a) wait for the duration to elapse and re-try.
+;;   b) the *users* buffer's `u' key (only the supervisor can reach
+;;      that buffer with file-write privileges).
+
+(defconst login--lockout-window 300
+  "Rolling window for the per-user fail counter, in seconds (5 minutes).
+wider than `login--throttle-window' because the lockout is the
+heavier hammer: the throttle slows things down, the lockout shuts
+them off.  the wider window also makes a slow-typing attacker
+visible: 1 wrong attempt per 30s for 5 minutes still trips it.")
+
+(defconst login--lockout-cap 10
+  "Per-user fail count that trips the lockout.
+10 inside 5 minutes is more than enough room for an honest typo
+storm even if the operator is interrupted, drinks coffee, comes
+back, and tries again, but tight enough that a brute-forcer ends
+up locked out before they probe more than a few passwords.")
+
+(defconst login--lockout-duration 900
+  "How long a lockout lasts once tripped, in seconds (15 minutes).
+the operator either waits (legitimate user, recovered from typo
+storm) or asks an admin to unlock via the *users* buffer.  shorter
+than overnight so a forgotten lockout does not strand a user; long
+enough that an unattended brute-force burns a usable amount of
+attacker patience.")
+
+(defvar login--per-user-fails nil
+  "Alist `((USERNAME . (T1 T2 ...))...)` of recent bad attempts per user.
+each value is a list of float-time timestamps.  trimmed on every
+check, like `login--bad-attempts'.  not persisted: a reboot resets
+the per-user counts (the lockout FILE persists across reboots when
+state is persistent, the counter does not).")
+
+(defconst login--lockouts-dir "/var/emacs/lockouts/"
+  "Directory where per-user lockout records live.  one file per name.
+state.el creates this in `state--ensure-layout' at boot.")
+
+(defun login--lockout-path (name)
+  "Return the absolute path to NAME's lockout file."
+  (concat login--lockouts-dir name))
+
+(defun login--note-per-user-fail (name)
+  "Push a float-time entry into NAME's per-user fail list."
+  (when (and name (not (string-empty-p name)))
+    (let* ((cell (assoc name login--per-user-fails))
+           (now (float-time)))
+      (cond
+       (cell (setcdr cell (cons now (cdr cell))))
+       (t (push (cons name (list now)) login--per-user-fails))))))
+
+(defun login--per-user-lockout-trips-p (name)
+  "Return non-nil if NAME has hit `login--lockout-cap' inside the window.
+trims NAME's slot to the window as a side effect.  returns nil for
+an empty or unknown name (the bad-username case is covered by the
+global throttle, not the per-user lockout)."
+  (let ((cell (and name (not (string-empty-p name))
+                   (assoc name login--per-user-fails))))
+    (when cell
+      (let* ((now (float-time))
+             (cutoff (- now login--lockout-window))
+             (recent (cl-remove-if (lambda (t0) (< t0 cutoff))
+                                   (cdr cell))))
+        (setcdr cell recent)
+        (>= (length recent) login--lockout-cap)))))
+
+(defun login--lockout-write (name)
+  "Persist a lockout for NAME under /var/emacs/lockouts/NAME.
+expiry is now + `login--lockout-duration'.  returns t on success,
+nil on failure (panic-handled internally).  uses `with-temp-file'
+because state-write enforces a key/path shape we don't want here:
+the directory is dedicated and the basename is the username."
+  (condition-case err
+      (let* ((now (float-time))
+             (rec (list (cons 'user name)
+                        (cons 'locked-at now)
+                        (cons 'locked-until
+                              (+ now login--lockout-duration))))
+             (path (login--lockout-path name))
+             (tmp  (concat path ".tmp"))
+             (print-length nil)
+             (print-level nil)
+             (coding-system-for-write 'utf-8))
+        (unless (file-directory-p login--lockouts-dir)
+          (make-directory login--lockouts-dir t))
+        (with-temp-file tmp
+          (let ((standard-output (current-buffer)))
+            (prin1 rec)))
+        (rename-file tmp path t)
+        (when (fboundp 'pid1-fsync-dir)
+          (condition-case _ (pid1-fsync-dir login--lockouts-dir) (error nil)))
+        t)
+    (error
+     (panic-handle err `(login--lockout-write . ,name))
+     nil)))
+
+(defun login--lockout-read (name)
+  "Return the locked-until float for NAME, or nil if no record.
+a parse failure logs to *panic* and returns nil (don't strand a
+user because a lockout file got corrupted; refuse to enforce
+something we cannot read)."
+  (let ((path (login--lockout-path name)))
+    (cond
+     ((not (file-readable-p path)) nil)
+     (t
+      (condition-case err
+          (with-temp-buffer
+            (insert-file-contents path)
+            (goto-char (point-min))
+            (cdr (assq 'locked-until (read (current-buffer)))))
+        (error
+         (panic-handle err `(login--lockout-read . ,name))
+         nil))))))
+
+(defun login--lockout-active-p (name)
+  "Return non-nil if NAME has an unexpired lockout on file.
+expired records are deleted as a side effect: an operator who
+waits out the duration finds their account immediately usable on
+the next login attempt without needing an admin."
+  (let ((until (login--lockout-read name)))
+    (cond
+     ((null until) nil)
+     ((< until (float-time))
+      (login--lockout-clear name)
+      nil)
+     (t until))))
+
+(defun login--lockout-clear (name)
+  "Remove NAME's lockout file.  returns t whether or not it existed.
+bound under the `u' key in the *users* buffer; also called from
+`login--lockout-active-p' when an expired record is observed."
+  (condition-case err
+      (let ((path (login--lockout-path name)))
+        (when (file-exists-p path)
+          (delete-file path))
+        ;; also clear the in-memory per-user counter so the user
+        ;; starts fresh.  otherwise the next 0 bad attempts would
+        ;; trip the lockout again.
+        (setq login--per-user-fails
+              (cl-remove-if (lambda (cell) (string= (car cell) name))
+                            login--per-user-fails))
+        t)
+    (error
+     (panic-handle err `(login--lockout-clear . ,name))
+     nil)))
 
 ;; --------------------------------------------------------------------
 ;; audit log
@@ -199,11 +381,24 @@ RESULT is :ok or :fail.  REASON, when supplied, is a keyword like
     (insert "\n  Press q to log out.\n"))))
 
 (defun login--render-failed ()
-  "Bad-credentials view."
-  (let ((throttled (login--throttle-trips-p)))
+  "Bad-credentials view.
+shows one of three sub-states: lockout active (per-user file on
+disk, retry refused until expiry), throttle tripped (global cap
+inside window, retry refused for the window), or plain bad creds
+(retry available)."
+  (let* ((throttled (login--throttle-trips-p))
+         (locked-until (and login--user
+                            (login--lockout-active-p login--user))))
     (insert "  r retry    q quit\n\n")
     (insert "=== bad credentials ===\n\n")
     (cond
+     (locked-until
+      (insert (format "  account %s is locked.\n" login--user))
+      (insert (format "  unlock at: %s\n"
+                      (format-time-string "%Y-%m-%d %H:%M:%S"
+                                          locked-until)))
+      (insert "  ask an admin to run the *users* buffer u key,\n")
+      (insert "  or wait for the lockout to expire and retry.\n"))
      (throttled
       (insert (format "  too many bad attempts (>= %d in %ds).\n"
                       login--throttle-cap login--throttle-window))
@@ -295,28 +490,58 @@ a defvar after a transition."
 (defun login--enter-verify ()
   "Run passwd-verify and branch on the result.
 keeps `login--password' alive only for the duration of this
-function; clears it before returning regardless of outcome."
+function; clears it before returning regardless of outcome.
+
+if the username has an active lockout, refuses without hashing the
+candidate password.  not hashing is a deliberate timing-side-channel
+defence: an attacker probing whether a name is locked must measure
+something other than verify latency."
   (setq login--state :verify)
   (login--repaint)
   (let* ((name login--user)
          (pw login--password)
-         (ok (condition-case err
-                 (passwd-verify name pw)
-               (error
-                (panic-handle err (cons 'login--enter-verify name))
-                nil))))
-    ;; wipe the password slot immediately; if anything below panics
-    ;; we have already dropped the plaintext.
-    (setq login--password nil)
+         (locked (and name (login--lockout-active-p name))))
+    ;; lockout short-circuits the verify path.  wipe the password
+    ;; slot now (we never look at it) so a panic below cannot leak
+    ;; plaintext.
     (cond
-     (ok
-      (login--audit-record name :ok)
-      (login--enter-spawning))
-     (t
-      (login--note-bad-attempt)
-      (login--audit-record name :fail :wrong-password)
+     (locked
+      (setq login--password nil)
+      (login--audit-record name :fail :locked-out)
       (setq login--state :failed)
-      (login--repaint)))))
+      (login--repaint)
+      (sit-for login--throttle-stall-sec))
+     (t
+      (let ((ok (condition-case err
+                    (passwd-verify name pw)
+                  (error
+                   (panic-handle err (cons 'login--enter-verify name))
+                   nil))))
+        ;; wipe the password slot immediately; if anything below panics
+        ;; we have already dropped the plaintext.
+        (setq login--password nil)
+        (cond
+         (ok
+          ;; a successful login clears any in-flight per-user fail
+          ;; counter.  no lockout file is on disk (we checked above);
+          ;; the in-memory counter would otherwise carry stale typos
+          ;; from this session into the next.
+          (setq login--per-user-fails
+                (cl-remove-if (lambda (cell) (string= (car cell) name))
+                              login--per-user-fails))
+          (login--audit-record name :ok)
+          (login--enter-spawning))
+         (t
+          (login--note-bad-attempt)
+          (login--note-per-user-fail name)
+          (cond
+           ((login--per-user-lockout-trips-p name)
+            (login--lockout-write name)
+            (login--audit-record name :fail :locked-out))
+           (t
+            (login--audit-record name :fail :wrong-password)))
+          (setq login--state :failed)
+          (login--repaint))))))))
 
 (defun login--enter-spawning ()
   "Hand off to session-spawn; transition to :running or :error."
@@ -366,7 +591,13 @@ function; clears it before returning regardless of outcome."
       ((login--throttle-trips-p)
        (login--audit-record login--user :fail :throttled)
        (setq login--state :failed)
-       (login--repaint))
+       (login--repaint)
+       ;; supervisor stalls here for stall-sec.  see the docstring on
+       ;; `login--throttle-stall-sec' for why blocking is OK at the
+       ;; *login* surface.  sit-for returns nil on input arrival; we
+       ;; ignore the return value because the stall is the goal, not
+       ;; "wait for nothing-to-happen."
+       (sit-for login--throttle-stall-sec))
       (t
        ;; single-arg read-passwd: no CONFIRM, no DEFAULT.  do not
        ;; double-prompt the operator and do not stash a default
@@ -399,13 +630,17 @@ function; clears it before returning regardless of outcome."
     (_ (message "login: no back from %s" login--state))))
 
 (defun login-retry ()
-  "r handler.  retry from :failed or :error."
+  "r handler.  retry from :failed or :error.
+when the throttle is tripped, refuse with a sit-for stall so an
+operator mashing `r' eats the same per-attempt rate limit as
+mashing RET on :prompt-password."
   (interactive)
   (pcase login--state
     ((or :failed :error)
      (cond
       ((and (eq login--state :failed) (login--throttle-trips-p))
-       (message "login: throttled, wait %ds" login--throttle-window))
+       (message "login: throttled, wait %ds" login--throttle-window)
+       (sit-for login--throttle-stall-sec))
       (t (login--reset-prompt))))
     (_ (message "login: r has no meaning in state %s" login--state))))
 

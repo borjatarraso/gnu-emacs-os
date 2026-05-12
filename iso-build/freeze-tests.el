@@ -178,6 +178,14 @@
 ;;     contract that the *journal* buffer's later tailing logic will
 ;;     depend on.  records under 'login-audit.
 ;;
+;;  14. per-user lockout (v0.6 item 5.3)
+;;     synthesises 10 fails for a sentinel name, asserts the per-user
+;;     trip predicate fires, writes /var/emacs/lockouts/NAME, reads
+;;     back the :locked-until expiry, and clears.  pins that the
+;;     in-memory counter plus the on-disk record stay in sync and
+;;     that the file path is actually under /var/emacs/lockouts/.
+;;     records under 'login-lockout.
+;;
 ;; reporting: each test pushes a result alist into `freeze-test-results'.
 ;; (freeze-test-report) prints a per-test PASS/FAIL summary to *Messages*
 ;; and to /dev/console (when boot-marker--write is available, so the
@@ -494,6 +502,7 @@ returns t when every symbol the test calls exists; nil otherwise."
   (and (boundp 'login--bad-attempts)
        (boundp 'login--throttle-cap)
        (boundp 'login--throttle-window)
+       (boundp 'login--throttle-stall-sec)
        (boundp 'login--state)
        (boundp 'login--user)
        (boundp 'geos-cmdline-path)
@@ -545,6 +554,37 @@ brute-force attacker mash RET past the threshold."
     ;; behind for the next test or for the user.
     (setq login--bad-attempts saved)
     (freeze-test--record 'login-abuse/throttle result)))
+
+(defun freeze-test--login-throttle-hardening ()
+  "v0.6 item 5.2: pin cap, window, and stall-sec.
+the values are policy: a regression that loosens them is a security
+regression that the trip-shape test cannot catch (the existing
+trip test is cap-agnostic by construction).  bounds (not exact
+equality) so a future tightening does not require a test diff:
+cap in [4..10], window in [30..120], stall in [3..30]."
+  (let ((result 'fail))
+    (condition-case err
+        (setq result
+              (cond
+               ((not (boundp 'login--throttle-stall-sec))
+                "login--throttle-stall-sec unbound")
+               ((not (and (integerp login--throttle-cap)
+                          (<= 4 login--throttle-cap 10)))
+                (format "cap out of policy bounds: %S"
+                        login--throttle-cap))
+               ((not (and (integerp login--throttle-window)
+                          (<= 30 login--throttle-window 120)))
+                (format "window out of policy bounds: %S"
+                        login--throttle-window))
+               ((not (and (integerp login--throttle-stall-sec)
+                          (<= 3 login--throttle-stall-sec 30)))
+                (format "stall-sec out of policy bounds: %S"
+                        login--throttle-stall-sec))
+               (t 'pass)))
+      (error
+       (panic-handle err 'freeze-test--login-throttle-hardening)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'login-abuse/hardening result)))
 
 (defun freeze-test--login-snapshot ()
   "Sub-check b: session--snapshot-valid-p refuses malformed records.
@@ -712,6 +752,7 @@ regress, and a regression in any one of them is a privilege bug."
     (freeze-test--record 'login-abuse 'module-not-loaded))
    (t
     (freeze-test--login-throttle)
+    (freeze-test--login-throttle-hardening)
     (freeze-test--login-snapshot)
     (freeze-test--login-cmdline)
     (freeze-test--login-empty-user))))
@@ -2012,6 +2053,81 @@ failure modes worth catching:
     (freeze-test--record 'login-audit result)))
 
 ;; --------------------------------------------------------------------
+;; test 15: per-user lockout (v0.6 item 5.3)
+;; --------------------------------------------------------------------
+
+(defun freeze-test-login-lockout ()
+  "Drive the per-user lockout end to end on a sentinel name.
+v0.6 item 5.3: 10 fails in 5 minutes flips a user to a
+`:locked-until' record under /var/emacs/lockouts/NAME.  this test
+synthesises the in-memory fail counter, asserts the trip predicate
+fires, writes the lockout file, reads back the expiry, and clears.
+
+failure modes worth catching:
+  - login--per-user-lockout-trips-p off-by-ones the cap (>= vs >)
+  - login--lockout-write skips fsync and the file is empty
+  - login--lockout-read can't parse the sexp it just wrote
+  - login--lockout-clear deletes the wrong file
+  - login--lockout-active-p does not auto-clear expired records"
+  (interactive)
+  (let* ((result 'fail)
+         (suffix (format "%06d" (random 1000000)))
+         (name (concat "geos-freeze-lock-" suffix))
+         (path (and (boundp 'login--lockouts-dir)
+                    (concat login--lockouts-dir name)))
+         (saved-fails (and (boundp 'login--per-user-fails)
+                           login--per-user-fails)))
+    (unwind-protect
+        (condition-case err
+            (cond
+             ((not (and (fboundp 'login--lockout-write)
+                        (fboundp 'login--lockout-read)
+                        (fboundp 'login--lockout-clear)
+                        (fboundp 'login--lockout-active-p)
+                        (fboundp 'login--per-user-lockout-trips-p)
+                        (fboundp 'login--note-per-user-fail)))
+              (setq result "lockout primitives unbound"))
+             (t
+              (setq login--per-user-fails nil)
+              (dotimes (_ login--lockout-cap)
+                (login--note-per-user-fail name))
+              (cond
+               ((not (login--per-user-lockout-trips-p name))
+                (setq result
+                      (format "trips-p false at cap=%d"
+                              login--lockout-cap)))
+               ((not (login--lockout-write name))
+                (setq result "lockout-write returned nil"))
+               (t
+                (let ((until (login--lockout-read name))
+                      (active (login--lockout-active-p name)))
+                  (setq result
+                        (cond
+                         ((null until)
+                          "lockout-read returned nil after write")
+                         ((not (numberp until))
+                          (format "lockout-read returned non-number: %S"
+                                  until))
+                         ((< until (float-time))
+                          "lockout-read returned a past timestamp")
+                         ((not active)
+                          "lockout-active-p false on a fresh write")
+                         ((not (login--lockout-clear name))
+                          "lockout-clear returned nil")
+                         ((file-exists-p path)
+                          (format "lockout file still present: %s" path))
+                         (t 'pass))))))))
+          (error
+           (panic-handle err 'freeze-test-login-lockout)
+           (setq result (format "raised: %S" err))))
+      (setq login--per-user-fails saved-fails)
+      (condition-case _
+          (when (and path (file-exists-p path))
+            (delete-file path))
+        (error nil)))
+    (freeze-test--record 'login-lockout result)))
+
+;; --------------------------------------------------------------------
 ;; orchestration
 ;; --------------------------------------------------------------------
 
@@ -2036,6 +2152,7 @@ failure modes worth catching:
   (freeze-test-child-exit-poller)
   (freeze-test-users-buffer-add)
   (freeze-test-login-audit)
+  (freeze-test-login-lockout)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

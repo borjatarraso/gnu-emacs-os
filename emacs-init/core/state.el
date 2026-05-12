@@ -39,7 +39,7 @@ mounted by pid1 (see mount_var() in pid1/emacs-init.c).")
 
 (defconst state--subdirs
   '("journal" "packages" "network" "users" "services" "dotfiles"
-    "sessions")
+    "sessions" "lockouts")
   "Subdirectories created at boot under `state-root'.
 each maps to a feature area; state keys live under one of these
 prefixes by convention.  state-write does not enforce the prefix

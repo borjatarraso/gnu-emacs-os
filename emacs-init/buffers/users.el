@@ -114,7 +114,7 @@ since an account with no shadow entry effectively cannot log in."
                                      login-cell)))
                   (insert (propertize line 'users-row u) "\n")))))
             (insert
-             "\nkeys: a=add  d=delete  p=password  g=refresh  q=bury\n"))
+             "\nkeys: a=add  d=delete  p=password  u=unlock  g=refresh  q=bury\n"))
         (error
          (panic-handle err 'users-buffer-render)
          (insert "render failed, see *panic*\n")))))
@@ -239,6 +239,32 @@ falls back to a free-form prompt if point is not on a user row."
       (passwd-set-password name pw)
       (users-buffer-refresh)))))
 
+(defun users-buffer-unlock ()
+  "Clear the lockout on the user at point.  bound to `u'.
+v0.6 item 5.3 ships the lockout: 10 bad credential attempts inside
+5 minutes flips a username to a `:locked-until' record under
+/var/emacs/lockouts/NAME.  this command deletes that file.  the
+file is supervisor-owned, so only the *users* buffer (which only
+opens in the supervisor emacs) can reach it; the per-user emacs
+gets ENOENT on the open and would silently no-op.
+
+falls back to a free-form prompt if point is not on a user row,
+mirroring `users-buffer-set-password' so an operator can unlock a
+user whose row is off-screen without scrolling first."
+  (interactive)
+  (let* ((row (users-buffer-row-at-point))
+         (name (or (and row (plist-get row :user))
+                   (read-string "Unlock user: "))))
+    (cond
+     ((or (null name) (string-empty-p name))
+      (message "users-buffer: empty username, aborting"))
+     ((not (fboundp 'login--lockout-clear))
+      (message "users-buffer: login--lockout-clear unbound"))
+     (t
+      (login--lockout-clear name)
+      (message "users-buffer: lockout cleared for %s" name)
+      (users-buffer-refresh)))))
+
 (defun users-buffer-quit ()
   "Bury *users*.  per project rules we do not kill it."
   (interactive)
@@ -250,6 +276,7 @@ falls back to a free-form prompt if point is not on a user row."
     (define-key m (kbd "a") #'users-buffer-add)
     (define-key m (kbd "d") #'users-buffer-delete)
     (define-key m (kbd "p") #'users-buffer-set-password)
+    (define-key m (kbd "u") #'users-buffer-unlock)
     (define-key m (kbd "q") #'users-buffer-quit)
     m)
   "Keymap for `users-buffer-mode'.")
