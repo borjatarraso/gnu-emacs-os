@@ -286,6 +286,11 @@
     ;; item 1.2 userland handover.
     (local-file "../emacs-init/user/userland/services-client.el"
                 "userland-services-client.el"))
+(define userland-journal-client-el
+    ;; v0.7 item 4.3.  user-side *journal* viewer over the
+    ;; journal-tail RPC verb shipped in v0.6 item 3.
+    (local-file "../emacs-init/user/userland/journal-client.el"
+                "userland-journal-client.el"))
 (define userland-init-el
     ;; thin entry point that requires each of the above. loaded LAST so
     ;; exwm has already claimed the root frame.
@@ -1082,6 +1087,9 @@
             ;; services-client feature too.
             (extra-special-file "/etc/geos/user/userland/services-client.el"
                                 userland-services-client-el)
+            ;; v0.7 item 4.3: user-side *journal* over RPC.
+            (extra-special-file "/etc/geos/user/userland/journal-client.el"
+                                userland-journal-client-el)
             (extra-special-file "/etc/geos/user/userland/init.el"
                                 userland-init-el)
             ;; v0.7 item 1.2: the EXWM stack now lives user-side.  the

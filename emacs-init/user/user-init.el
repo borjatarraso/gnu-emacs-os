@@ -119,6 +119,9 @@ chain has been loaded by `user-init--load-core')."
     ;; supervisor's registry over the v0.6 RPC channel; MUST come
     ;; after rpc-client (which is loaded at the head of the chain).
     "/etc/geos/user/userland/services-client.el"
+    ;; v0.7 item 4.3: user-side *journal* view, polls the
+    ;; journal-tail RPC verb (added in v0.6 item 3).
+    "/etc/geos/user/userland/journal-client.el"
     "/etc/geos/user/userland/init.el")
   "Ordered list of files the per-user emacs loads.
 each path is laid down by extra-special-file in guix-system/

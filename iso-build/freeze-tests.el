@@ -2984,6 +2984,71 @@ emacs during startup; a global shadow hangs `--batch'."
       (when (file-exists-p zero)  (delete-file zero)))
     (freeze-test--record 'audio-pcm-parser result)))
 
+(defun freeze-test-journal-client-render ()
+  "Pin v0.7 item 4.3: journal-client renders RPC payload.
+
+mirrors freeze-test-services-client-render: shadow `geos-rpc'
+with a stub that returns a canned list of strings, render, and
+assert the lines appear.  also asserts the +/- keys clamp the
+N range to [10, 500] (the supervisor cap) without overshoot."
+  (interactive)
+  (require 'journal-client)
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'journal-client--render))
+          (setq result "journal-client--render unbound"))
+         (t
+          (let* ((fake-lines (list "rpc: listening on /run/geos/super.sock"
+                                    "rpc: poweroff requested by uid 0"
+                                    "supervise: xorg up, pid 42"))
+                 (buf (get-buffer-create journal-client-buffer-name)))
+            (with-current-buffer buf
+              (special-mode)
+              (setq journal-client--n 50)
+              (cl-letf (((symbol-function 'geos-rpc)
+                          (lambda (verb &rest args)
+                            (cond
+                             ((not (equal verb "journal-tail"))
+                              (error "stub: unexpected verb %S" verb))
+                             ((not (eql (car args) 50))
+                              (error "stub: unexpected N %S" args))
+                             (t fake-lines)))))
+                (journal-client--render))
+              (let ((body (buffer-string)))
+                (cond
+                 ((not (string-match-p "rpc: listening" body))
+                  (setq result "body missing 'rpc: listening'"))
+                 ((not (string-match-p "xorg up" body))
+                  (setq result "body missing 'xorg up'"))
+                 (t
+                  ;; clamp checks
+                  (setq journal-client--n 480)
+                  (cl-letf (((symbol-function 'journal-client--render)
+                              (lambda () nil))) ;; suppress repaint
+                    (journal-client-more))
+                  (cond
+                   ((not (eql journal-client--n 500))
+                    (setq result
+                          (format "more clamp = %d, want 500"
+                                  journal-client--n)))
+                   (t
+                    (setq journal-client--n 50)
+                    (cl-letf (((symbol-function 'journal-client--render)
+                                (lambda () nil)))
+                      (journal-client-less))
+                    (cond
+                     ((not (eql journal-client--n 10))
+                      (setq result
+                            (format "less clamp = %d, want 10"
+                                    journal-client--n)))
+                     (t (setq result 'pass)))))))))
+            (when (buffer-live-p buf) (kill-buffer buf)))))
+      (error
+       (panic-handle err 'freeze-test-journal-client-render)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'journal-client-render result)))
+
 (defun freeze-test-services-client-render ()
   "Pin v0.7 item 4.2: services-client renders an RPC payload.
 
@@ -3289,6 +3354,7 @@ back via state-read to confirm the persist landed."
   (freeze-test-audio-pcm-parser)
   (freeze-test-rpc-services-list)
   (freeze-test-services-client-render)
+  (freeze-test-journal-client-render)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

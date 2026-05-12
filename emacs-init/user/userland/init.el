@@ -40,7 +40,8 @@ raise during boot."
     userland-notes
     userland-pdf
     userland-audio
-    services-client)
+    services-client
+    journal-client)
   "Ordered list of userland feature symbols that should be loaded.
 Each one corresponds to a file in this directory: e.g.
 `userland-files' lives in files.el. The boot gexp -l's each one
