@@ -13,9 +13,20 @@
 ;;
 ;; what can the user do here:
 ;;   `+'/`='  volume up 5%, `-' down 5%, `m' mute toggle,
-;;   `RET' on a card row makes it the default, `g' refresh, `q' bury.
+;;   `n' next card (cycles audio-default-card), `RET' on a card row
+;;   makes it the default, `g' refresh, `q' bury.
+;;
+;; v0.7 item 3.1 lifted this file user-side.  it used to be -l'd from
+;; the supervisor's boot gexp (audio renders happening in the PID 1
+;; emacs); now it loads from /etc/geos/user/audio-buffer.el via
+;; user-init--chain, after the userland chain that provides
+;; `audio-volume' / `audio-mute-toggle' / `audio-list-cards'.  a
+;; mixer call that wedges (e.g. an unresponsive USB card) now stalls
+;; one user-emacs, not PID 1.  the M-x audio entrypoint is bound
+;; globally to C-c e a for quick access.
 
 (require 'panic)
+(require 'cl-lib)
 
 (condition-case err
     (require 'userland-audio)
@@ -35,16 +46,47 @@
 the user sees this in the header line so they have feedback that
 their `+'/`-' presses actually went somewhere.")
 
+(defun audio-buffer--pcm-stream-count (&optional path)
+  "Return the number of playback PCM substreams visible in PATH.
+PATH defaults to /proc/asound/pcm.  each row describes one PCM
+device; we count the ones that advertise `playback' since that is
+the user-facing signal (`how many output sinks can this kernel
+offer?').  not a count of ACTIVE streams (that would need per-
+substream status reads); the header line says `pcm:' not
+`playing:' to keep the contract honest.  returns nil when the
+file is missing (e.g. snd-pcm module not loaded, or a test passing
+a nonexistent path).
+
+PATH is parameterised so freeze-tests can feed a canned file
+without shadowing `file-readable-p' globally (an early v0.7
+attempt hung emacs because the shadow caught internal callers
+during `require')."
+  (let ((p (or path "/proc/asound/pcm")))
+    (condition-case _
+        (cond
+         ((not (file-readable-p p)) nil)
+         (t
+          (with-temp-buffer
+            (insert-file-contents p)
+            (goto-char (point-min))
+            (let ((n 0))
+              (while (re-search-forward "playback" nil t)
+                (setq n (1+ n)))
+              n))))
+      (error nil))))
+
 (defun audio-buffer--render ()
   "Repaint *audio* from /proc/asound/cards."
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (setq header-line-format
-          (format "*audio*  card=%s  control=%s  vol=%d%%"
-                  (if (boundp 'audio-default-card) audio-default-card "?")
-                  (if (boundp 'audio-default-control)
-                      audio-default-control "?")
-                  audio-buffer--current-volume))
+    (let ((streams (audio-buffer--pcm-stream-count)))
+      (setq header-line-format
+            (format "*audio*  card=%s  control=%s  vol=%d%%  pcm=%s"
+                    (if (boundp 'audio-default-card) audio-default-card "?")
+                    (if (boundp 'audio-default-control)
+                        audio-default-control "?")
+                    audio-buffer--current-volume
+                    (if streams (number-to-string streams) "?"))))
     (cond
      ((not (fboundp 'audio-list-cards))
       (insert "userland/audio.el not loaded\n"))
@@ -59,7 +101,7 @@ their `+'/`-' presses actually went somewhere.")
             (let ((line (format "  %4d %s" (car c) (cdr c))))
               (insert (propertize line 'audio-card c) "\n")))))
         (insert
-         "\nkeys: + vol up   - vol down   m mute   RET pick   g refresh   q bury\n"))))))
+         "\nkeys: + vol up   - vol down   m mute   n next card   RET pick   g refresh   q bury\n"))))))
 
 (defun audio-buffer-refresh ()
   "Force a refresh of *audio*."
@@ -117,6 +159,35 @@ amixer calls use it via `amixer -c N'."
     (audio-mute-toggle))
   (audio-buffer-refresh))
 
+(defun audio-buffer-next-card ()
+  "Cycle `audio-default-card' to the next visible card.  bound to `n'.
+order = the order `audio-list-cards' returns.  wraps around the end.
+when no cards are visible (no ALSA, or /proc/asound empty) emit a
+message rather than crash; the header still shows what we have."
+  (interactive)
+  (cond
+   ((not (fboundp 'audio-list-cards))
+    (message "audio-buffer: userland/audio.el not loaded"))
+   (t
+    (let* ((cards (audio-list-cards))
+           (idxs  (and cards (mapcar (lambda (c) (number-to-string (car c)))
+                                     cards)))
+           (cur   (and (boundp 'audio-default-card) audio-default-card))
+           (pos   (and cur (cl-position cur idxs :test #'equal)))
+           (next  (cond
+                   ((null idxs) nil)
+                   ((or (null pos) (>= (1+ pos) (length idxs)))
+                    (car idxs))
+                   (t (nth (1+ pos) idxs)))))
+      (cond
+       ((null next)
+        (message "audio-buffer: no cards visible"))
+       (t
+        (when (fboundp 'audio-set-default-card)
+          (audio-set-default-card next))
+        (audio-buffer-refresh)
+        (message "audio-buffer: default card -> %s" next)))))))
+
 (defun audio-buffer-quit ()
   "Bury *audio*."
   (interactive)
@@ -130,6 +201,7 @@ amixer calls use it via `amixer -c N'."
     (define-key m (kbd "=")   #'audio-buffer-volume-up)
     (define-key m (kbd "-")   #'audio-buffer-volume-down)
     (define-key m (kbd "m")   #'audio-buffer-mute-toggle)
+    (define-key m (kbd "n")   #'audio-buffer-next-card)
     (define-key m (kbd "q")   #'audio-buffer-quit)
     m)
   "Keymap for `audio-buffer-mode'.")
@@ -151,6 +223,12 @@ amixer through make-process."
       (audio-buffer--render))
     (display-buffer buf)
     buf))
+
+;; v0.7 item 3.1: bind M-x audio under `C-c e a' to match the
+;; project's `C-c e *' convention for system-supplied commands.
+;; the binding lives here (not in user-init.el) because the file is
+;; loaded user-side once and the binding is durable for the session.
+(global-set-key (kbd "C-c e a") #'audio)
 
 (provide 'audio-buffer)
 ;;; audio.el ends here

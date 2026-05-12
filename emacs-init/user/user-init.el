@@ -111,6 +111,10 @@ chain has been loaded by `user-init--load-core')."
     "/etc/geos/user/userland/notes.el"
     "/etc/geos/user/userland/pdf.el"
     "/etc/geos/user/userland/audio.el"
+    ;; v0.7 item 3.1: the *audio* buffer follows the userland chain.
+    ;; buffers/audio.el (require)s userland-audio at load time, so it
+    ;; MUST come after userland/audio.el.
+    "/etc/geos/user/audio-buffer.el"
     "/etc/geos/user/userland/init.el")
   "Ordered list of files the per-user emacs loads.
 each path is laid down by extra-special-file in guix-system/

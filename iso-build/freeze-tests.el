@@ -2930,6 +2930,60 @@ must end up nil."
             input--ibus-process sav-proc))
     (freeze-test--record 'input-ibus-throttle result)))
 
+(defun freeze-test-audio-pcm-parser ()
+  "Pin v0.7 item 3.1: audio-buffer--pcm-stream-count counts playback rows.
+
+writes three tmp files and calls the parser with each path:
+
+  - canned `playback' x3 payload: returns 3.
+  - empty payload: returns 0.
+  - path that doesn't exist: returns nil.
+
+the parser is a count-of-occurrences shape; this is a substring
+match, not a semantic one (we are not asserting `active' streams,
+just rows that advertise playback).  the test pins that shape so
+a future tweak doesn't silently change the contract.
+
+we pass a PATH arg rather than shadowing `file-readable-p' /
+`insert-file-contents' because those are called internally by
+emacs during startup; a global shadow hangs `--batch'."
+  (interactive)
+  (require 'audio-buffer)
+  (let* ((result 'fail)
+         (three (make-temp-file "geos-audio-pcm-three-"))
+         (zero  (make-temp-file "geos-audio-pcm-zero-"))
+         (gone  (concat (make-temp-file "geos-audio-pcm-gone-") "-removed")))
+    (unwind-protect
+        (condition-case err
+            (progn
+              (with-temp-file three
+                (insert "00-00: ALC892 Analog : playback 1 : capture 1\n"
+                        "00-01: ALC892 Digital : playback 1\n"
+                        "01-00: HDMI 0 : playback 1\n"))
+              (with-temp-file zero
+                (insert ""))
+              ;; gone is a synthesised path that we never wrote, plus a
+              ;; suffix to make sure no other test left it behind.
+              (when (file-exists-p gone) (delete-file gone))
+              (let ((r3 (audio-buffer--pcm-stream-count three))
+                    (r0 (audio-buffer--pcm-stream-count zero))
+                    (rn (audio-buffer--pcm-stream-count gone)))
+                (cond
+                 ((not (eql r3 3))
+                  (setq result (format "three-payload = %S, want 3" r3)))
+                 ((not (eql r0 0))
+                  (setq result (format "empty-payload = %S, want 0" r0)))
+                 ((not (null rn))
+                  (setq result (format "missing-file = %S, want nil" rn)))
+                 (t
+                  (setq result 'pass)))))
+          (error
+           (panic-handle err 'freeze-test-audio-pcm-parser)
+           (setq result (format "raised: %S" err))))
+      (when (file-exists-p three) (delete-file three))
+      (when (file-exists-p zero)  (delete-file zero)))
+    (freeze-test--record 'audio-pcm-parser result)))
+
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.
 two simulated 'running sessions, A on workspace 1 and B on
@@ -3092,6 +3146,7 @@ back via state-read to confirm the persist landed."
   (freeze-test-input-chooser)
   (freeze-test-input-persist)
   (freeze-test-input-ibus-throttle)
+  (freeze-test-audio-pcm-parser)
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

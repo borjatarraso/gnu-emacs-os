@@ -313,8 +313,11 @@
     ;; hard requires 'session, so it MUST load after session-el.
     (local-file "../emacs-init/buffers/login.el" "login-buffer.el"))
 (define audio-buffer-el
-    ;; v0.4 item 8 buffer.  *audio* lists ALSA cards and exposes
-    ;; volume keys; depends on userland-audio.el.
+    ;; v0.4 item 8 buffer, lifted user-side in v0.7 item 3.1.
+    ;; *audio* lists ALSA cards and exposes volume keys; depends on
+    ;; userland-audio.el.  no longer -l'd supervisor-side; the per-user
+    ;; emacs loads it via user-init--chain so a stuck audio render
+    ;; cannot stall PID 1.
     (local-file "../emacs-init/buffers/audio.el" "audio-buffer.el"))
 
 ;; v0.4 item 2 service definitions.  each one calls (defservice ...)
@@ -677,10 +680,13 @@
                                ;; user-emacs grabs WM duties.  slice 1.3
                                ;; closes the supervisor's X connection
                                ;; across a session via x-display-release.
-                               ;; userland-audio stays supervisor-side
-                               ;; because buffers/audio.el requires it
-                               ;; at load time.
-                               "-l" #$userland-audio-el
+                               ;; v0.7 item 3.1: *audio* moved user-side.
+                               ;; the supervisor no longer loads
+                               ;; userland-audio or audio-buffer; the
+                               ;; per-user emacs picks them up via
+                               ;; user-init--chain.  a stuck audio
+                               ;; render now stalls one user-emacs, not
+                               ;; PID 1.
                                ;; phase 6 buffers. lazy-loaded entry
                                ;; points; touching any of these via M-x
                                ;; spins up the per-buffer timer/source.
@@ -694,7 +700,6 @@
                                "-l" #$reconfigure-buffer-el
                                "-l" #$users-buffer-el
                                "-l" #$login-buffer-el
-                               "-l" #$audio-buffer-el
                                ;; v0.4 item 2 services.  each defservice
                                ;; form runs at load time and populates
                                ;; supervise.el's registry.  loaded after
@@ -1057,11 +1062,11 @@
                                 userland-notes-el)
             (extra-special-file "/etc/geos/user/userland/pdf.el"
                                 userland-pdf-el)
-            ;; audio.el is ALSO loaded supervisor-side via the -l
-            ;; below (because buffers/audio.el requires it at
-            ;; supervisor load time).  laying it user-side too means
-            ;; alsa-set-volume etc. are available in dired/eshell
-            ;; AND the verifier's featurep walk sees it.
+            ;; v0.7 item 3.1: audio.el lives ONLY user-side now.  the
+            ;; ALSA wrappers and the *audio* buffer both live in the
+            ;; per-user emacs; the supervisor never opens *audio*.  a
+            ;; stuck mixer call (e.g. amixer hung on an unresponsive
+            ;; card) stalls one user-emacs, not PID 1.
             (extra-special-file "/etc/geos/user/userland/audio.el"
                                 userland-audio-el)
             (extra-special-file "/etc/geos/user/userland/init.el"
@@ -1079,6 +1084,12 @@
                                 fonts-el)
             (extra-special-file "/etc/geos/user/input.el"
                                 input-el)
+            ;; v0.7 item 3.1: the *audio* buffer.  laid down at this
+            ;; path so user-init--chain can load it after the userland
+            ;; chain (buffers/audio.el requires userland-audio at load
+            ;; time, so it MUST follow userland/audio.el in the chain).
+            (extra-special-file "/etc/geos/user/audio-buffer.el"
+                                audio-buffer-el)
             %base-services))
 
     (name-service-switch %mdns-host-lookup-nss)))
