@@ -144,6 +144,41 @@ g   refresh.
 q   bury.
 ```
 
+### `*audio*`
+
+The ALSA mixer surface. Open it with `M-x audio` or `C-c e a`. The
+header line shows the default card, the default mixer control, the
+last commanded volume, and the count of playback streams visible in
+`/proc/asound/pcm`. The body lists every card from
+`/proc/asound/cards` as `index  model`; RET on a row makes that card
+the default sink for subsequent volume actions.
+
+Keys:
+
+```
++/= volume up 5%. fires amixer -c CARD sset CONTROL N% via
+    make-process. the header reflects the commanded value;
+    there is no readback (a per-tick amixer get is a fork per
+    tick, no thanks).
+-   volume down 5%.
+m   mute toggle. amixer sset ... toggle.
+n   cycle the default card to the next visible one. wraps.
+RET pick the card on the current line as the default sink.
+g   refresh (re-read /proc/asound/cards and pcm).
+q   bury.
+```
+
+Defaults: control `Master`, card `default` (whatever the kernel
+chose as card 0). The defcustom is `audio-default-control` /
+`audio-default-card` if a USB card only exposes `PCM` and not
+`Master`.
+
+The `*audio*` buffer runs in the per-user emacs, not the supervisor:
+a stuck amixer call (e.g. an unresponsive USB card) stalls one
+user-session, not PID 1. Volume does not persist across logout; ALSA
+state lives under `/var/lib/alsa/` and a future ergonomic pass
+folds it into per-user state.
+
 ## logging in and out
 
 The first thing on screen at boot is `*login*`. Type the username,
