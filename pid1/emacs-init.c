@@ -1946,6 +1946,49 @@ Fpid1_fsync_dir(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
+/* (pid1-chown PATH UID GID) -> t or signal pid1-error.
+ * thin wrapper over chown(2).  v0.6 item 2 caller: session.el pre-
+ * creates /var/emacs/users/NAME/ as root (mode 0700), then chowns
+ * it to the spawned user so the per-user emacs can write its
+ * init.el there.  the floor (uid >= 1000, gid >= 1000) mirrors
+ * pid1-spawn-as-uid: this primitive must never be used to drop
+ * a file to root or a system uid, because the elisp side has no
+ * other call site for chown and we want defense in depth against
+ * a callsite bug.  if a future caller needs to chown to a system
+ * uid, add a separate primitive with explicit policy rather than
+ * widening this one. */
+static emacs_value
+Fpid1_chown(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+            void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 3)
+        return pid1_signal_errno(env, "pid1: pid1-chown needs 3 args",
+                                 EINVAL);
+    char path[EXTRACT_BUF_MAX];
+    if (extract_cstring_into(env, args[0], path, sizeof path) < 0)
+        return Qnil;
+    intmax_t uid_im = env->extract_integer(env, args[1]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    intmax_t gid_im = env->extract_integer(env, args[2]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (uid_im < 1000)
+        return pid1_signal_errno(env, "pid1: chown: uid below floor",
+                                 EINVAL);
+    if (gid_im < 1000)
+        return pid1_signal_errno(env, "pid1: chown: gid below floor",
+                                 EINVAL);
+    if (uid_im > 0x7fffffff || gid_im > 0x7fffffff)
+        return pid1_signal_errno(env, "pid1: chown: uid/gid out of range",
+                                 EINVAL);
+    if (chown(path, (uid_t)uid_im, (gid_t)gid_im) < 0)
+        return pid1_signal_errno(env, "pid1: chown", errno);
+    return env->intern(env, "t");
+}
+
 /* sync + reboot(2) wrapper shared by both directions. CMD is one of
  * RB_POWER_OFF or RB_AUTOBOOT. on success the kernel kills every
  * process including the caller, so a successful return is
@@ -2703,6 +2746,11 @@ emacs_module_init(struct emacs_runtime *ert)
         "fsync the directory at PATH. Return t. Use after rename to commit durably.",
         NULL);
     pid1_defalias(env, "pid1-fsync-dir", fsd);
+
+    emacs_value chn = env->make_function(env, 3, 3, Fpid1_chown,
+        "chown(2) PATH to UID:GID. Floor 1000 on both. Return t.",
+        NULL);
+    pid1_defalias(env, "pid1-chown", chn);
 
     emacs_value off = env->make_function(env, 0, 0, Fpid1_poweroff,
         "Sync, then reboot(RB_POWER_OFF). Does not return on success.",

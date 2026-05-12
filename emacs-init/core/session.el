@@ -236,6 +236,50 @@ the child without a cwd."
    ((not (file-readable-p home))  'unreadable)
    (t t)))
 
+(defun session--ensure-user-state-dir (sess)
+  "Ensure /var/emacs/users/NAME/ exists, owned by SESS's uid:gid, mode 0700.
+v0.6 item 2.1: the per-user emacs reads (and may write) its own
+init.el under /var/emacs/users/NAME/.  the supervisor runs as root,
+so it is the only side that can lay the directory down with the
+right ownership; once chowned the child has full control of its
+own state dir without the supervisor needing to touch it again.
+
+idempotent on the directory: if the dir exists we leave it alone
+on the make-directory call but still re-issue chmod and pid1-chown.
+re-chmod is harmless on a correctly-moded dir, and re-chown is the
+SAFE default if an operator changed the user's uid via passwd
+between sessions: the next spawn quietly fixes ownership.
+
+mode 0700 because the directory is per-user state; other users on
+the box must not be able to read another user's init.el.
+
+failure posture: non-fatal.  a failed ensure leaves the dir in
+whatever state the partial run produced (probably missing, possibly
+mis-owned); the child still spawns, but its `-l /var/emacs/users/
+NAME/init.el' will silently not happen because session--child-argv
+gates it on `file-readable-p'.  the user loses per-user init for
+this session; the next spawn retries.  we panic-handle to leave a
+breadcrumb but do not propagate.
+
+pid1-chown is gated on `fboundp' so loading session.el on a dev
+host (where the pid1 module is not loaded) does not signal."
+  (let* ((name (geos-session-name sess))
+         (uid  (geos-session-uid sess))
+         (gid  (geos-session-gid sess))
+         (dir  (format "/var/emacs/users/%s" name)))
+    (condition-case err
+        (progn
+          (unless (file-directory-p dir)
+            (make-directory dir t))
+          (set-file-modes dir #o700)
+          (when (fboundp 'pid1-chown)
+            (funcall (symbol-function 'pid1-chown) dir uid gid))
+          t)
+      (error
+       (panic-handle err
+                     (cons 'session--ensure-user-state-dir name))
+       nil))))
+
 (defconst session--child-program "/usr/bin/emacs"
   "Where the per-user emacs lives.  matches the guix profile's emacs
 symlink.  the spawn ABI accepts an absolute path; we hard-code the
@@ -259,15 +303,11 @@ init.el at all.")
   "argv the child emacs sees.  -Q so we inherit nothing from PID 1's
 init tree; --name stamps the X resource name as `geos-user-NAME' so
 the supervisor's EXWM can identify which logged-in user owns a new
-X client window; -l the system-shipped user-init unconditionally,
-then -l the per-user init.el iff it exists.
+X client window; -l the system-shipped user-init unconditionally.
 
-argv shape:
+argv shape (single form, v0.6 item 2.2 onward):
   (\"emacs\" \"-Q\" \"--name\" \"geos-user-NAME\"
    \"-l\" \"/etc/geos/user-init.el\")
-  (\"emacs\" \"-Q\" \"--name\" \"geos-user-NAME\"
-   \"-l\" \"/etc/geos/user-init.el\"
-   \"-l\" \"/var/emacs/users/NAME/init.el\")
 
 the system user-init at `session--user-init-path' is UNCONDITIONAL.
 extra-special-file in guix-system/system.scm guarantees the path
@@ -277,10 +317,16 @@ image) the child's `-l' fails and emacs exits non-zero, the poller
 sees a crashed session, and supervise treats it like any other
 crashloop.  loud failure is the correct response.
 
-load order: system init FIRST, per-user init SECOND.  a per-user
-init.el can override system defaults (rebind C-c e q, redefine
-`geos-logout', etc.) but the system defaults are always available
-even when the per-user file is absent.
+per-user init.el loading: the system user-init has its own
+`user-init--load-per-user' that runs at the END of the load chain
+and reads /var/emacs/users/NAME/init.el iff present, regular, and
+owned by the running uid.  doing the load USER-SIDE (rather than
+through a supervisor-side -l on argv) is the load-bearing v0.6
+shift: the ownership/regular-file gates execute under the spawned
+uid after privilege drop, which is the only place that check is
+meaningful.  a supervisor-side `file-readable-p' as root could not
+distinguish a user-owned init.el from a root-owned one; the user-
+side load can.
 
 --name placement: after -Q (so -Q's purge of init paths does not
 also swallow the resource-name argument) and before -l (argv order
@@ -297,25 +343,15 @@ here cannot inject shell metacharacters, spaces, or anything Xlib
 would reject as a resource name.  the upstream gate is what makes
 this safe; we deliberately do not re-validate.
 
-per-user init file is optional by design: v0.5 has no per-user
-dotfile story, since there is no bash and no .bashrc.  if
-/var/emacs/users/NAME/init.el exists it loads on top of the system
-init; otherwise the child gets `-Q' plus the system init plus the
---name stamp.
-
 runtime-override caveat: the child is a full emacs, so a per-user
 init.el can mutate `x-resource-name' (or set the frame `name'
 parameter) before the first frame is mapped and defeat the
 `geos-user-' stamp.  the supervisor's EXWM routing degrades
 gracefully: the window stays on whatever workspace EXWM places it
 on.  no security implication; a UX/audit gotcha to keep in mind
-when per-user dotfiles become a real thing in v0.6+."
-  (let* ((init (format "/var/emacs/users/%s/init.el" name))
-         (base (list "emacs" "-Q" "--name" (concat "geos-user-" name)
-                     "-l" session--user-init-path)))
-    (if (file-readable-p init)
-        (append base (list "-l" init))
-      base)))
+once per-user dotfiles become common."
+  (list "emacs" "-Q" "--name" (concat "geos-user-" name)
+        "-l" session--user-init-path))
 
 (defun session--child-env (name home)
   "Minimal environment for the child emacs.
@@ -382,6 +418,13 @@ nil cleanly so the file loads on a v0.4 image."
              (geos-session-name sess))
     nil)
    (t
+    ;; v0.6 item 2.1: lay the per-user state dir down with correct
+    ;; ownership BEFORE handing control to the child.  non-fatal on
+    ;; failure (see session--ensure-user-state-dir docstring) so we
+    ;; do not short-circuit the spawn here; the child boots without
+    ;; its optional per-user init.el and the operator sees the
+    ;; breadcrumb in *panic*.
+    (session--ensure-user-state-dir sess)
     (condition-case err
         (let* ((name (geos-session-name sess))
                (pid (funcall (symbol-function 'pid1-spawn-as-uid)

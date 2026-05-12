@@ -161,6 +161,64 @@ load-path additions are durable for the rest of the session."
       (user-init--push-system-site-lisp)))
   (user-init--trace "chain done"))
 
+(defun user-init--load-per-user ()
+  "Load /var/emacs/users/$USER/init.el iff present, regular, and owned by us.
+v0.6 item 2.2: a user MAY drop an init.el into their state dir to
+customize their per-user emacs.  the directory is pre-created and
+chowned by the supervisor (session.el's
+`session--ensure-user-state-dir') so the user owns it mode 0700;
+this loader respects that boundary by reading the file under the
+running uid, NOT through the supervisor's -l argv as the v0.5
+session--child-argv used to.  the move matters because it lets us
+gate on ownership in-process instead of trusting a supervisor-side
+existence check that runs as root.
+
+three gates, all of them required:
+
+  - file-exists-p: a missing file is the common case (no per-user
+    customization yet).  trace and return cleanly.
+
+  - regular file: refuse symlinks, sockets, devices.  the dir is
+    user-writable mode 0700 so the user can drop a symlink to
+    /etc/passwd or /dev/zero in there; loading either is a way to
+    mis-target the read.  the type slot of `file-attributes' is nil
+    iff regular file (t for dir, string for symlink target).
+
+  - owner == us: a file we did not write must not be loaded by us.
+    with the dir mode 0700 the only way for a foreign-owned file to
+    appear here is for root (the supervisor) to have written it,
+    which is a bug or an attack vector; loading it would let root
+    inject code into our session through the wrong channel.  the
+    check costs one stat(2) and shuts the door.
+
+errors are routed through panic-handle.  a broken per-user init.el
+must not block the user from a usable emacs: trace, panic-handle,
+move on."
+  (condition-case err
+      (let* ((user  (user-login-name))
+             (path  (format "/var/emacs/users/%s/init.el" user))
+             (attrs (and (file-exists-p path)
+                         (file-attributes path 'integer))))
+        (cond
+         ((null attrs)
+          (user-init--trace (format "no per-user init at %s" path)))
+         ((not (eq (file-attribute-type attrs) nil))
+          (user-init--trace
+           (format "per-user init %s not a regular file, refusing"
+                   path)))
+         ((not (= (file-attribute-user-id attrs) (user-uid)))
+          (user-init--trace
+           (format "per-user init %s owned by uid %d not %d, refusing"
+                   path (file-attribute-user-id attrs) (user-uid))))
+         (t
+          (load path nil 'nomessage)
+          (user-init--trace (format "loaded per-user init %s" path)))))
+    (error
+     (if (fboundp 'panic-handle)
+         (panic-handle err 'user-init--load-per-user)
+       (user-init--trace
+        (format "per-user init load failed: %S" err))))))
+
 (defun geos-logout ()
   "End the current GEOS per-user emacs session.
 prompts for confirmation, then calls `kill-emacs' with status 0.
@@ -184,6 +242,7 @@ convention for system-supplied commands."
 (global-set-key (kbd "C-c e q") #'geos-logout)
 
 (user-init--run-chain)
+(user-init--load-per-user)
 
 (provide 'geos-user-init)
 ;;; user-init.el ends here

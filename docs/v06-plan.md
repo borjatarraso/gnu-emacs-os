@@ -199,6 +199,30 @@ system-managed store path; the user cannot customise it. Once item
 1 lands, the user wants to set their own keybindings, packages, and
 faces, and they want those settings to survive a logout.
 
+**Shipped (as of this commit).** Three landings:
+
+- `pid1/emacs-init.c` grew `Fpid1_chown` (defaliased `pid1-chown`),
+  the C primitive needed for the supervisor to drop the per-user
+  state dir to the right uid:gid. Same floor as `pid1-spawn-as-uid`
+  (uid >= 1000, gid >= 1000).
+- `emacs-init/core/session.el` gained `session--ensure-user-state-dir`
+  called from `session--spawn-child` before the spawn ABI fires. It
+  creates `/var/emacs/users/NAME/` mode 0700 and chowns it to NAME.
+  Idempotent; non-fatal on failure (a child still boots, just
+  without per-user init).
+- `emacs-init/user/user-init.el` gained `user-init--load-per-user`
+  called after the system chain. Three gates: file-exists, regular
+  file (refuses symlinks/devices), owner == us. The check runs
+  user-side, AFTER privilege drop, which is the only place the
+  ownership gate is meaningful. `session--child-argv` lost its
+  conditional `-l` for the same file; loading is now user-side
+  exclusively to avoid double-load.
+
+The recovery story (per-user init.el wedges login): a broken
+init.el routes through panic-handle and the user-emacs lands on
+its own *panic* buffer; the supervisor side is untouched and
+`C-c e q` from the wedged child returns the user to *login*.
+
 **Files to touch (existing):**
 - `emacs-init/user/user-init.el` (adds an optional load step at the
   end: read `/var/emacs/users/NAME/init.el` if present, route any
