@@ -125,6 +125,23 @@ one missing-feature event must not abort the rest of the boot."
 ;;     `emacs-build-time', literal "GNU"/"0.9" placeholders).  the
 ;;     placeholder release will get a real source once the side-branch
 ;;     port wires a Mach-RPC equivalent.
+;;
+;;   - services/journal-tail.el spawns `dd if=/dev/kmsg' under
+;;     supervise.el.  /dev/kmsg is linux-only; on hurd the service is
+;;     still registered (so M-x services renders the same row across
+;;     kernels) but with :autostart nil so the supervisor never spawns
+;;     the dd.  v0.8 will replace this with a hurd-native source (a
+;;     mach-rpc verb against the kernel log server).  branch lives at
+;;     the supervise-register call, conditioned on
+;;     `geos-kernel-linux-p'.
+;;
+;;   - buffers/journal.el has a fallback in-buffer dd spawner
+;;     `journal-buffer--start-kmsg' for the dev-host case where the
+;;     supervisor is not running.  on hurd the spawner branches up
+;;     front: routes a clean `geos-port-unimplemented' for
+;;     'journal-kmsg, drops a "no /dev/kmsg on this kernel" banner
+;;     into the buffer, and returns nil.  panic + messages tails are
+;;     unaffected and keep flowing.
 
 (provide 'port)
 ;;; port.el ends here

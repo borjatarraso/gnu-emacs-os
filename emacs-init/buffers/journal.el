@@ -29,6 +29,7 @@
 ;; and routed through panic-handle; the stream keeps flowing.
 
 (require 'panic)
+(require 'port)
 
 (defvar journal-buffer-name "*journal*"
   "Name of the canonical system log stream buffer.
@@ -296,7 +297,30 @@ satisfies /no-shell-check. cat would also work but cat under
 emacs-init's no-shell stub feels too close to the shell line; dd
 is unambiguously a binary tool. iflag=nonblock would be nicer but
 not all coreutils builds have it; we accept blocking reads since
-dd is in its own process."
+dd is in its own process.
+
+On hurd /dev/kmsg does not exist.  spawning dd here would error in
+make-process (ENOENT on the device) and the kmsg-down flag would
+flip on its own, but the panic-handle entry the C-side ENOENT
+produces is ugly and confusing (looks like dd is missing rather
+than the device).  branch up front: route a clean port-unimplemented
+event for `journal-kmsg' and return nil.  the in-buffer renderer
+already copes with a never-started follower (panic + messages tails
+keep working), and `journal-buffer--update-header' shows kmsg:down."
+  (cond
+   ((not (geos-kernel-linux-p))
+    (with-current-buffer buf
+      (setq journal-buffer--kmsg-down t)
+      (let ((inhibit-read-only t))
+        (save-excursion
+          (goto-char (point-max))
+          (insert (propertize
+                   "-- no /dev/kmsg on this kernel; kmsg follower not started"
+                   'face 'journal-buffer-warn-face))
+          (insert "\n"))))
+    (geos-port-unimplemented 'journal-kmsg)
+    nil)
+   (t
   (condition-case err
       (progn
         ;; (MAJOR, round-5) initialise the residue + down flag BEFORE
@@ -333,7 +357,7 @@ dd is in its own process."
      (with-current-buffer buf
        (setq journal-buffer--kmsg-down t))
      (when (fboundp 'panic-handle)
-       (panic-handle err 'journal-buffer-start-kmsg)))))
+       (panic-handle err 'journal-buffer-start-kmsg)))))))
 
 ;; ---------------- panic buffer tail ----------------
 

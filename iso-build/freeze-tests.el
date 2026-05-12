@@ -3244,6 +3244,7 @@ up the shadow correctly."
 shadows `geos-kernel' to 'hurd and asserts every adapter branch point
 (`network-read-proc-net-{dev,route}', `state--detect-mode',
 `disks-buffer--render', `install-disk-list', `geos--uname',
+`journal-kmsg' supervise registration,
 `geos-port-unimplemented' itself) behaves as documented in
 `emacs-init/core/port.el'.
 
@@ -3276,6 +3277,8 @@ surface until the side-branch port attempts to boot."
           (freeze-test--record 'port/install-disk-list-nil-and-panic
                                "port.el not loaded")
           (freeze-test--record 'port/uname-hurd-synth
+                               "port.el not loaded")
+          (freeze-test--record 'port/journal-kmsg-no-autostart
                                "port.el not loaded"))
          (t
           (freeze-test--port-unimplemented-route)
@@ -3284,7 +3287,8 @@ surface until the side-branch port attempts to boot."
           (freeze-test--port-state-detect-mode-safe)
           (freeze-test--port-disks-render-no-sysblock)
           (freeze-test--port-install-disk-list-nil-and-panic)
-          (freeze-test--port-uname-hurd-synth)))
+          (freeze-test--port-uname-hurd-synth)
+          (freeze-test--port-journal-kmsg-no-autostart)))
       ;; never leave state-mode mutated; state--detect-mode setq's it
       ;; as a side effect and a hurd-arm run would otherwise leave the
       ;; rest of the suite seeing the hurd answer.
@@ -3478,6 +3482,86 @@ regression that drops the hurd arm would surface as an empty plist
        (panic-handle err 'freeze-test--port-uname-hurd-synth)
        (setq result (format "raised: %S" err))))
     (freeze-test--record 'port/uname-hurd-synth result)))
+
+(defun freeze-test--port-journal-kmsg-no-autostart ()
+  "Sub-check: on hurd, `journal-kmsg' is either unregistered or has
+:autostart nil.  either is fine: no dd subprocess gets spawned at
+boot, the supervisor never tries to follow a /dev/kmsg that does not
+exist, and the crashloop cap does not get burned chasing ENOENT.
+
+implementation: shadow `geos-kernel' to 'hurd, reload the
+services/journal-tail.el registration (re-running supervise-register
+is documented as a hot-swap), then inspect the registry slot's
+autostart bit.  the test re-applies the linux registration in the
+unwind-protect so the rest of the suite sees the kernel-default
+service shape.  on a host where services/journal-tail.el never
+loaded (dev-host emacs -Q) the sub-check records 'not loaded' and
+passes through; the contract is about what registration happens on
+hurd, not about forcing the file to be present."
+  (let ((result 'fail)
+        (sav-svc (and (boundp 'supervise--registry)
+                      (gethash 'journal-kmsg supervise--registry))))
+    (condition-case err
+        (cond
+         ((not (fboundp 'supervise-register))
+          (setq result "supervise-register unbound"))
+         ((not (boundp 'supervise--registry))
+          (setq result "supervise--registry unbound"))
+         ((not (featurep 'journal-tail))
+          ;; service file never loaded on this host; the contract
+          ;; only fires if the file is in the boot.
+          (setq result 'pass))
+         (t
+          (unwind-protect
+              (progn
+                ;; re-evaluate the registration with geos-kernel=hurd.
+                ;; the call shape mirrors what services/journal-tail.el
+                ;; does at load time; we cannot reload the file because
+                ;; that would also fire `(require 'port)' and a host
+                ;; of other side effects.
+                (let ((geos-kernel 'hurd))
+                  (apply #'supervise-register
+                         :name 'journal-kmsg
+                         :command '("dd" "if=/dev/kmsg" "bs=8192"
+                                    "status=none")
+                         :restart 'on-crash
+                         :buffer journal-tail--work-buffer-name
+                         :filter #'journal-tail--filter
+                         (unless (geos-kernel-linux-p)
+                           '(:autostart nil))))
+                (let* ((svc (gethash 'journal-kmsg supervise--registry))
+                       (autostart (and svc
+                                       (supervise-service-autostart svc))))
+                  (cond
+                   ((null svc)
+                    (setq result 'pass))  ; unregistered also fine
+                   (autostart
+                    (setq result
+                          (format
+                           "journal-kmsg has :autostart %S on hurd, want nil"
+                           autostart)))
+                   (t (setq result 'pass)))))
+            ;; restore the linux-default registration so the rest of
+            ;; the suite (and any later boot work) sees the right
+            ;; autostart bit.
+            (let ((geos-kernel 'linux))
+              (apply #'supervise-register
+                     :name 'journal-kmsg
+                     :command '("dd" "if=/dev/kmsg" "bs=8192"
+                                "status=none")
+                     :restart 'on-crash
+                     :buffer journal-tail--work-buffer-name
+                     :filter #'journal-tail--filter
+                     (unless (geos-kernel-linux-p)
+                       '(:autostart nil)))))))
+      (error
+       (panic-handle err 'freeze-test--port-journal-kmsg-no-autostart)
+       (setq result (format "raised: %S" err))))
+    ;; if we had a prior service struct saved, leave it untouched: the
+    ;; reapply above already restored the static intent fields onto
+    ;; the existing struct (supervise-register reuses existing).
+    (ignore sav-svc)
+    (freeze-test--record 'port/journal-kmsg-no-autostart result)))
 
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.

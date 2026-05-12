@@ -26,6 +26,7 @@
 
 (require 'supervise)
 (require 'panic)
+(require 'port)
 (require 'journal-buffer)
 
 (defconst journal-tail--work-buffer-name " *supervise:journal-kmsg*"
@@ -91,11 +92,24 @@ window of records."
 ;; are typically << 1 KiB), status=none silences the byte-count line
 ;; that dd writes to stderr on exit.  no shell, no eshell, no -c
 ;; wrapper: this satisfies /no-shell-check.
-(defservice journal-kmsg
-  :command ("dd" "if=/dev/kmsg" "bs=8192" "status=none")
-  :restart on-crash
-  :buffer journal-tail--work-buffer-name
-  :filter journal-tail--filter)
+;;
+;; kernel branch.  /dev/kmsg is a linux-only device.  on hurd it does
+;; not exist; spawning dd against it would error out and the
+;; supervisor would respawn until the crashloop cap trips.  loud, ugly
+;; failure.  we still register the service on hurd so M-x services
+;; renders the same row across kernels (drift between kernels in the
+;; registry is its own bug), but with :autostart nil so no subprocess
+;; gets spawned until a hurd-native kmsg equivalent lands (v0.8: a
+;; mach-rpc source for the kernel log).  go through supervise-register
+;; here so the :autostart keyword can be computed at runtime; defservice
+;; takes its plist as literal data and would not see geos-kernel-linux-p.
+(apply #'supervise-register
+       :name 'journal-kmsg
+       :command '("dd" "if=/dev/kmsg" "bs=8192" "status=none")
+       :restart 'on-crash
+       :buffer journal-tail--work-buffer-name
+       :filter #'journal-tail--filter
+       (unless (geos-kernel-linux-p) '(:autostart nil)))
 
 (provide 'journal-tail)
 ;;; journal-tail.el ends here
