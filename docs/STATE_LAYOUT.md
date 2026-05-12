@@ -57,6 +57,14 @@ populates `/dev/disk/by-label/` from the ext4 superblock.
   sessions/     per-session records the session registry persists so
                 a supervisor restart can reattach to a still-living
                 per-user emacs (registry-rehydrate path).
+                v0.6 item 6.1 added :workspace, the integer EXWM
+                workspace index the user's emacs lives on (or nil
+                pre-EXWM-hook).  v0.6 item 6.3 made session.el
+                authoritative on workspace allocation: the index is
+                stamped before pid1-spawn-as-uid, the manage-finish
+                hook just reads it back.  sticky across logout: a
+                relogin reuses the prior workspace when free.  cap
+                of `session-max-workspaces' (3) concurrent users.
   lockouts/     one file per locked-out username.  v0.6 item 5.3:
                 10 bad attempts against ONE name inside 5 minutes
                 writes /var/emacs/lockouts/NAME with a :locked-until

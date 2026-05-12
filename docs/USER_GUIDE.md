@@ -168,6 +168,45 @@ Defenses on the *login* surface:
     record in the audit log. A fresh image with no auth log yet
     shows nothing.
 
+### concurrent sessions
+
+GEOS can host more than one logged-in user at a time. Workspace
+0 belongs to the supervisor (this is where *login* draws); each
+logged-in user lands on their own EXWM workspace, starting at 1
+and counting up. The cap is three concurrent users (workspaces
+1, 2, 3). Past that, a fourth login spawns without a workspace
+stamp and the per-user window lands on whatever workspace EXWM
+picks; log somebody out first.
+
+The session-active view of *login* prints the workspace number
+under `child pid`. When that line says `(unassigned, EXWM hook
+has not fired yet)`, the supervisor has not yet seen the X
+window land; this is a sub-second race on a real boot, longer
+under heavy load.
+
+Keys on the session-active view:
+
+  - `q`  log out THIS session (SIGTERM, then return to the
+         username prompt).
+  - `n`  start a fresh login WITHOUT ending the current session.
+         The prior user keeps running on their workspace; the
+         multi-session footer lists them so you remember.
+  - `s`  switch to a running session's workspace. Auto-picks
+         when only one other session is live; otherwise prompts
+         with completion against the running registry.
+
+The active-sessions footer (on both the username prompt and the
+session-active view) lists every 'running session with name,
+pid, and workspace. Empty registry prints no footer (no "0
+sessions" noise on a fresh boot).
+
+A logout of one user does NOT disturb the others: only that
+user's child receives SIGTERM, only that user's workspace
+becomes free for reuse, and *login* re-appears only when no
+session remains running. The freed workspace is sticky on
+relogin: if the same user comes back before the slot is
+reassigned, they land on their old workspace number.
+
 ### the audit log
 
 Every login outcome appends one sexp line to
