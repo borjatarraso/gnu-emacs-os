@@ -74,8 +74,15 @@ jobs:
           # emacs-init/ and pid1/ for shell-wrapper patterns.  the
           # shstub/ tree is allowed /bin/sh references because it
           # implements the stub; exceptions.scm is allowed too.
+          #
+          # C/scheme patterns use word boundaries so the function
+          # suffix `_system(` (e.g. `link_current_system(`) does not
+          # match `system\(`.  elisp patterns require an opening
+          # paren prefix so comments that name the banned function
+          # (e.g. `;; no shell-command`) do not fail the gate; only
+          # actual call expressions trip it.
           if rg -n \
-            -e 'system\(|popen\(|execlp\("sh"|shell-command|shell-command-to-string|async-shell-command|with-shell|/bin/bash|/bin/dash|/bin/zsh' \
+            -e '\bsystem\(|\bpopen\(|execlp\("sh"|execve[^)]*"/bin/sh"|\(shell-command\b|\(shell-command-to-string\b|\(async-shell-command\b|call-process[^)]*"(sh|bash|zsh|dash)"|start-process[^)]*"(sh|bash|zsh|dash)"|\bsystem\*|\(with-shell\b|/bin/bash|/bin/dash|/bin/zsh' \
             emacs-init/ pid1/ guix-system/ \
             --glob '!exceptions.scm' \
             --glob '!shstub/**' \
