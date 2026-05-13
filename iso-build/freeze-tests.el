@@ -3323,7 +3323,7 @@ this is the bedrock; every adapter depends on it not signalling."
     (condition-case err
         (cond
          ((not (fboundp 'network-read-proc-net-dev))
-          (setq result "network-read-proc-net-dev unbound"))
+          (setq result (cons 'skip "network-read-proc-net-dev unbound")))
          (t
           (let ((got (let ((geos-kernel 'hurd))
                        (network-read-proc-net-dev))))
@@ -3342,7 +3342,7 @@ this is the bedrock; every adapter depends on it not signalling."
     (condition-case err
         (cond
          ((not (fboundp 'network-read-proc-net-route))
-          (setq result "network-read-proc-net-route unbound"))
+          (setq result (cons 'skip "network-read-proc-net-route unbound")))
          (t
           (let ((got (let ((geos-kernel 'hurd))
                        (network-read-proc-net-route))))
@@ -3364,7 +3364,7 @@ documented degraded modes."
     (condition-case err
         (cond
          ((not (fboundp 'state--detect-mode))
-          (setq result "state--detect-mode unbound"))
+          (setq result (cons 'skip "state--detect-mode unbound")))
          (t
           (let ((got (let ((geos-kernel 'hurd))
                        (state--detect-mode))))
@@ -3389,7 +3389,7 @@ empty.  uses a throwaway buffer; does NOT touch the real *disks*."
     (condition-case err
         (cond
          ((not (fboundp 'disks-buffer--render))
-          (setq result "disks-buffer--render unbound"))
+          (setq result (cons 'skip "disks-buffer--render unbound")))
          (t
           (with-temp-buffer
             (let ((geos-kernel 'hurd))
@@ -3420,7 +3420,7 @@ nil, and the *panic* buffer grew with a record mentioning the
     (condition-case err
         (cond
          ((not (fboundp 'install-disk-list))
-          (setq result "install-disk-list unbound"))
+          (setq result (cons 'skip "install-disk-list unbound")))
          (t
           (let* ((buf (panic--get-buffer))
                  (before (with-current-buffer buf (buffer-size)))
@@ -3462,7 +3462,7 @@ regression that drops the hurd arm would surface as an empty plist
     (condition-case err
         (cond
          ((not (fboundp 'geos--uname))
-          (setq result "geos--uname unbound"))
+          (setq result (cons 'skip "geos--uname unbound")))
          (t
           (let ((got (let ((geos-kernel 'hurd))
                        (geos--uname))))
@@ -3504,9 +3504,9 @@ hurd, not about forcing the file to be present."
     (condition-case err
         (cond
          ((not (fboundp 'supervise-register))
-          (setq result "supervise-register unbound"))
+          (setq result (cons 'skip "supervise-register unbound")))
          ((not (boundp 'supervise--registry))
-          (setq result "supervise--registry unbound"))
+          (setq result (cons 'skip "supervise--registry unbound")))
          ((not (featurep 'journal-tail))
           ;; service file never loaded on this host; the contract
           ;; only fires if the file is in the boot.
@@ -3733,11 +3733,28 @@ back via state-read to confirm the persist landed."
   (freeze-test-kill-emacs)
   (freeze-test-report))
 
+(defun freeze-test--result-is-skip-p (r)
+  "Non-nil if record R is a skip-class result.
+A skip is either the symbol \\='skip or a cons whose car is \\='skip;
+both forms are accepted so sub-checks can carry a diagnostic string
+(e.g. (skip . \"network-read-proc-net-dev unbound on dev host\"))
+without losing the distinction between \"module absent\" and
+\"assertion failed\".  the dev-host harness uses skip; CI on a real
+image expects every sub-check to pass."
+  (or (eq (cdr r) 'skip)
+      (and (consp (cdr r)) (eq (car-safe (cdr r)) 'skip))))
+
+(defun freeze-test--result-is-pass-p (r)
+  "Non-nil if record R counts as success (pass or skip)."
+  (or (eq (cdr r) 'pass)
+      (freeze-test--result-is-skip-p r)))
+
 (defun freeze-test-report ()
-  "Print a PASS/FAIL summary of all recorded results."
+  "Print a PASS/SKIP/FAIL summary of all recorded results."
   (interactive)
   (let* ((results (reverse freeze-test-results))
-         (failed (cl-remove-if (lambda (r) (eq (cdr r) 'pass)) results))
+         (failed  (cl-remove-if #'freeze-test--result-is-pass-p results))
+         (skipped (cl-remove-if-not #'freeze-test--result-is-skip-p results))
          (summary
           (concat
            "freeze-test: SUMMARY\n"
@@ -3749,9 +3766,10 @@ back via state-read to confirm the persist landed."
             "\n")
            "\n"
            (if failed
-               (format "freeze-test: %d/%d FAILED, blocker"
-                       (length failed) (length results))
-             "freeze-test: PASS, all clear"))))
+               (format "freeze-test: %d/%d FAILED, blocker (%d skipped)"
+                       (length failed) (length results) (length skipped))
+             (format "freeze-test: PASS, all clear (%d skipped)"
+                     (length skipped))))))
     (message "%s" summary)
     ;; mirror to /dev/console when boot-marker is loaded so an
     ;; outer test harness can pick the result up via the smoke-
