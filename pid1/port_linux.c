@@ -252,6 +252,22 @@ linux_suspend(const char *state)
     return 0;
 }
 
+/* peer credentials over AF_UNIX; SO_PEERCRED returns the kernel's
+ * recorded ucred snapshot from the peer's connect() instant.  the
+ * full contract lives in port_layer.h; see there for Hurd semantics
+ * and the supervisor's ENOSYS handling. */
+static int
+linux_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
+{
+    struct ucred peer;
+    socklen_t plen = sizeof peer;
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &plen) < 0)
+        return -1;
+    if (uid_out) *uid_out = (uint32_t)peer.uid;
+    if (gid_out) *gid_out = (uint32_t)peer.gid;
+    return 0;
+}
+
 /* the table.  one assignment per slot, no NULLs.  the Hurd backend
  * will provide a parallel const port_caps port_hurd_impl with the
  * same shape. */
@@ -263,6 +279,7 @@ const port_caps port_linux_impl = {
     .set_route_default = linux_set_route_default,
     .reboot            = linux_reboot_cmd,
     .suspend           = linux_suspend,
+    .get_peer_cred     = linux_get_peer_cred,
 };
 
 /* the active pointer.  starts NULL; main() and emacs_module_init()

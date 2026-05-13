@@ -93,6 +93,21 @@ typedef struct port_caps {
      * (void) at the top of the body to keep -Wunused-parameter quiet
      * under -Werror. */
     int (*suspend)(const char *state);
+
+    /* peer credentials for an AF_UNIX SOCK_STREAM accepted fd.
+     * on Linux this is getsockopt(SO_PEERCRED) returning struct ucred.
+     * on Hurd there is no SO_PEERCRED; auth ports passed via mach_msg
+     * are the native equivalent but require a separate handshake the
+     * RPC channel does not have yet.  the Hurd backend returns -1 with
+     * errno=ENOSYS until a real handshake lands.  the supervisor side
+     * (Fpid1_rpc_poll) special-cases ENOSYS by closing the connection
+     * and returning nil to the poller, so the per-200ms timer does not
+     * panic forever on the unsupported kernel; every other errno is
+     * forwarded as pid1-error and panic-handled.  UID_OUT / GID_OUT
+     * are written only on success; on failure their contents are
+     * unspecified, and the caller initialises them to a non-root
+     * sentinel before the port call as defence in depth. */
+    int (*get_peer_cred)(int fd, uint32_t *uid_out, uint32_t *gid_out);
 } port_caps;
 
 /* the active backend.  starts NULL.  exactly one assignment per

@@ -1867,10 +1867,11 @@ Fpid1_chown(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
 /*
  * the user-emacs has no `pid1-*' access by design; privileged operations
  * (reboot, package install, passwd-set, etc.) are reachable only via
- * this socket.  authentication is SO_PEERCRED (the kernel records the
- * uid/gid/pid of the connecting process at connect time and the
- * supervisor reads them off the accepted fd); authorisation lives in
- * elisp (rpc-server.el's verb dispatcher).
+ * this socket.  authentication is peer-credential lookup, routed
+ * through port->get_peer_cred so Hurd can swap in its own auth-port
+ * handshake later: on Linux today the backend reads SO_PEERCRED, which
+ * the kernel snapshots at the peer's connect() instant; authorisation
+ * lives in elisp (rpc-server.el's verb dispatcher).
  *
  * wire format:
  *   request:  4-byte big-endian length, then LENGTH bytes of sexp text.
@@ -2051,17 +2052,45 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
         close(conn);
         return pid1_signal_errno(env, "pid1: rpc-poll: timeout setup", err);
     }
-    /* peer credentials.  SO_PEERCRED is linux-specific; returns the
-     * ucred snapshot taken at connect().  uid/gid are what the kernel
-     * had for the peer at that instant, so a setuid race window does
-     * not exist (the peer cannot have been a different uid when it
-     * connect()ed than when accept() saw it). */
-    struct ucred peer;
-    socklen_t plen = sizeof peer;
-    if (getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &peer, &plen) < 0) {
+    /* peer credentials, through the port layer.  on Linux this is
+     * getsockopt(SO_PEERCRED) returning a ucred snapshot taken at the
+     * peer's connect() instant, so a setuid race between connect and
+     * accept cannot fool us.  on Hurd the backend returns -1 with
+     * errno=ENOSYS until a real auth-port handshake lands; we treat
+     * that one errno as "refuse this client and keep the poller alive"
+     * (close the fd and return nil, same shape as "no pending
+     * connection"), because pid1-rpc-poll runs on a 200ms timer and
+     * surfacing ENOSYS as pid1-error would panic the tick forever.
+     * any other errno (a real socket failure on a backend that
+     * normally implements the call) still routes through pid1-error
+     * because that is a genuine bug worth surfacing.
+     *
+     * (uint32_t)-1 sentinel rather than 0: the header says UID_OUT/
+     * GID_OUT are unspecified on failure, and if a future refactor
+     * ever propagates the failure values, leaking uid 0 (root) by
+     * default would be the worst possible footgun.  -1 is "nobody"
+     * on every kernel we target. */
+    uint32_t peer_uid = (uint32_t)-1, peer_gid = (uint32_t)-1;
+    if (port->get_peer_cred(conn, &peer_uid, &peer_gid) < 0) {
         int err = errno;
+        if (err == ENOSYS) {
+            /* log the refusal once per boot: the 200ms tick would
+             * otherwise spew the same line at 5 Hz for every probe
+             * during the lifetime of an unsupported kernel.  static
+             * bool is safe because emacs is single-threaded. */
+            static int warned_enosys = 0;
+            if (!warned_enosys) {
+                warned_enosys = 1;
+                static const char m[] =
+                    "pid1: rpc-poll: peer cred unsupported on this kernel, "
+                    "refusing clients\n";
+                ssize_t r = write(2, m, sizeof m - 1); (void)r;
+            }
+            close(conn);
+            return Qnil;
+        }
         close(conn);
-        return pid1_signal_errno(env, "pid1: rpc-poll: SO_PEERCRED", err);
+        return pid1_signal_errno(env, "pid1: rpc-poll: get_peer_cred", err);
     }
     uint8_t lbuf[4];
     if (rpc_read_full(conn, lbuf, 4) < 0) {
@@ -2092,8 +2121,8 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
     emacs_value kw_gid     = env->intern(env, ":gid");
     emacs_value kw_payload = env->intern(env, ":payload");
     emacs_value v_fd  = env->make_integer(env, conn);
-    emacs_value v_uid = env->make_integer(env, peer.uid);
-    emacs_value v_gid = env->make_integer(env, peer.gid);
+    emacs_value v_uid = env->make_integer(env, (intmax_t)peer_uid);
+    emacs_value v_gid = env->make_integer(env, (intmax_t)peer_gid);
     emacs_value v_pl  = env->make_string(env, payload, (ptrdiff_t)plen32);
     /* (list :fd FD :uid U :gid G :payload P) via cons chain. */
     emacs_value list_args[8] = {
