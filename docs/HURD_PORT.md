@@ -15,10 +15,19 @@ made the kernel-aware spots explicit. `emacs-init/core/port.el`
 defines `geos-kernel` (intern of `$GEOS_KERNEL` or `'linux`) and is
 the single branch knob for the elisp side. The kernel-aware files
 (`core/network.el`, `core/state.el`, `buffers/disks.el`,
-`install/disk.el`) factor their Linux bodies into `*-linux` helpers
-and dispatch through `port.el`; the Hurd arms either degrade
-cleanly (nil, banner) or signal `geos-port-unimplemented` until a
-real backend lands.
+`install/disk.el`, `user/userland/uname.el`,
+`services/journal-tail.el`, `buffers/journal.el`,
+`user/userland/audio.el`, `buffers/audio.el`) factor their Linux
+bodies into `*-linux` helpers and dispatch through `port.el`; the
+Hurd arms either degrade cleanly (nil, banner) or signal
+`geos-port-unimplemented` until a real backend lands.
+
+Every Hurd arm is pinned by `iso-build/freeze-tests.el`'s
+`freeze-test-port-hurd` orchestrator: a refactor of any Linux arm
+that silently flattens its Hurd counterpart will fail the
+`port/*` sub-checks. The sub-checks emit a `'skip` result class
+when the underlying module is absent (`emacs -Q -batch` dev host)
+so CI can distinguish "module unbound" from "regression".
 
 The dynamic module under `pid1/` had a small Linux dependency
 surface (`reboot(2)`, `mount(2)`, `prctl(PR_SET_NAME)`,
@@ -63,22 +72,31 @@ rollback.
 
   - feasibility spike: closed (v0.4 item 11, commit 7b779a1).
   - abstraction on main: pid1 port-layer at `3f90c87` (skeptic-
-    hardened at `8dae17b`), elisp port seam at `df7fb92`.
-  - Hurd backend skeleton on the `hurd` side branch: `port_hurd.c`
-    at `c857efa`/`4164095` implements `mount` (file_set_translator
-    RPC), `reboot` (host_reboot Mach RPC), and `set_hostname`
-    (POSIX); `suspend` returns ENOSYS permanently because Hurd has
-    no analogue. Three networking verbs (`bring_up_lo`,
-    `set_address`, `set_route_default`) implemented at `98dc5e9`
-    against pfinet's Linux-ABI compatibility surface, same SIOC*
-    ioctl sequence as `port_linux.c`. Makefile gains a
-    `PORT=linux|hurd` switch with `-DPORT_HURD` and the Hurd link
-    line (`-lhurduser -lhurd -lmach`).
-  - guix-system and smoke test on the `hurd` branch: `92814c8`
-    adds `guix-system/system-hurd.scm` (inherits from
-    `system.scm`, kernel `gnumach`, drops Xorg / emacs-exwm /
-    dhcpcd, console-only) and `iso-build/hurd-smoke-test.sh` (thin
-    mirror of `smoke-test.sh`, gates on `geos: emacs userland up`).
+    hardened at `8dae17b`), elisp port seam at `df7fb92`,
+    consumer adapters extended through `94063a3` (uname),
+    `87d5880` (journal kmsg follower), `a6053e0` (uname
+    honesty markers), `a16d031` (audio surface). Skip-class
+    freeze-test discipline at `a673679` so CI can tell a real
+    Hurd-arm regression from a dev-host gap.
+  - Hurd backend on the `hurd` side branch: `port_hurd.c`
+    implements `mount` (file_set_translator RPC), `reboot`
+    (host_reboot Mach RPC), and `set_hostname` (POSIX); `suspend`
+    returns ENOSYS permanently because Hurd has no analogue.
+    Three networking verbs (`bring_up_lo`, `set_address`,
+    `set_route_default`) target pfinet's Linux-ABI compatibility
+    surface, same SIOC* ioctl sequence as `port_linux.c`. Skeptic
+    blockers B1/B2/B3/B4 closed at branch head: kern_return_t
+    translation discipline, explicit errno preservation around
+    MACH_PORT_NULL branches, host_reboot dispatch hardened
+    against unknown cmds, network-order contract for
+    `hurd_set_address` documented inline. Makefile carries a
+    `PORT=linux|hurd` switch with `-DPORT_HURD` and the Hurd
+    link line (`-lhurduser -lhurd -lmach`).
+  - guix-system and smoke test on the `hurd` branch:
+    `guix-system/system-hurd.scm` (kernel `gnumach`, drops Xorg /
+    emacs-exwm / dhcpcd / alsa / install wizard, console-only)
+    and `iso-build/hurd-smoke-test.sh` (thin mirror of
+    `smoke-test.sh`, gates on `geos: emacs userland up`).
   - boot to multi-user on Hurd: not yet. Blocked on a Hurd cross-
     toolchain or a Hurd guix-shell to even build the binary; not
     available on Linux dev hosts via `guix build hurd-headers`.
