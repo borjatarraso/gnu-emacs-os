@@ -172,6 +172,19 @@ hurd_mount(const char *src, const char *tgt, const char *type,
          * surface this as a missing pty path; we cross that bridge
          * when buffers/services actually need ptys on hurd. */
         return 0;
+    } else if (strcmp(type, "devtmpfs") == 0) {
+        /* hurd's /dev is populated at boot time by the hurd boot
+         * translator tree, not by an in-kernel devtmpfs.  every
+         * device node pid1 cares about (/dev/console, /dev/null,
+         * /dev/tty, the storage nodes) is already there when
+         * pid1's mount loop runs.  no-op rather than -1: matches
+         * the contract that pid1's boot mount block does not fail
+         * on a missing-on-this-kernel fs type.  if a hurd port
+         * later needs a writable in-memory /dev (it should not;
+         * the hurd boot tree is read-write already) the cleanest
+         * shape is to mount /hurd/tmpfs over /dev separately, not
+         * to fake devtmpfs here. */
+        return 0;
     } else {
         errno = ENODEV;
         return -1;
