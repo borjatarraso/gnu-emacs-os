@@ -17,6 +17,7 @@
 ;; we have not validated that on the pinned guix channel yet.
 
 (require 'panic)
+(require 'port)
 
 (defgroup audio nil
   "ALSA wrappers for the GEOS userland."
@@ -113,8 +114,8 @@ public setter so other files can repoint the default sink without
 fighting the defcustom-from-foreign-file byte-compile warning."
   (setq audio-default-card card))
 
-(defun audio-list-cards ()
-  "Return a list of (INDEX . NAME) tuples from /proc/asound/cards.
+(defun audio--list-cards-linux ()
+  "Linux backend for `audio-list-cards'.  Reads /proc/asound/cards.
 the file format is one card per two lines, the first of which
 starts with the card index, the second with the card model.  if
 /proc/asound is missing (no kernel ALSA module loaded, e.g. on a
@@ -137,6 +138,19 @@ container build host) returns nil."
       (error
        (panic-handle err 'audio-list-cards)
        nil)))))
+
+(defun audio-list-cards ()
+  "Return a list of (INDEX . NAME) tuples for visible audio cards.
+Dispatches on `geos-kernel'.  Linux reads /proc/asound/cards.  Hurd
+has no ALSA: routes a `geos-port-unimplemented' breadcrumb and
+returns nil so callers fall through cleanly (the *audio* buffer
+already renders \"no cards visible\" on a nil return).  v0.8 will
+replace this with a hurd-native sink (OSS-style or a Mach-RPC verb
+once a Hurd audio translator exists)."
+  (cond
+   ((geos-kernel-linux-p) (audio--list-cards-linux))
+   ((geos-kernel-hurd-p) (geos-port-unimplemented 'audio-list-cards))
+   (t (geos-port-unimplemented 'audio-list-cards))))
 
 (provide 'userland-audio)
 ;;; audio.el ends here

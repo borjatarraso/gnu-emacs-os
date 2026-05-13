@@ -3244,9 +3244,9 @@ up the shadow correctly."
 shadows `geos-kernel' to 'hurd and asserts every adapter branch point
 (`network-read-proc-net-{dev,route}', `state--detect-mode',
 `disks-buffer--render', `install-disk-list', `geos--uname',
-`journal-kmsg' supervise registration,
-`geos-port-unimplemented' itself) behaves as documented in
-`emacs-init/core/port.el'.
+`journal-kmsg' supervise registration, `audio-list-cards',
+`audio-buffer--render', `geos-port-unimplemented' itself) behaves
+as documented in `emacs-init/core/port.el'.
 
 real-world failure mode being caught: a refactor of the linux arm
 silently flattens or removes the hurd arm.  nothing in CI runs the
@@ -3257,6 +3257,8 @@ surface until the side-branch port attempts to boot."
   (require 'disks-buffer nil 'noerror)
   (require 'install-disk nil 'noerror)
   (require 'userland-uname nil 'noerror)
+  (require 'userland-audio nil 'noerror)
+  (require 'audio-buffer nil 'noerror)
   ;; network is already a hard require from earlier in the boot.
   (let ((sav-state-mode (and (boundp 'state-mode) state-mode)))
     (unwind-protect
@@ -3279,6 +3281,10 @@ surface until the side-branch port attempts to boot."
           (freeze-test--record 'port/uname-hurd-synth
                                "port.el not loaded")
           (freeze-test--record 'port/journal-kmsg-no-autostart
+                               "port.el not loaded")
+          (freeze-test--record 'port/audio-list-cards-nil-and-panic
+                               "port.el not loaded")
+          (freeze-test--record 'port/audio-render-no-procasound
                                "port.el not loaded"))
          (t
           (freeze-test--port-unimplemented-route)
@@ -3288,7 +3294,9 @@ surface until the side-branch port attempts to boot."
           (freeze-test--port-disks-render-no-sysblock)
           (freeze-test--port-install-disk-list-nil-and-panic)
           (freeze-test--port-uname-hurd-synth)
-          (freeze-test--port-journal-kmsg-no-autostart)))
+          (freeze-test--port-journal-kmsg-no-autostart)
+          (freeze-test--port-audio-list-cards-nil-and-panic)
+          (freeze-test--port-audio-render-no-procasound)))
       ;; never leave state-mode mutated; state--detect-mode setq's it
       ;; as a side effect and a hurd-arm run would otherwise leave the
       ;; rest of the suite seeing the hurd answer.
@@ -3562,6 +3570,79 @@ hurd, not about forcing the file to be present."
     ;; the existing struct (supervise-register reuses existing).
     (ignore sav-svc)
     (freeze-test--record 'port/journal-kmsg-no-autostart result)))
+
+(defun freeze-test--port-audio-list-cards-nil-and-panic ()
+  "Sub-check: `audio-list-cards' on hurd returns nil AND panics.
+asserts both halves: the return value is nil (so the *audio* buffer
+falls through to its `(no ALSA cards visible ...)' branch with no
+attempt to read /proc/asound/cards), and the *panic* buffer grew
+with a record mentioning the `audio-list-cards' feature tag.
+without the panic record a regression that drops the
+`geos-port-unimplemented' route would leave audio silently empty
+on hurd with no audit trail."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'audio-list-cards))
+          (setq result (cons 'skip "audio-list-cards unbound")))
+         (t
+          (let* ((buf (panic--get-buffer))
+                 (before (with-current-buffer buf (buffer-size)))
+                 (rv (let ((geos-kernel 'hurd))
+                       (audio-list-cards)))
+                 (after (with-current-buffer buf (buffer-size)))
+                 (delta (with-current-buffer buf
+                          (buffer-substring-no-properties
+                           (1+ before) (point-max)))))
+            (cond
+             ((not (null rv))
+              (setq result (format "returned %S, want nil" rv)))
+             ((not (> after before))
+              (setq result
+                    (format "panic buffer did not grow: %d -> %d"
+                            before after)))
+             ((not (string-match-p "audio-list-cards" delta))
+              (setq result
+                    (format "new panic entry lacks 'audio-list-cards' tag: %s"
+                            (substring delta 0
+                                       (min 120 (length delta))))))
+             (t (setq result 'pass))))))
+      (error
+       (panic-handle err 'freeze-test--port-audio-list-cards-nil-and-panic)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/audio-list-cards-nil-and-panic result)))
+
+(defun freeze-test--port-audio-render-no-procasound ()
+  "Sub-check: `audio-buffer--render' on hurd draws no /proc/asound rows.
+asserts the rendered buffer does NOT contain the linux-arm key
+banner \"keys: + vol up\" (the cheat-sheet at the bottom of the
+linux render is the cleanest sentinel that the linux body ran),
+and that the body contains \"not implemented\" so we know the
+hurd arm produced its documented output rather than e.g. an
+empty buffer.  uses a throwaway buffer; does NOT touch *audio*."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'audio-buffer--render))
+          (setq result (cons 'skip "audio-buffer--render unbound")))
+         (t
+          (with-temp-buffer
+            (let ((geos-kernel 'hurd))
+              (audio-buffer--render))
+            (let ((body (buffer-string)))
+              (cond
+               ((string-match-p "keys: \\+ vol up" body)
+                (setq result
+                      "linux render cheat-sheet present in hurd render"))
+               ((not (string-match-p "not implemented" body))
+                (setq result
+                      (format "banner missing 'not implemented'; got: %s"
+                              (substring body 0 (min 80 (length body))))))
+               (t (setq result 'pass)))))))
+      (error
+       (panic-handle err 'freeze-test--port-audio-render-no-procasound)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/audio-render-no-procasound result)))
 
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.

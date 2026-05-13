@@ -135,6 +135,17 @@ one missing-feature event must not abort the rest of the boot."
 ;;     the supervise-register call, conditioned on
 ;;     `geos-kernel-linux-p'.
 ;;
+;;   - user/userland/audio.el reads /proc/asound/cards for the
+;;     ALSA card list.  hurd has no ALSA; the branch lives in
+;;     `audio-list-cards' (linux arm reads /proc/asound/cards;
+;;     hurd arm routes `geos-port-unimplemented' and returns
+;;     nil).  buffers/audio.el's `audio-buffer--render' branches
+;;     up front to `audio-buffer--render-hurd' which draws a
+;;     "not implemented on kernel X" banner with no /proc reads.
+;;     v0.8 will replace this with a Hurd-native audio path
+;;     (likely an OSS-style /dev/audio translator or a Mach-RPC
+;;     verb against a future sound server).
+;;
 ;;   - buffers/journal.el has a fallback in-buffer dd spawner
 ;;     `journal-buffer--start-kmsg' for the dev-host case where the
 ;;     supervisor is not running.  on hurd the spawner branches up

@@ -26,6 +26,7 @@
 ;; globally to C-c e a for quick access.
 
 (require 'panic)
+(require 'port)
 (require 'cl-lib)
 
 (condition-case err
@@ -45,6 +46,22 @@
   "Last commanded volume.  not a readback; we do not poll amixer.
 the user sees this in the header line so they have feedback that
 their `+'/`-' presses actually went somewhere.")
+
+(defun audio-buffer--render-hurd ()
+  "Render the hurd-arm body of *audio*.
+Hurd has no ALSA so the cards/PCM surfaces are absent.  Print the
+banner the freeze suite and the user expect; do NOT touch ALSA
+binaries.  routes a port-unimplemented breadcrumb so a post-mortem
+sees the kernel skew that produced the empty buffer."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (setq header-line-format
+          (format "*audio*  kernel=%s  ALSA absent" geos-kernel))
+    (insert
+     (format
+      "*audio* is not implemented on kernel %s.\n\nthe audio view reads /proc/asound, an ALSA-only surface; on hurd a translator-backed audio path is the v0.8 follow-up.  for now: no card list, no volume keys, no pcm count.\n"
+      geos-kernel))
+    (geos-port-unimplemented 'audio-buffer)))
 
 (defun audio-buffer--pcm-stream-count (&optional path)
   "Return the number of playback PCM substreams visible in PATH.
@@ -75,8 +92,9 @@ during `require')."
               n))))
       (error nil))))
 
-(defun audio-buffer--render ()
-  "Repaint *audio* from /proc/asound/cards."
+(defun audio-buffer--render-linux ()
+  "Linux backend for `audio-buffer--render'.
+Repaints *audio* from /proc/asound/cards."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (let ((streams (audio-buffer--pcm-stream-count)))
@@ -102,6 +120,16 @@ during `require')."
               (insert (propertize line 'audio-card c) "\n")))))
         (insert
          "\nkeys: + vol up   - vol down   m mute   n next card   RET pick   g refresh   q bury\n"))))))
+
+(defun audio-buffer--render ()
+  "Repaint *audio*.
+Dispatches on `geos-kernel'.  Linux arm renders the card list and
+PCM count from /proc/asound; hurd arm short-circuits to
+`audio-buffer--render-hurd' because that surface does not exist
+on this kernel."
+  (cond
+   ((geos-kernel-linux-p) (audio-buffer--render-linux))
+   (t (audio-buffer--render-hurd))))
 
 (defun audio-buffer-refresh ()
   "Force a refresh of *audio*."
