@@ -609,6 +609,30 @@ hurd_suspend(const char *state)
     return -1;
 }
 
+/* peer credentials over AF_UNIX.  Hurd has no SO_PEERCRED: pflocal
+ * (the AF_UNIX/AF_LOCAL translator) does not implement a getsockopt
+ * verb that exposes the connecting task's uid/gid.  the native Hurd
+ * idiom is "the client passes an auth port via mach_msg and the
+ * server interrogates it through auth_user_authenticate"; that is a
+ * separate handshake the supervisor RPC channel does not perform
+ * yet.  until it does, this stub returns ENOSYS so the supervisor
+ * side (Fpid1_rpc_poll) closes the connection and returns nil to
+ * the 200ms poll timer; that path is what keeps the poller alive on
+ * a kernel that cannot satisfy the call.  the full contract lives
+ * in port_layer.h; see there for the supervisor-side behaviour.
+ *
+ * (void) casts on the unused parameters keep -Wunused-parameter
+ * -Werror clean, same shape as hurd_suspend above. */
+static int
+hurd_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
+{
+    (void)fd;
+    (void)uid_out;
+    (void)gid_out;
+    errno = ENOSYS;
+    return -1;
+}
+
 /* the table.  same shape as port_linux_impl, every slot populated.
  * the symmetry is what lets emacs-init.c pick one or the other at
  * compile time without touching the call sites. */
@@ -620,6 +644,7 @@ const port_caps port_hurd_impl = {
     .set_route_default = hurd_set_route_default,
     .reboot            = hurd_reboot_cmd,
     .suspend           = hurd_suspend,
+    .get_peer_cred     = hurd_get_peer_cred,
 };
 
 /* the active pointer + the require-or-abort helper live in
