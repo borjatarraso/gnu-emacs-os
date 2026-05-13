@@ -31,13 +31,19 @@ so CI can distinguish "module unbound" from "regression".
 
 The dynamic module under `pid1/` had a small Linux dependency
 surface (`reboot(2)`, `mount(2)`, `prctl(PR_SET_NAME)`,
-`sethostname(2)`, the `/dev/kmsg` reader, plus the network ioctls).
-That surface is now a function-pointer struct: `pid1/port_layer.h`
-declares `port_caps`, `pid1/port_linux.c` holds every Linux syscall
-body that used to live inline in `emacs-init.c`, and the module
-calls through `port->X()`. Behavior on Linux is unchanged, and
-`port_require_or_abort()` makes the contract explicit so a missing
-init aborts instead of crashing on a null deref.
+`sethostname(2)`, the `/dev/kmsg` reader, the network ioctls, and
+the `SO_PEERCRED` getsockopt that authenticates the supervisor RPC
+channel). That surface is now a function-pointer struct:
+`pid1/port_layer.h` declares `port_caps`, `pid1/port_linux.c` holds
+every Linux syscall body that used to live inline in
+`emacs-init.c`, and the module calls through `port->X()`. The
+`get_peer_cred` slot (added 3a8797b) abstracts the peer-credential
+lookup; Hurd's pflocal has no `SO_PEERCRED` analogue, so the Hurd
+backend returns `ENOSYS` and `Fpid1_rpc_poll` treats that errno as
+"refuse this client without panicking the 200ms poll timer".
+Behavior on Linux is unchanged, and `port_require_or_abort()` makes
+the contract explicit so a missing init aborts instead of crashing
+on a null deref.
 
 ## What's NOT portable
 
@@ -75,7 +81,9 @@ rollback.
     hardened at `8dae17b`), elisp port seam at `df7fb92`,
     consumer adapters extended through `94063a3` (uname),
     `87d5880` (journal kmsg follower), `a6053e0` (uname
-    honesty markers), `a16d031` (audio surface). Skip-class
+    honesty markers), `a16d031` (audio surface), and `3a8797b`
+    (get_peer_cred slot for the supervisor RPC peer-credential
+    lookup, the last Linux-only surface in `pid1/`). Skip-class
     freeze-test discipline at `a673679` so CI can tell a real
     Hurd-arm regression from a dev-host gap.
   - Hurd backend on the `hurd` side branch: `port_hurd.c`
