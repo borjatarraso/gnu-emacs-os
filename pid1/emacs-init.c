@@ -92,6 +92,34 @@ console(const char *msg)
  * substitute its own implementations on the side branch without
  * touching this file.  see docs/v04-item11-hurd-spike.md step 1. */
 
+/* per-kernel source for the gnu.system / geos.mode tokens.  on Linux
+ * the guix initrd stamps them onto /proc/cmdline so we read straight
+ * from there.  on Hurd there is no init= cmdline knob (see
+ * docs/runlogs/2026-05-18-hurd-pid1-boot-design.md): /hurd/startup
+ * unconditionally exec's /sbin/init, so the install path writes a
+ * small key=value file at /etc/geos-cmdline and we read that instead.
+ * the two source paths share the same parse + validation code; only
+ * the path is per-kernel, exposed as a compile-time constant so the
+ * boot path has no runtime branch around it.  a not-yet-installed
+ * Hurd VM has no /etc/geos-cmdline, in which case the reader degrades
+ * the same way it would on a malformed Linux cmdline (returns -1,
+ * link_current_system skips the symlink, read_geos_mode defaults to
+ * ui on Linux and to console on Hurd since v0.7.x has no Xorg there).
+ *
+ * trust model: /proc/cmdline is kernel-provided and not writeable at
+ * runtime.  /etc/geos-cmdline is a regular file the installer drops
+ * with root-only perms by convention.  pid1 does NOT chmod-check the
+ * file; the prefix + ".." + PATH_MAX validation in
+ * read_gnu_system_path IS the security boundary, identical to the
+ * existing Linux path.  if the rootfs is compromised to the point
+ * where the attacker can rewrite /etc/geos-cmdline, they can already
+ * rewrite /sbin/init too, so the file's perms are not the chokepoint. */
+#ifdef PORT_HURD
+#define GEOS_CMDLINE_PATH "/etc/geos-cmdline"
+#else
+#define GEOS_CMDLINE_PATH "/proc/cmdline"
+#endif
+
 #ifndef PID1_MODULE
 /* read /etc/hostname (which guix's etc-service-type writes from the
  * operating-system host-name field), trim trailing whitespace, and
@@ -222,16 +250,18 @@ do_mount(const char *src, const char *tgt, const char *type,
     }
 }
 
-/* parses /proc/cmdline for the gnu.system=PATH token the guix initrd
- * stamps on every boot, copies the path into out (NUL-terminated, capped
- * at out_len-1). returns 0 on success and out is populated; -1 if the
- * token is missing, the file is unreadable, the value would not fit, or
- * the value fails sanity validation (must start with /gnu/store/, no
- * ".." substring, length under PATH_MAX). on rejection we log to
- * /dev/console so the operator sees why /run/current-system is missing.
- * invariant: out is always NUL-terminated on success, untouched on
- * failure. used to find the system profile so we can lay down
- * /run/current-system without invoking guix activation.
+/* parses GEOS_CMDLINE_PATH for the gnu.system=PATH token the guix
+ * initrd stamps on every boot (Linux) or that the Hurd installer
+ * writes into /etc/geos-cmdline.  copies the path into out
+ * (NUL-terminated, capped at out_len-1). returns 0 on success and out
+ * is populated; -1 if the token is missing, the file is unreadable,
+ * the value would not fit, or the value fails sanity validation (must
+ * start with /gnu/store/, no ".." substring, length under PATH_MAX).
+ * on rejection we log to /dev/console so the operator sees why
+ * /run/current-system is missing. invariant: out is always
+ * NUL-terminated on success, untouched on failure. used to find the
+ * system profile so we can lay down /run/current-system without
+ * invoking guix activation.
  *
  * (B7, skeptic 2026-05-06) cmdline content is not trusted: a hostile
  * or malformed gnu.system value would otherwise let us symlink
@@ -240,7 +270,7 @@ do_mount(const char *src, const char *tgt, const char *type,
 static int
 read_gnu_system_path(char *out, size_t out_len)
 {
-    int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+    int fd = open(GEOS_CMDLINE_PATH, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     /* (B4, audit round-5 2026-05-10) /proc/cmdline can exceed 4 KiB
      * on systems with many kernel parameters (verbose efistub args,
@@ -292,16 +322,22 @@ read_gnu_system_path(char *out, size_t out_len)
     return 0;
 }
 
-/* parse /proc/cmdline for the geos.mode= token. recognized values are
- * "ui" (default; spawn Xorg and run emacs as an X client), "console"
- * (skip Xorg, run emacs on /dev/console with TERM=linux), and
- * "recovery" (v0.4 item 10: skip Xorg AND skip the userland -l chain;
- * the operator lands on a bare *scratch* with panic.el available so a
- * broken defservice or defcustom cannot wedge the boot).  anything
- * else, including a missing token or an unreadable cmdline, defaults
- * to UI: matches the historical v0.1/v0.2 behaviour and means an
- * unmodified GRUB entry keeps the pretty boot.  invariant: pure read,
- * never blocks longer than the /proc read takes.  logs the chosen
+/* parse GEOS_CMDLINE_PATH for the geos.mode= token. recognized values
+ * are "ui" (default; spawn Xorg and run emacs as an X client),
+ * "console" (skip Xorg, run emacs on /dev/console with TERM=linux),
+ * and "recovery" (v0.4 item 10: skip Xorg AND skip the userland -l
+ * chain; the operator lands on a bare *scratch* with panic.el
+ * available so a broken defservice or defcustom cannot wedge the
+ * boot).  anything else, including a missing token or an unreadable
+ * cmdline source, defaults to UI on Linux: matches the historical
+ * v0.1/v0.2 behaviour and means an unmodified GRUB entry keeps the
+ * pretty boot.  on Hurd the cmdline source is /etc/geos-cmdline,
+ * which is absent on a not-yet-installed VM; the absence is logged
+ * once but otherwise falls through to the same UI default, and
+ * main() additionally forces console mode under PORT_HURD because
+ * the v0.7.x cycle does not bring up Xorg there (see
+ * docs/runlogs/2026-05-18-hurd-pid1-boot-design.md).  invariant: pure
+ * read, never blocks longer than the open+read takes.  logs the chosen
  * mode to /dev/console so the operator sees the decision in the boot
  * trace. */
 #define GEOS_MODE_UI       1
@@ -311,9 +347,18 @@ read_gnu_system_path(char *out, size_t out_len)
 static int
 read_geos_mode(void)
 {
-    int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+    int fd = open(GEOS_CMDLINE_PATH, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        console("pid1: /proc/cmdline unreadable, defaulting to ui mode");
+#ifdef PORT_HURD
+        /* on Hurd the cmdline source is /etc/geos-cmdline, which is
+         * absent on a not-yet-installed VM.  main() will force console
+         * mode shortly anyway (Xorg-on-Hurd is a v0.8+ item), so
+         * staying quiet here avoids a misleading "defaulting to ui"
+         * line that would be immediately contradicted by the boot
+         * trace.  see docs/runlogs/2026-05-18-hurd-pid1-boot-design.md. */
+#else
+        console("pid1: " GEOS_CMDLINE_PATH " unreadable, defaulting to ui mode");
+#endif
         return GEOS_MODE_UI;
     }
     /* (B4) /proc/cmdline can exceed 4 KiB on real systems; loop. */
@@ -352,7 +397,13 @@ read_geos_mode(void)
         return GEOS_MODE_CONSOLE;
     }
     if (strcmp(val, "ui") == 0) {
+#ifndef PORT_HURD
+        /* on Hurd the main() override below forces console mode
+         * regardless of cmdline value (Xorg-on-Hurd is v0.8+); suppress
+         * the "will spawn Xorg + EXWM" log so the boot trace is
+         * coherent with what actually happens. */
         console("pid1: geos.mode=ui, will spawn Xorg + EXWM");
+#endif
         return GEOS_MODE_UI;
     }
     if (strcmp(val, "recovery") == 0) {
@@ -383,8 +434,20 @@ link_current_system(void)
 {
     char target[PATH_MAX];
     if (read_gnu_system_path(target, sizeof target) < 0) {
-        console("pid1: no gnu.system= in /proc/cmdline, "
+#ifdef PORT_HURD
+        /* on Hurd the cmdline source is /etc/geos-cmdline, which is
+         * absent on a not-yet-installed VM; that is the expected case
+         * for the v0.7.x boot bring-up, not an error.  log at INFO so
+         * the operator sees why /run/current-system stays missing and
+         * does not chase a phantom guix-system on a manual Hurd
+         * install.  see docs/runlogs/2026-05-18-hurd-pid1-boot-
+         * design.md. */
+        console("pid1: INFO no gnu.system= in " GEOS_CMDLINE_PATH ", "
+                "/run/current-system not linked (expected on manual Hurd install)");
+#else
+        console("pid1: no gnu.system= in " GEOS_CMDLINE_PATH ", "
                 "/run/current-system not linked");
+#endif
         return;
     }
     /* if a previous boot left the symlink we just unlink it; /run is a
@@ -1251,13 +1314,27 @@ main(int argc, char **argv)
     /* set a sane umask; the kernel inherits whatever the caller had */
     umask(022);
 
-    /* pseudo-filesystems the kernel does not mount on its own */
+    /* pseudo-filesystems the kernel does not mount on its own.
+     *
+     * Linux vs Hurd divergence (see docs/ARCHITECTURE.md Level 3 and
+     * docs/runlogs/2026-05-18-hurd-pid1-boot-design.md): on Linux we
+     * mount proc/sysfs/devtmpfs/devpts plus the two tmpfs trees.  on
+     * Hurd /proc is already a translator (/hurd/procfs), /sys does
+     * not exist as a tree, and devtmpfs/devpts are not Hurd
+     * filesystems, so attempting any of those four would just burn a
+     * log line on every boot for no gain.  /run and /tmp stay because
+     * port->mount routes those through the Hurd translator path that
+     * the 2026-05-17 runtime sweep promoted to YES in HURD_PORT.md. */
+#ifndef PORT_HURD
     do_mount("proc",     "/proc",    "proc",     MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL);
     do_mount("sysfs",    "/sys",     "sysfs",    MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL);
     do_mount("devtmpfs", "/dev",     "devtmpfs", MS_NOSUID,                     "mode=0755");
+#endif
     do_mount("tmpfs",    "/run",     "tmpfs",    MS_NOSUID|MS_NODEV,            "mode=0755");
     do_mount("tmpfs",    "/tmp",     "tmpfs",    MS_NOSUID|MS_NODEV,            NULL);
+#ifndef PORT_HURD
     do_mount("devpts",   "/dev/pts", "devpts",   MS_NOSUID|MS_NOEXEC,           "gid=5,mode=0620");
+#endif
 
     /* /var hosts the elisp state directory (see core/state.el). do this
      * before link_current_system so a future state.el call early in the
@@ -1323,17 +1400,32 @@ main(int argc, char **argv)
         _exit(127);
     }
 
-    /* boot mode toggle: /proc/cmdline geos.mode=console forces a
-     * pure-text boot (no Xorg, emacs talks to /dev/console). default
-     * (no token, or geos.mode=ui) keeps the v0.2 behaviour.  v0.4
-     * item 10 adds geos.mode=recovery: same Xorg suppression as
-     * console mode PLUS the userland -l chain is gated by an env
-     * variable that early-init.el reads to abort further loading.
-     * clearing xorg_path here also disables xorg_bring_up's respawn
-     * path so a console- or recovery-mode boot never tries to start
-     * an X server.  display_env stays NULL so spawn_emacs's envp
-     * does not advertise a DISPLAY the user did not ask for. */
+    /* boot mode toggle: cmdline geos.mode=console forces a pure-text
+     * boot (no Xorg, emacs talks to /dev/console). default (no token,
+     * or geos.mode=ui) keeps the v0.2 behaviour.  v0.4 item 10 adds
+     * geos.mode=recovery: same Xorg suppression as console mode PLUS
+     * the userland -l chain is gated by an env variable that
+     * early-init.el reads to abort further loading.  clearing
+     * xorg_path here also disables xorg_bring_up's respawn path so a
+     * console- or recovery-mode boot never tries to start an X
+     * server.  display_env stays NULL so spawn_emacs's envp does not
+     * advertise a DISPLAY the user did not ask for.
+     *
+     * Hurd divergence (see docs/ARCHITECTURE.md Level 3 and
+     * docs/runlogs/2026-05-18-hurd-pid1-boot-design.md): the Hurd
+     * port does not bring up Xorg in v0.7.x.  the device layer is
+     * different (no DRM card0, no modesetting) and verifying the
+     * supervisor loop on Hurd is the v0.7.x goal, not getting a
+     * graphical session up.  demote ui to console (the operator
+     * gets emacs -nw on /dev/console; Xorg-on-Hurd is v0.8+), but
+     * keep recovery intact because recovery is a safety mode the
+     * operator deliberately picked and silently dropping it to
+     * console would skip the userland-chain abort that recovery
+     * exists to guarantee. */
     int boot_mode = read_geos_mode();
+#ifdef PORT_HURD
+    if (boot_mode != GEOS_MODE_RECOVERY) boot_mode = GEOS_MODE_CONSOLE;
+#endif
     if (boot_mode == GEOS_MODE_CONSOLE) {
         xorg_path = NULL;
         xorg_disabled = 1;
