@@ -57,6 +57,7 @@
 #include <net/route.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
+#include <sys/reboot.h>
 #include <sys/socket.h>
 
 /* Hurd-specific headers.  these only exist on a Hurd glibc toolchain.
@@ -81,8 +82,8 @@
  *                   Linux writes).  used for the root fs and for
  *                   any extra disk like /var.
  *   /hurd/tmpfs     in-memory filesystem.  used for /run and /tmp.
- *   /hurd/procfs    /proc translator.  exposes /proc/<pid>/* and
- *                   /proc/cmdline so the elisp layer's existing
+ *   /hurd/procfs    /proc translator.  exposes /proc/<pid>/ entries
+ *                   and /proc/cmdline so the elisp layer's existing
  *                   readers keep working without a branch.
  *   /hurd/pfinet    TCP/IP stack as a translator at /servers/socket/2.
  *                   touched in step 5, not here.
@@ -447,22 +448,17 @@ hurd_set_address(const char *ifname, uint32_t addr_be, int prefix)
  * same ioctl through pfinet.  pfinet's iioctl-ops.c ships
  * S_iioctl_siocaddrt (and S_iioctl_siocdelrt for the symmetric
  * delete), accepting the same struct rtentry layout the Linux kernel
- * does.  rt_dev points into a caller-owned buffer that must outlive
- * the ioctl call; pfinet copies it server-side as part of the RPC
- * marshalling, so once ioctl() returns we are free to drop the
- * buffer.
+ * does.  on Hurd the ioctl(SIOCADDRT) marshalling uses ifrtreq_t
+ * (defined in <net/route.h> on Hurd's glibc) rather than Linux's
+ * struct rtentry; the field layout is flat in_addr_t plus a flat
+ * char[IF_NAMESIZE] ifname rather than the sockaddr-tagged-union
+ * Linux uses, but the semantic content is identical.
  *
  * reference: hurd.git/pfinet/iioctl-ops.c S_iioctl_siocaddrt; the
- * struct rtentry definition is the standard <net/route.h> one,
- * shared with Linux at the ABI level.
- *
- * one subtlety: the Hurd struct rtentry has rt_dev as a char * (same
- * as Linux), and pfinet treats a NULL rt_dev as "pick the iface that
- * owns the matching local network".  pid1's caller always passes an
- * ifname, so this branch never fires here, but the comment is for
- * the future skeptic pass that asks "why don't we let pfinet pick
- * the device?" - because the supervisor decides bind order, not the
- * kernel. */
+ * Hurd ifrtreq_t definition is the canonical one for pfinet's RPC
+ * ABI.  the Linux backend uses the rtentry shape because that is
+ * what Linux's net/route.h exposes; the two shapes carry the same
+ * routing intent, just different wire-level marshalling. */
 static int
 hurd_set_route_default(uint32_t gw_be, const char *ifname)
 {
@@ -471,29 +467,21 @@ hurd_set_route_default(uint32_t gw_be, const char *ifname)
     if (nlen == 0 || nlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
     int s = hurd_pfinet_open();
     if (s < 0) return -1;
-    struct rtentry rt;
+    ifrtreq_t rt;
     memset(&rt, 0, sizeof rt);
-    struct sockaddr_in *dst  = (struct sockaddr_in *)&rt.rt_dst;
-    struct sockaddr_in *gw   = (struct sockaddr_in *)&rt.rt_gateway;
-    struct sockaddr_in *mask = (struct sockaddr_in *)&rt.rt_genmask;
-    dst->sin_family  = AF_INET;
-    dst->sin_addr.s_addr = 0;
-    mask->sin_family = AF_INET;
-    mask->sin_addr.s_addr = 0;
-    gw->sin_family   = AF_INET;
-    gw->sin_addr.s_addr = gw_be;
-    rt.rt_flags  = RTF_UP | RTF_GATEWAY;
-    rt.rt_metric = 1;
-    /* rt_dev is char *; we hand the kernel a buffer that lives on our
-     * stack frame for the duration of the ioctl call.  zero the whole
-     * IFNAMSIZ tail first so the trailing bytes do not leak stack
-     * garbage to pfinet; pfinet reads up to the first NUL but defence
-     * in depth is cheap and matches the W1 fix on the linux side. */
-    char ifbuf[IFNAMSIZ];
-    memset(ifbuf, 0, sizeof ifbuf);
-    memcpy(ifbuf, ifname, nlen);
-    ifbuf[nlen] = '\0';
-    rt.rt_dev = ifbuf;
+    /* default route: destination 0.0.0.0/0 via gw_be.  in_addr_t is
+     * already network byte order per POSIX; gw_be comes in network
+     * byte order from the port-layer contract so no htonl needed. */
+    rt.rt_dest    = 0;
+    rt.rt_mask    = 0;
+    rt.rt_gateway = gw_be;
+    rt.rt_flags   = RTF_UP | RTF_GATEWAY;
+    rt.rt_metric  = 1;
+    /* ifname is a fixed-size char buffer here, not a pointer; zero
+     * the tail and bound-copy as defence in depth (pfinet reads up
+     * to the first NUL). */
+    memcpy(rt.ifname, ifname, nlen);
+    rt.ifname[nlen] = '\0';
     /* SIOCADDRT -> pfinet S_iioctl_siocaddrt.  EEXIST surfaces if a
      * default route already exists; the supervisor decides whether to
      * delete-then-add or surface, same as on Linux. */

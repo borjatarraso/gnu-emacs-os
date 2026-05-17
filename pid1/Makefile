@@ -128,13 +128,18 @@ PORT ?= linux
 ifeq ($(PORT),hurd)
 PORT_SRC  := port_hurd.c
 PORT_DEFS := -DPORT_HURD
-# Hurd link dependencies for port_hurd.c.  the Mach RPC surface
-# (host_reboot, mach_port_deallocate, mach_host_self, mach_task_self)
-# is in -lmach; the Hurd userland RPC stubs (file_set_translator,
-# file_name_lookup, the pfinet ioctl mux entry points) live in -lhurd
-# and -lhurduser.  ordering matters on a non-LTO link: -lhurduser
-# before -lhurd before -lmach reflects the dependency direction (the
-# user-side stubs call into libhurd which calls into libmach).
+# Hurd link dependencies for port_hurd.c.  on Debian GNU/Hurd
+# (libhurd-dev / hurd-dev) the user-side libraries are split as:
+#   -lhurduser : Hurd userland RPC stubs (file_set_translator,
+#                file_name_lookup, the pfinet ioctl mux entry points)
+#   -lmachuser : Mach RPC stubs (host_reboot, mach_port_deallocate,
+#                mach_host_self, mach_task_self)
+# the historical names -lhurd / -lmach are NOT present as standalone
+# .so files on a modern Debian Hurd toolchain; everything they used to
+# carry is folded into glibc itself (the Hurd glibc IS the Hurd kernel
+# interface, much like vDSO on Linux carries fast-path syscalls).
+# ordering: -lhurduser before -lmachuser reflects the dependency
+# direction (the user-side stubs call into Mach).
 #
 # the pfinet networking verbs (bring_up_lo / set_address /
 # set_route_default) go through plain socket() + ioctl() in glibc, so
@@ -147,8 +152,8 @@ PORT_DEFS := -DPORT_HURD
 # scoped to PORT=hurd only.  attribute-style "ldflags += ..." would
 # work too but the explicit assignment is harder to misread when the
 # v0.8 cross-toolchain runner picks this up.
-PORT_BOOT_LIBS   := -lhurduser -lhurd -lmach
-PORT_MODULE_LIBS := -lhurduser -lhurd -lmach
+PORT_BOOT_LIBS   := -lhurduser -lmachuser
+PORT_MODULE_LIBS := -lhurduser -lmachuser
 else ifeq ($(PORT),linux)
 PORT_SRC  := port_linux.c
 PORT_DEFS :=

@@ -32,8 +32,6 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
-#include <linux/if.h>
-#include <net/route.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdint.h>
@@ -41,8 +39,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/mount.h>
-#include <sys/reboot.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -50,6 +46,51 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Linux-kernel headers carry constants and types we pass through to
+ * port->mount / port->reboot / Fpid1_set_address.  on Hurd these
+ * headers do not exist (and net/route.h pulls in linux/if.h
+ * transitively via glibc on the Linux path).  the Hurd build path
+ * gets fallback definitions just below; the Linux backend ignores
+ * them in favour of the real kernel headers. */
+#ifndef PORT_HURD
+#include <linux/if.h>
+#include <net/route.h>
+#include <sys/mount.h>
+#include <sys/reboot.h>
+#else
+/* Hurd compat shims.  these constants leak from Linux into emacs-init.c
+ * because the same source compiles for both kernels; the Hurd port
+ * backend (port_hurd.c) accepts the flag word and translates it (or
+ * ignores it, in the case of mount flags that have no Hurd analogue).
+ * the values are intentionally Linux-compatible so a port_hurd.c that
+ * grows more semantics later can keep the wire-level ABI identical. */
+#ifndef IFNAMSIZ
+#define IFNAMSIZ 16
+#endif
+#ifndef MS_NOSUID
+#define MS_NOSUID  2
+#endif
+#ifndef MS_NODEV
+#define MS_NODEV   4
+#endif
+#ifndef MS_NOEXEC
+#define MS_NOEXEC  8
+#endif
+#ifndef RB_AUTOBOOT
+#define RB_AUTOBOOT  0x01234567
+#endif
+#ifndef RB_POWER_OFF
+#define RB_POWER_OFF 0x4321fedc
+#endif
+/* glibc on Hurd intentionally leaves PATH_MAX undefined (the Hurd
+ * has no max path length).  pid1 still needs a finite stack buffer
+ * size for its few path manipulations; 4096 matches Linux's value
+ * and is enough for /run/current-system and /etc/hostname. */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+#endif
 
 #include "port_layer.h"
 
