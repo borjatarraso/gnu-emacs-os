@@ -157,7 +157,7 @@ The verification levels in the last column:
 | `port->set_route_default` (Hurd: pfinet SIOCADDRT) | rewritten 2026-05-17 to use Hurd's `ifrtreq_t`; ifname normalization shared with `set_address` (hurd branch `b031db5`) | YES on 2026-05-17 (`pid1-set-route-default "10.0.2.2" "eth0"` returned `t`, NAT gateway stayed reachable) |
 | `port->reboot` (Hurd: `host_reboot` Mach RPC) | written | builds on Hurd 2026-05-17 |
 | `port->suspend` (Hurd: ENOSYS forever) | written | n/a, design |
-| `port->get_peer_cred` (Hurd: ENOSYS, supervisor RPC poll soft-fails) | written | builds on Hurd 2026-05-17 |
+| `port->get_peer_cred` (Hurd: ENOSYS, supervisor RPC poll soft-fails) | written; surrounding rpc-poll tolerates `SO_RCVTIMEO`/`SO_SNDTIMEO` returning ENOPROTOOPT on Hurd's pflocal (`ffe6150` on main, `e4f72de` on hurd) | YES on 2026-05-17 (AF_UNIX client connect + `pid1-rpc-poll` returned `nil`, stderr logged "peer cred unsupported on this kernel" once; second poll returned `nil` without re-logging, confirming the `warned_enosys` gate) |
 | `geos-kernel` elisp defvar (reads `GEOS_KERNEL` env) | runs everywhere | YES on Linux |
 | GEOS_KERNEL env splice (`port->kernel_name` → execve envp → per-user emacs) | implemented (`a53304b`) | YES on Linux |
 | `core/network.el` Linux/Hurd dispatch | implemented | YES on Linux, NO on Hurd |
