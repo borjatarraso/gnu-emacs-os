@@ -150,7 +150,7 @@ The verification levels in the last column:
 | Surface | Code status | Verified on Hurd? |
 |---|---|---|
 | `port->kernel_name` | both backends populated | n/a, identity slot |
-| `port->mount` (Hurd: `file_set_translator`) | written, skeptic-clean | builds on Hurd 2026-05-17 |
+| `port->mount` (Hurd: `fshelp_start_translator` + `file_set_translator`) | rewritten 2026-05-17 (hurd branch `e3fd411`) to fork the translator via libfshelp before binding it; the prior body passed `MACH_PORT_NULL` as the active port and was a silent no-op | YES on 2026-05-17 (`/hurd/tmpfs 256M` round-trip: showtrans, df, write, settrans -g) |
 | `port->set_hostname` (Hurd: POSIX) | written | builds on Hurd 2026-05-17 |
 | `port->bring_up_lo` (Hurd: pfinet SIOCSIFFLAGS) | written | builds on Hurd 2026-05-17 |
 | `port->set_address` (Hurd: pfinet SIOCSIFADDR+) | written | builds on Hurd 2026-05-17 |
@@ -191,6 +191,25 @@ not caught; the fixes landed on the hurd side branch as commit
 
 `ldd -r emacs-init` on the resulting binary resolves every dynamic
 symbol; `nm emacs-init` shows all nine port_caps slots present.
+
+Runtime exercising began the same day.  the first slot to fail in
+practice was `port->mount`: the body called `file_set_translator`
+with `MACH_PORT_NULL` as the active port and `passive_flags=0`,
+which is a silent no-op (no translator installed, no on-disk
+record set).  fixed on the hurd branch at `e3fd411` by routing
+through `fshelp_start_translator` (libfshelp) to fork the
+translator binary first, then handing its control port to
+`file_set_translator`.  the same commit fixed two related
+discoveries: tmpfs rejects the linux placeholder `"none"` as an
+argv ("argument must be a number"), and Hurd's tmpfs has no
+implicit default size (unlike Linux's half-of-RAM), so a 256M
+fallback is injected when src does not parse as a numeric size.
+verification round-trip: `(pid1-mount "none" "/tmp/geos-mp-test"
+"tmpfs" 0 nil)` returns `t`; `showtrans` shows `/hurd/tmpfs 256M`;
+`df -h` shows the mount; `echo > .../sentinel` writes to the
+translator; `settrans -g` detaches and the sentinel disappears
+(it lived in tmpfs, not the underlying inode).
+
 boot-as-PID-1 is the next checkpoint and requires an `init=/sbin/
 emacs-init` kernel-cmdline boot inside a Hurd VM.
 
