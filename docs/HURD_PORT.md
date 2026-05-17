@@ -81,9 +81,15 @@ rollback.
     hardened at `8dae17b`), elisp port seam at `df7fb92`,
     consumer adapters extended through `94063a3` (uname),
     `87d5880` (journal kmsg follower), `a6053e0` (uname
-    honesty markers), `a16d031` (audio surface), and `3a8797b`
+    honesty markers), `a16d031` (audio surface), `3a8797b`
     (get_peer_cred slot for the supervisor RPC peer-credential
-    lookup, the last Linux-only surface in `pid1/`). Skip-class
+    lookup, the last Linux-only kernel-syscall surface in
+    `pid1/`), and `a53304b` (GEOS_KERNEL env propagation: new
+    `kernel_name` slot in `port_caps`, pid1 splices
+    `GEOS_KERNEL=<name>` into the supervisor execve envp,
+    `session.el` forwards it through to every per-user emacs so
+    the elisp `geos-kernel` defvar resolves correctly on every
+    kernel instead of defaulting to `'linux`). Skip-class
     freeze-test discipline at `a673679` so CI can tell a real
     Hurd-arm regression from a dev-host gap.
   - Hurd backend on the `hurd` side branch: `port_hurd.c`
@@ -97,7 +103,12 @@ rollback.
     translation discipline, explicit errno preservation around
     MACH_PORT_NULL branches, host_reboot dispatch hardened
     against unknown cmds, network-order contract for
-    `hurd_set_address` documented inline. Makefile carries a
+    `hurd_set_address` documented inline. `port_hurd_impl` carries
+    `.kernel_name = "hurd"` so the GEOS_KERNEL splice on main
+    resolves to the Hurd symbol on Hurd builds; the older
+    `setenv("GEOS_KERNEL", ...)` pair in `main()`'s `PORT_HURD`
+    #ifdef was dropped, since `port->kernel_name` is now the
+    single source of truth. Makefile carries a
     `PORT=linux|hurd` switch with `-DPORT_HURD` and the Hurd
     link line (`-lhurduser -lhurd -lmach`).
   - guix-system and smoke test on the `hurd` branch:

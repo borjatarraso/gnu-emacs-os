@@ -9,17 +9,52 @@ matching GitHub release page mirrors each entry.
 
 ## unreleased
 
-Hurd port skeleton landed since v0.7.
+(empty — see v0.7.1 for the port-seam slice landed since v0.7.)
 
-  - main: pid1 port-layer abstraction (`pid1/port_layer.h` +
-    `pid1/port_linux.c`), elisp port seam
-    (`emacs-init/core/port.el` + adapter branch points).
-  - `hurd` side branch: `pid1/port_hurd.c` with mount, reboot,
-    set_hostname implemented and three pfinet RPC stubs written
-    against the public Hurd headers. `guix-system/system-hurd.scm`
-    skeleton, `iso-build/hurd-smoke-test.sh` scaffold.
-  - boot to multi-user on Hurd: pending the v0.8 self-hosted
-    runner with a Hurd cross-toolchain.
+## v0.7.1 (2026-05-17)
+
+Hurd port seam complete on main; CI tightened; identity
+propagated through to per-user emacs.
+
+  - pid1 port-layer abstraction (`3f90c87`, hardened at
+    `8dae17b`): every Linux-only syscall in `pid1/` now goes
+    through a `port_caps` function-pointer struct. `port_linux.c`
+    holds the bodies; `port_require_or_abort()` is the loud
+    backstop for a missed backend assignment.
+  - elisp port seam (`df7fb92`): `emacs-init/core/port.el`
+    defines `geos-kernel` and the `geos-port-unimplemented`
+    error. Adapters at every data-source site (`core/network.el`,
+    `core/state.el`, `buffers/disks.el`, `install/disk.el`)
+    dispatch by kernel.
+  - consumer adapters extended: uname (`94063a3`), journal kmsg
+    follower (`87d5880`), uname honesty markers (`a6053e0`),
+    audio surface (`a16d031`).
+  - `get_peer_cred` port slot (`3a8797b`): SO_PEERCRED, the last
+    Linux-only kernel-syscall surface in `pid1/`, now routes
+    through the port layer. Hurd backend returns ENOSYS; the
+    supervisor RPC poll special-cases the errno so the 200ms
+    timer keeps ticking instead of panicking forever.
+  - GEOS_KERNEL env propagation (`a53304b`): new `kernel_name`
+    slot in `port_caps` carries the backend identity. pid1
+    `main()` snprintf's `GEOS_KERNEL=<name>` into the supervisor
+    execve envp; `session.el` forwards it through to every
+    per-user emacs spawn so `geos-kernel` resolves to the right
+    symbol on every kernel instead of defaulting to `'linux`.
+  - skip-class freeze-test discipline (`a673679`) so CI can tell
+    a real Hurd-arm regression from a dev-host module gap.
+  - CI: `no-shell-check` regex word-bounded (`\bsystem\(`,
+    `\bpopen\(`) and elisp call patterns now require an opening
+    paren prefix (`b8b21d5`), so legitimate identifiers like
+    `link_current_system(` and comments mentioning
+    `shell-command` no longer fail the gate.
+  - `docs/HURD_PORT.md` rewritten (`ddbaa1a`), refreshed at
+    `4f9be94`, `16b918b`, and again here.
+
+`hurd` side branch is rebased onto this tag; it carries
+`port_hurd.c`, `system-hurd.scm`, `hurd-smoke-test.sh`, and the
+matching `.kernel_name = "hurd"` initializer on
+`port_hurd_impl`. Boot to multi-user on Hurd is pending the
+v0.8 self-hosted runner with a Hurd cross-toolchain.
 
 ## v0.7 (2026-05-12)
 
