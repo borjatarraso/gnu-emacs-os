@@ -1085,7 +1085,25 @@ spawn_emacs(void)
         if (geos_kernel_env) envp[ei++] = (char *)geos_kernel_env;
         envp[ei] = NULL;
         execve(emacs_path, argv, envp);
-        console("pid1: execve(emacs) failed");
+        /* execve only returns on failure; if it succeeded the child is
+         * already emacs and this line is dead.  bare "execve failed"
+         * was the v0.7.x line; the 2026-05-18 first-Hurd-PID-1 boot
+         * crashloop made me realize a bare failure with no errno gives
+         * the operator nothing to act on.  emit the path and strerror
+         * so the next boot's runlog shows EACCES vs ENOEXEC vs ENOENT
+         * vs Hurd-specific surprises directly. */
+        {
+            /* errno first, path second.  emacs_path can in principle
+             * be PATH_MAX (4096) bytes when it points at a /gnu/store
+             * hash path; if snprintf has to truncate, drop the path
+             * tail rather than the errno (skeptic 2026-05-18). */
+            char buf[320];
+            int saved_errno = errno;
+            (void)snprintf(buf, sizeof buf,
+                           "pid1: execve failed (%s): %s",
+                           strerror(saved_errno), emacs_path);
+            console(buf);
+        }
         _exit(127);
     }
     return pid;
