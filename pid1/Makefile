@@ -134,12 +134,20 @@ PORT_DEFS := -DPORT_HURD
 #                file_name_lookup, the pfinet ioctl mux entry points)
 #   -lmachuser : Mach RPC stubs (host_reboot, mach_port_deallocate,
 #                mach_host_self, mach_task_self)
+#   -lfshelp   : the libfshelp helpers; we use fshelp_start_translator
+#                to fork+exec a translator binary (e.g. /hurd/tmpfs)
+#                and hand its bootstrap port to file_set_translator.
+#                without this the mount call attaches the translator
+#                record but never starts an active process.
 # the historical names -lhurd / -lmach are NOT present as standalone
 # .so files on a modern Debian Hurd toolchain; everything they used to
 # carry is folded into glibc itself (the Hurd glibc IS the Hurd kernel
 # interface, much like vDSO on Linux carries fast-path syscalls).
-# ordering: -lhurduser before -lmachuser reflects the dependency
-# direction (the user-side stubs call into Mach).
+# ordering: -lfshelp before the user-stub libs so libfshelp's UND refs
+# (fshelp_start_translator_long calls into libhurduser/libmachuser
+# entry points internally) resolve forward.  the dynamic linker
+# chases libfshelp's NEEDED of libports / libihash / libpthread /
+# libshouldbeinlibc transitively, so we do not name those explicitly.
 #
 # the pfinet networking verbs (bring_up_lo / set_address /
 # set_route_default) go through plain socket() + ioctl() in glibc, so
@@ -152,8 +160,8 @@ PORT_DEFS := -DPORT_HURD
 # scoped to PORT=hurd only.  attribute-style "ldflags += ..." would
 # work too but the explicit assignment is harder to misread when the
 # v0.8 cross-toolchain runner picks this up.
-PORT_BOOT_LIBS   := -lhurduser -lmachuser
-PORT_MODULE_LIBS := -lhurduser -lmachuser
+PORT_BOOT_LIBS   := -lfshelp -lhurduser -lmachuser
+PORT_MODULE_LIBS := -lfshelp -lhurduser -lmachuser
 else ifeq ($(PORT),linux)
 PORT_SRC  := port_linux.c
 PORT_DEFS :=

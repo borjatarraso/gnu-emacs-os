@@ -65,6 +65,7 @@
  * preprocess time with "No such file or directory" against the first
  * one of these, which is the loud-failure we want. */
 #include <hurd.h>
+#include <hurd/fshelp.h>
 #include <hurd/fsys.h>
 #include <hurd/process.h>
 #include <mach.h>
@@ -97,14 +98,25 @@
  *     string vector type.
  *   - active-flags: FS_TRANS_SET to install fresh, optionally
  *     FS_TRANS_FORCE if a translator is already there.
- *   - passive-flags: 0 for our purposes (we are not persisting
- *     the translator to disk metadata; pid1 reapplies on every
- *     boot).
+ *   - passive-flags: also FS_TRANS_SET|FS_TRANS_FORCE so the on-disk
+ *     translator record matches the active one.  pid1 reapplies the
+ *     full set on every boot regardless, but persisting the passive
+ *     copy keeps showtrans(1) honest and gives Hurd a fallback to
+ *     lazy-start the translator if the active one ever dies between
+ *     pid1 mounts and the first user access.
  *
- * Hurd's libc wraps this in file_set_translator(); the higher-level
- * convenience is fshelp_start_translator() but that does its own
- * fork+exec dance which we do not want from PID 1.  we go with the
- * lower-level call.
+ * Hurd's libc wraps the bare RPC in file_set_translator(), but that
+ * call alone does NOT start a translator process: it only attaches a
+ * record (the argz for passive, an existing fsys port for active).
+ * to install an ACTIVE translator we have to fork+exec the translator
+ * binary ourselves and hand its bootstrap port back to file_set_-
+ * translator.  the standard libfshelp helper that does exactly that
+ * dance is fshelp_start_translator(); we use it here.  the earlier
+ * version of this file omitted the fshelp call and passed
+ * MACH_PORT_NULL as the active port, which silently amounted to
+ * "remove any active translator that happens to be there" rather
+ * than "install one".  showtrans(1) on the target node would come
+ * up empty after such a mount; the test caught it on 2026-05-17.
  *
  * mapping the linux mount() arguments:
  *
@@ -138,6 +150,25 @@
  * the body below is structured so the Mach call sites are explicit
  * and the error path goes through __hurd_fail which lives in
  * Hurd's libc and translates kern_return_t to errno for us. */
+
+/* fshelp_start_translator callback.  the cookie carries the target
+ * node port; libfshelp wants to know what underlying node the
+ * translator will sit on top of, and the answer is "the file we
+ * already opened with O_NOTRANS".  we hand it back as COPY_SEND so
+ * our own reference stays valid for the subsequent file_set_-
+ * translator call. */
+static error_t
+hurd_mount_open_node(int flags, file_t *node,
+                     mach_msg_type_name_t *node_type,
+                     task_t task, void *cookie)
+{
+    (void)flags;
+    (void)task;
+    *node = *(file_t *)cookie;
+    *node_type = MACH_MSG_TYPE_COPY_SEND;
+    return 0;
+}
+
 static int
 hurd_mount(const char *src, const char *tgt, const char *type,
            unsigned long flags, const char *opts)
@@ -145,20 +176,57 @@ hurd_mount(const char *src, const char *tgt, const char *type,
     (void)flags;
     if (!tgt || !type) { errno = EINVAL; return -1; }
 
-    /* pick the translator binary from the linux-style type string.
-     * the table is intentionally small: the boot path mounts /proc,
-     * /sys (no-op on hurd, see below), /dev, /run, /tmp and /var, so
-     * three translators cover every caller today.  unknown types
-     * fall through to ENODEV which surfaces in pid1's log the same
-     * way an unknown linux fs type would. */
+    /* pick the translator binary from the linux-style type string,
+     * and decide whether src is a meaningful argv entry for that
+     * translator.  the table is intentionally small: the boot path
+     * mounts /proc, /sys (no-op on hurd, see below), /dev, /run,
+     * /tmp and /var, so three translators cover every caller today.
+     * unknown types fall through to ENODEV which surfaces in pid1's
+     * log the same way an unknown linux fs type would.
+     *
+     * the src interpretation differs per translator:
+     *
+     *   /hurd/ext2fs  src is the block-device path (e.g.
+     *                 "/dev/hd0s1"); required, mount fails without
+     *                 it.  this matches the linux mount(2) shape.
+     *   /hurd/tmpfs   the first non-option argument is the maximum
+     *                 size in bytes.  the linux mount(2) convention
+     *                 of passing "none" as src does NOT translate;
+     *                 tmpfs would parse "none" as a number and
+     *                 reject it with EINVAL.  drop src for tmpfs
+     *                 unless it is purely numeric.
+     *   /hurd/procfs  ignores positional args entirely; drop src. */
     const char *trans_bin;
+    int src_is_arg = 0;          /* 1 = pass src as argv[1] to translator */
     if (strcmp(type, "ext2") == 0 || strcmp(type, "ext3") == 0 ||
         strcmp(type, "ext4") == 0) {
         trans_bin = "/hurd/ext2fs";
+        src_is_arg = 1;
     } else if (strcmp(type, "tmpfs") == 0) {
         trans_bin = "/hurd/tmpfs";
+        /* only forward src if it is a bare unsigned-decimal integer
+         * (with optional K/M/G suffix); anything else is the linux
+         * placeholder "none" or a device path and would break tmpfs's
+         * argument parser.  if src does NOT look like a size, fall
+         * through to the default-size append below: /hurd/tmpfs has
+         * no built-in default and rejects mounts with no size arg,
+         * unlike linux tmpfs which defaults to half of RAM.  256M
+         * matches the size pid1's /run + /tmp + /var/tmp on linux
+         * tend to settle at, plenty of headroom for boot state. */
+        if (src) {
+            const char *p = src;
+            if (*p >= '0' && *p <= '9') {
+                while (*p >= '0' && *p <= '9') p++;
+                if (*p == '\0' ||
+                    ((*p == 'K' || *p == 'M' || *p == 'G' ||
+                      *p == 'k' || *p == 'm' || *p == 'g') &&
+                     *(p + 1) == '\0'))
+                    src_is_arg = 1;
+            }
+        }
     } else if (strcmp(type, "proc") == 0 || strcmp(type, "procfs") == 0) {
         trans_bin = "/hurd/procfs";
+        /* src deliberately not forwarded: procfs ignores it. */
     } else if (strcmp(type, "sysfs") == 0) {
         /* hurd has no sysfs equivalent.  the elisp layer is supposed
          * to detect this via geos-port-unimplemented; from C we just
@@ -222,13 +290,25 @@ hurd_mount(const char *src, const char *tgt, const char *type,
     }
     memcpy(argz, trans_bin, bin_len);
     argz_len = bin_len;
-    if (src && src[0] != '\0') {
+    if (src_is_arg && src && src[0] != '\0') {
         size_t l = strlen(src) + 1;
         if (argz_len + l > sizeof argz) {
             mach_port_deallocate(mach_task_self(), target);
             errno = E2BIG; return -1;
         }
         memcpy(argz + argz_len, src, l);
+        argz_len += l;
+    } else if (strcmp(type, "tmpfs") == 0) {
+        /* tmpfs default size: see comment in the trans_bin table.
+         * appended as a discrete argz entry (the translator parses
+         * argv positionally). */
+        static const char default_tmpfs_size[] = "256M";
+        size_t l = sizeof default_tmpfs_size;  /* includes NUL */
+        if (argz_len + l > sizeof argz) {
+            mach_port_deallocate(mach_task_self(), target);
+            errno = E2BIG; return -1;
+        }
+        memcpy(argz + argz_len, default_tmpfs_size, l);
         argz_len += l;
     }
     if (opts && opts[0] != '\0') {
@@ -241,25 +321,55 @@ hurd_mount(const char *src, const char *tgt, const char *type,
         argz_len += l;
     }
 
-    /* file_set_translator wants two argz buffers: the "passive"
-     * translator (stored on disk so it survives reboot) and the
-     * "active" one (installed right now in memory).  we set the
-     * active one with FS_TRANS_SET|FS_TRANS_FORCE so a stale
-     * translator (e.g. from a previous boot attempt that did not
-     * finish unmounting) gets replaced rather than chained behind.
-     * passive flags are 0: pid1 reinstalls every translator at
-     * every boot, baking a passive copy on disk would just create
-     * skew between the system.scm intent and the on-disk state. */
+    /* start the translator process and get its bootstrap port.
+     * fshelp_start_translator does the fork+exec, sets up the
+     * translator's stdin/stdout/stderr from ours, and blocks until
+     * the translator either responds (returning its control port in
+     * active_control) or the timeout fires.  60s is what settrans(1)
+     * defaults to; pid1 has no tighter requirement at boot. */
+    fsys_t active_control = MACH_PORT_NULL;
+    error_t rc_start = fshelp_start_translator(hurd_mount_open_node,
+                                               &target,
+                                               (char *)trans_bin,
+                                               argz, argz_len,
+                                               60000,
+                                               &active_control);
+    if (rc_start) {
+        mach_port_deallocate(mach_task_self(), target);
+        switch (rc_start) {
+        case KERN_INVALID_ARGUMENT:   errno = EINVAL; break;
+        case EDIED:                   errno = EIO;    break;
+        case ETIMEDOUT:               errno = ETIMEDOUT; break;
+        default:
+            if (rc_start > 0 && rc_start < 256) errno = (int)rc_start;
+            else                                errno = EIO;
+            break;
+        }
+        return -1;
+    }
+
+    /* now bind the running translator to the node.  pass it as the
+     * active port (with FS_TRANS_SET|FS_TRANS_FORCE so any stale
+     * translator is replaced rather than chained behind), AND record
+     * the argz as the passive translator so showtrans(1) reflects
+     * the mount and Hurd can lazy-restart from disk if the active
+     * process ever exits.  pid1 reapplies the active path on every
+     * boot regardless; the on-disk record is a safety net. */
     error_t rc = file_set_translator(target,
-                                     0, FS_TRANS_SET | FS_TRANS_FORCE,
+                                     FS_TRANS_SET | FS_TRANS_FORCE,
+                                     FS_TRANS_SET | FS_TRANS_FORCE,
                                      0,
                                      argz, argz_len,
-                                     MACH_PORT_NULL,
+                                     active_control,
                                      MACH_MSG_TYPE_COPY_SEND);
-    /* drop the file port either way: success or failure, we are
-     * done with it.  leaving it dangling is a slow leak in PID 1
-     * which lives forever. */
+    /* drop ports either way: success or failure, we are done with
+     * them.  leaving them dangling is a slow leak in PID 1 which
+     * lives forever.  the active_control send right was minted by
+     * fshelp; we copy-sent it into file_set_translator so the kernel
+     * holds its own ref now.  our local ref drops here. */
     mach_port_deallocate(mach_task_self(), target);
+    if (active_control != MACH_PORT_NULL)
+        mach_port_deallocate(mach_task_self(), active_control);
 
     if (rc) {
         /* error_t on Hurd is a typedef for kern_return_t (32-bit signed
