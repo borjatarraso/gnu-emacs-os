@@ -1277,10 +1277,33 @@ main(int argc, char **argv)
      *               typically "-Q" "-l" early-init.el "-l" panic.el
      * raw QEMU smoke tests run without any args and fall back to the
      * /usr/bin/emacs default with no module, no Xorg, and no extras. */
-    if (argc > 1 && argv[1] && argv[1][0] != '\0') {
+    /* argv[1..3] are only accepted if they LOOK like paths (start with
+     * '/').  on Hurd, /hurd/startup hands /sbin/init the sysvinit-style
+     * runlevel argument (e.g. "6" after a `shutdown -r now`); on a
+     * Debian Hurd boot the first thing the supervisor gets is argv =
+     * ["/sbin/init", "6"] and the old unconditional `emacs_path =
+     * argv[1]` made us execve("6") in a tight crashloop (ENOENT).  the
+     * guix boot gexp always passes absolute store paths, so the '/'
+     * prefix check is forward-compatible with that caller too.  same
+     * guard on argv[2] (PID1_MODULE_PATH) and argv[3] (xorg spec, also
+     * absolute by construction) since `telinit 1` / `telinit 3` would
+     * otherwise land "1" / "3" in those slots.  caught on the
+     * 2026-05-18 second boot, see
+     * docs/runlogs/2026-05-18-hurd-pid1-boot-result.md. */
+    if (argc > 1 && argv[1] && argv[1][0] == '/') {
         emacs_path = argv[1];
+    } else if (argc > 1 && argv[1] && argv[1][0] != '\0') {
+        char msg[160];
+        (void)snprintf(msg, sizeof msg,
+                       "pid1: argv[1] (%s) is not an absolute path, "
+                       "using %s", argv[1], emacs_path);
+        console(msg);
     }
-    if (argc > 2 && argv[2] && argv[2][0] != '\0') {
+    /* same '/' guard as argv[1]: argv[2] (module path) and argv[3]
+     * (Xorg spec) are absolute by construction when the guix gexp is
+     * the caller, and we must reject sysvinit-style runlevel tokens
+     * that /hurd/startup would otherwise drop here. */
+    if (argc > 2 && argv[2] && argv[2][0] == '/') {
         /* build "PID1_MODULE_PATH=<path>" once into a static buffer.
          * snprintf truncates instead of overflowing; truncation here
          * means a wildly-long store path, which would already have
@@ -1293,7 +1316,7 @@ main(int argc, char **argv)
             module_env = module_env_buf;
         }
     }
-    if (argc > 3 && argv[3] && argv[3][0] != '\0') {
+    if (argc > 3 && argv[3] && argv[3][0] == '/') {
         /* parse_xorg_spec mutates argv[3] in place. argv lives in the
          * kernel-supplied region so this is fine, no copy needed. */
         if (parse_xorg_spec(argv[3]) == 0) {
