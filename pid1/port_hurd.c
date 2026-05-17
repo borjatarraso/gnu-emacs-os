@@ -407,6 +407,50 @@ hurd_set_hostname(const char *name, size_t len)
     return sethostname(name, len);
 }
 
+/* interface-name normalization at the kernel seam.  the elisp
+ * supervisor speaks Linux-shaped ifnames ("eth0", "wlp3s0", "lo") and
+ * pfinet on Debian Hurd disagrees: pfinet keys hardware interfaces by
+ * the devnode translator path that was passed to /hurd/pfinet at
+ * settrans time, which on a stock Debian Hurd install is "/dev/eth0".
+ * loopback is the exception: pfinet special-cases the literal "lo"
+ * regardless of devnode configuration.  runtime-verified 2026-05-17:
+ * `pid1-set-address "eth0" ...` returns ENODEV; `pid1-set-address
+ * "/dev/eth0" ...` succeeds.
+ *
+ * the right place to translate is here, not in elisp: the elisp
+ * caller is kernel-agnostic by construction (geos-kernel dispatches
+ * before this code is reached), and a per-kernel oddity belongs to
+ * the per-kernel backend.  the Linux backend does nothing of the kind
+ * because the Linux kernel accepts the bare ifname directly.
+ *
+ * rule: if IN starts with '/', pass through unchanged (already an
+ * absolute devnode path, caller knows what it wants); if IN equals
+ * "lo", pass through unchanged (pfinet special case); otherwise
+ * prepend "/dev/".  the OUT buffer is IFNAMSIZ-bounded; failures
+ * (buffer too small for the prefixed name) return -1 with EINVAL,
+ * matching the rest of this file's contract. */
+static int
+hurd_normalize_ifname(const char *in, char *out, size_t outsz)
+{
+    if (!in || !out || outsz == 0) { errno = EINVAL; return -1; }
+    size_t inlen = strnlen(in, IFNAMSIZ);
+    if (inlen == 0 || inlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
+    int prepend = (in[0] != '/' && !(inlen == 2 && in[0] == 'l' && in[1] == 'o'));
+    if (prepend) {
+        const char prefix[] = "/dev/";
+        size_t plen = sizeof prefix - 1;
+        if (plen + inlen + 1 > outsz) { errno = EINVAL; return -1; }
+        memcpy(out, prefix, plen);
+        memcpy(out + plen, in, inlen);
+        out[plen + inlen] = '\0';
+    } else {
+        if (inlen + 1 > outsz) { errno = EINVAL; return -1; }
+        memcpy(out, in, inlen);
+        out[inlen] = '\0';
+    }
+    return 0;
+}
+
 /* pfinet socket-open helper.  every networking verb wants a UDP/IPv4
  * socket on the pfinet translator at /servers/socket/2; the
  * AF_INET / SOCK_DGRAM path goes through glibc's hurd/sockets.c which
@@ -508,15 +552,13 @@ static int
 hurd_set_address(const char *ifname, uint32_t addr_be, int prefix)
 {
     if (prefix < 0 || prefix > 32) { errno = EINVAL; return -1; }
-    if (!ifname) { errno = EINVAL; return -1; }
-    size_t nlen = strnlen(ifname, IFNAMSIZ);
-    if (nlen == 0 || nlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
-    int s = hurd_pfinet_open();
-    if (s < 0) return -1;
     struct ifreq r;
     memset(&r, 0, sizeof r);
-    memcpy(r.ifr_name, ifname, nlen);
-    r.ifr_name[IFNAMSIZ - 1] = '\0';
+    /* normalize at the seam: "eth0" -> "/dev/eth0" for pfinet's
+     * devnode-keyed lookup, "lo" passes through unchanged. */
+    if (hurd_normalize_ifname(ifname, r.ifr_name, IFNAMSIZ) < 0) return -1;
+    int s = hurd_pfinet_open();
+    if (s < 0) return -1;
     struct sockaddr_in *sin = (struct sockaddr_in *)&r.ifr_addr;
     sin->sin_family = AF_INET;
     /* addr_be arrives in network byte order (supervisor contract, matches
@@ -572,13 +614,15 @@ hurd_set_address(const char *ifname, uint32_t addr_be, int prefix)
 static int
 hurd_set_route_default(uint32_t gw_be, const char *ifname)
 {
-    if (!ifname) { errno = EINVAL; return -1; }
-    size_t nlen = strnlen(ifname, IFNAMSIZ);
-    if (nlen == 0 || nlen >= IFNAMSIZ) { errno = EINVAL; return -1; }
-    int s = hurd_pfinet_open();
-    if (s < 0) return -1;
     ifrtreq_t rt;
     memset(&rt, 0, sizeof rt);
+    /* normalize at the seam: "eth0" -> "/dev/eth0" for pfinet's
+     * devnode-keyed lookup.  IF_NAMESIZE on Hurd matches IFNAMSIZ
+     * (both 16), so the same bound applies to rt.ifname as to
+     * ifr_name above. */
+    if (hurd_normalize_ifname(ifname, rt.ifname, sizeof rt.ifname) < 0) return -1;
+    int s = hurd_pfinet_open();
+    if (s < 0) return -1;
     /* default route: destination 0.0.0.0/0 via gw_be.  in_addr_t is
      * already network byte order per POSIX; gw_be comes in network
      * byte order from the port-layer contract so no htonl needed. */
@@ -587,11 +631,6 @@ hurd_set_route_default(uint32_t gw_be, const char *ifname)
     rt.rt_gateway = gw_be;
     rt.rt_flags   = RTF_UP | RTF_GATEWAY;
     rt.rt_metric  = 1;
-    /* ifname is a fixed-size char buffer here, not a pointer; zero
-     * the tail and bound-copy as defence in depth (pfinet reads up
-     * to the first NUL). */
-    memcpy(rt.ifname, ifname, nlen);
-    rt.ifname[nlen] = '\0';
     /* SIOCADDRT -> pfinet S_iioctl_siocaddrt.  EEXIST surfaces if a
      * default route already exists; the supervisor decides whether to
      * delete-then-add or surface, same as on Linux. */
