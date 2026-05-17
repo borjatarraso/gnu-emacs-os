@@ -498,12 +498,38 @@ gets the console-equivalent env."
                           (> (length display) 0)
                           (string-match-p
                            "\\`:[0-9]+\\(\\.[0-9]+\\)?\\'" display)))
+         ;; GEOS_KERNEL is pid1's identity for which kernel the system
+         ;; was booted on (linux or hurd).  the per-user emacs reads it
+         ;; through core/port.el's `geos-kernel' defvar; without
+         ;; forwarding it here the child defvar would default to 'linux
+         ;; regardless of the supervisor's actual kernel, which on a
+         ;; hurd boot would re-introduce the very Linux-isms the port
+         ;; seam exists to prevent.  the source is the supervisor's own
+         ;; env (pid1 set it from port->kernel_name at boot); if it is
+         ;; somehow missing or malformed we omit the entry and let the
+         ;; child's defvar pick its safe 'linux default.
+         ;;
+         ;; (skeptic W2) the producer is a C-level identifier in a
+         ;; backend's port_caps table, not operator-tainted input, so the
+         ;; validation here is shape-only defence in depth: lowercase
+         ;; ASCII start, then letters / digits / `._-' so plausible
+         ;; backend names ("linux-rt", "freebsd-12", "netbsd-10") pass
+         ;; without a re-edit on every new kernel.  32-char cap rules
+         ;; out anything that could smuggle `\n' or `=' through.
+         (kernel (getenv "GEOS_KERNEL"))
+         (kernel-ok (and (stringp kernel)
+                         (> (length kernel) 0)
+                         (<= (length kernel) 32)
+                         (string-match-p "\\`[a-z][a-z0-9._-]*\\'" kernel)))
          (base (list (concat "USER=" name)
                      (concat "LOGNAME=" name)
                      (concat "HOME=" home)
                      "SHELL=/bin/sh"
                      "PATH=/run/current-system/profile/bin:/usr/bin:/bin"
-                     "TERM=linux")))
+                     "TERM=linux"))
+         (base (if kernel-ok
+                   (append base (list (concat "GEOS_KERNEL=" kernel)))
+                 base)))
     (if display-ok
         (append base (list (concat "DISPLAY=" display)))
       base)))

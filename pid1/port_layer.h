@@ -58,6 +58,26 @@
 #include <stdint.h>
 
 typedef struct port_caps {
+    /* the backend's short kernel name, "linux" or "hurd".  the
+     * standalone PID 1 binary (emacs-init.c main()) snprintf's
+     * "GEOS_KERNEL=<name>" from this slot into its execve envp before
+     * spawning the supervisor emacs, and core/session.el forwards that
+     * env var through to each per-user emacs.  core/port.el reads it
+     * via `(getenv "GEOS_KERNEL")' and interns it as `geos-kernel'.
+     *
+     * the module path (emacs_module_init) does NOT re-splice; it is
+     * loaded inside the process that main() already execve'd with
+     * GEOS_KERNEL in its env, so the supervisor emacs inherits the
+     * value through normal process-env inheritance.  this asymmetry is
+     * intentional: the module is never the primordial process, so it
+     * never sets process env, it only inherits it.
+     *
+     * bare const char * because there is no runtime dispatch here, only
+     * an identity.  each backend's table answers "which kernel am I"
+     * for both the elisp seam and the env splice; one slot, one
+     * answer.  port_require_or_abort() asserts non-NULL. */
+    const char *kernel_name;
+
     /* mount(2) on Linux; settrans-equivalent on Hurd.  same semantics
      * as Linux mount(2): src/tgt/type may not be NULL, opts may. */
     int (*mount)(const char *src, const char *tgt, const char *type,

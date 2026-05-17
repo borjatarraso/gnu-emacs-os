@@ -272,6 +272,7 @@ linux_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
  * will provide a parallel const port_caps port_hurd_impl with the
  * same shape. */
 const port_caps port_linux_impl = {
+    .kernel_name       = "linux",
     .mount             = linux_mount,
     .set_hostname      = linux_set_hostname,
     .bring_up_lo       = linux_bring_up_lo,
@@ -315,6 +316,20 @@ port_require_or_abort(void)
          * panic on cleanly. */
         static const char m[] =
             "pid1: port table not registered before first call; aborting\n";
+        ssize_t r = write(2, m, sizeof m - 1); (void)r;
+        abort();
+    }
+    /* (skeptic N2) a backend that forgets `.kernel_name = ...` in its
+     * designated-initializer table would zero the slot to NULL.  glibc's
+     * snprintf("%s", NULL) yields "(null)" on most builds, and the elisp
+     * side would intern the symbol `(null)` for `geos-kernel'; that is
+     * silent corruption of the very identity port_caps exists to make
+     * authoritative.  catch it here with the same loud-and-early posture
+     * as the NULL-port check above. */
+    if (port->kernel_name == NULL) {
+        static const char m[] =
+            "pid1: port table has NULL kernel_name; backend init bug, "
+            "aborting\n";
         ssize_t r = write(2, m, sizeof m - 1); (void)r;
         abort();
     }

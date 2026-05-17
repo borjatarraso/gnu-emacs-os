@@ -549,6 +549,21 @@ static const char *display_env = NULL;
  * elisp behaviour. */
 static const char *geos_mode_env = NULL;
 
+/* v0.7.x hurd port: GEOS_KERNEL=<linux|hurd> spliced into the child
+ * env so core/port.el's `geos-kernel' defvar resolves to the right
+ * symbol on the elisp side.  before this existed the elisp seam
+ * defaulted to 'linux on every boot regardless of which port_caps
+ * was linked in, so a Hurd build would have linked the Mach-RPC C
+ * backend but kept reading /sys/block from the elisp side.  set
+ * unconditionally from main() right after `port' is assigned, by
+ * snprintf'ing "GEOS_KERNEL=" + port->kernel_name into the buffer
+ * below.  per-user spawn (session.el) forwards GEOS_KERNEL through
+ * from the supervisor's env so it lands in each per-user emacs
+ * automatically; the env splice here is what gets it there in the
+ * first place. */
+static char geos_kernel_env_buf[64];
+static const char *geos_kernel_env = NULL;
+
 /* (B1, skeptic 2026-05-06) supervisor needs to know which child pid
  * is the X server so it can react to Xorg dying instead of treating
  * it as just another reaped orphan. set by xorg_bring_up() after a
@@ -985,10 +1000,16 @@ spawn_emacs(void)
         if (extra_argc == 0) argv[ai++] = "-Q";
         argv[ai] = NULL;
 
-        /* envp is fixed-size; we only ever splice PID1_MODULE_PATH,
-         * DISPLAY and GEOS_MODE in if they were set. anything else
-         * added in the future grows the array and the cap. */
-        char *envp[8];
+        /* envp is fixed-size; we splice PID1_MODULE_PATH, DISPLAY,
+         * GEOS_MODE and GEOS_KERNEL in if they were set.  4 fixed
+         * entries + up to 4 conditional + trailing NULL = 9 slots
+         * worst-case today.  the cap is sized at 12 to leave headroom
+         * for the next env splice (skeptic B2: a missing bump on the
+         * next addition would write envp[ei] = NULL one past the array
+         * and the bug class is "supervisor execve overruns envp" which
+         * brick-installs).  raise the cap together with any new
+         * envp[ei++] line. */
+        char *envp[12];
         int ei = 0;
         envp[ei++] = "TERM=linux";
         envp[ei++] = "HOME=/root";
@@ -998,6 +1019,7 @@ spawn_emacs(void)
         if (module_env) envp[ei++] = (char *)module_env;
         if (display_env) envp[ei++] = (char *)display_env;
         if (geos_mode_env) envp[ei++] = (char *)geos_mode_env;
+        if (geos_kernel_env) envp[ei++] = (char *)geos_kernel_env;
         envp[ei] = NULL;
         execve(emacs_path, argv, envp);
         console("pid1: execve(emacs) failed");
@@ -1142,6 +1164,25 @@ main(int argc, char **argv)
      * backend registration on the side branch. */
     port = &port_linux_impl;
     port_require_or_abort();
+
+    /* build "GEOS_KERNEL=<name>" from the active backend's identity.
+     * truncation here would silently fall back to the elisp 'linux
+     * default, which is precisely the footgun this splice exists to
+     * close (skeptic B1).  treat it the same way as a NULL port table:
+     * loud message on /dev/console + abort, since the only way to hit
+     * it is a backend that names itself with >50 characters, which is
+     * a build-config bug not a runtime condition.  the buffer is 64
+     * bytes; "GEOS_KERNEL=" is 12, leaving 51 for the name + NUL. */
+    {
+        int n = snprintf(geos_kernel_env_buf, sizeof geos_kernel_env_buf,
+                         "GEOS_KERNEL=%s", port->kernel_name);
+        if (n <= 0 || (size_t)n >= sizeof geos_kernel_env_buf) {
+            console("pid1: GEOS_KERNEL splice failed or truncated; "
+                    "backend kernel_name unusable, aborting");
+            abort();
+        }
+        geos_kernel_env = geos_kernel_env_buf;
+    }
 
     /* argv layout from the guix boot gexp:
      *   argv[1] = absolute store path of the emacs binary
