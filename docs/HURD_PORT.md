@@ -123,3 +123,43 @@ rollback.
     boot smoke is v0.8.
 
 For the spike's design notes see `docs/v04-item11-hurd-spike.md`.
+For the boot recipe (what a Hurd-VM operator runs to verify
+`port_hurd.c` for the first time) see `docs/HURD_BOOT.md`.
+
+## Verification status
+
+Code-side completion is high; ground-truth verification on a real
+Hurd kernel is at zero. Honesty matters here, so each port surface
+gets a line.
+
+| Surface | Code status | Verified on Hurd? |
+|---|---|---|
+| `port->kernel_name` | both backends populated | n/a, identity slot |
+| `port->mount` (Hurd: `file_set_translator`) | written, skeptic-clean | NO |
+| `port->set_hostname` (Hurd: POSIX) | written | NO |
+| `port->bring_up_lo` (Hurd: pfinet SIOCSIFFLAGS) | written | NO |
+| `port->set_address` (Hurd: pfinet SIOCSIFADDR+) | written | NO |
+| `port->set_route_default` (Hurd: pfinet SIOCADDRT) | written | NO |
+| `port->reboot` (Hurd: `host_reboot` Mach RPC) | written | NO |
+| `port->suspend` (Hurd: ENOSYS forever) | written | n/a, design |
+| `port->get_peer_cred` (Hurd: ENOSYS, supervisor RPC poll soft-fails) | written | NO |
+| `geos-kernel` elisp defvar (reads `GEOS_KERNEL` env) | runs everywhere | YES on Linux |
+| GEOS_KERNEL env splice (`port->kernel_name` → execve envp → per-user emacs) | implemented (`a53304b`) | YES on Linux |
+| `core/network.el` Linux/Hurd dispatch | implemented | YES on Linux, NO on Hurd |
+| `core/state.el` Linux/Hurd dispatch | implemented | YES on Linux, NO on Hurd |
+| `core/uname.el` Linux/Hurd dispatch | implemented | YES on Linux, NO on Hurd |
+| `buffers/disks.el` Hurd not-implemented banner | implemented | YES on Linux, NO on Hurd |
+| `install/disk.el` Hurd not-implemented banner | implemented | YES on Linux, NO on Hurd |
+| `services/journal-tail.el` Hurd no-op | implemented | YES on Linux, NO on Hurd |
+| `user/userland/audio.el` Hurd not-implemented banner | implemented | YES on Linux, NO on Hurd |
+
+Freeze-tests (`iso-build/freeze-tests/freeze-test-port-hurd.el`)
+exercise the elisp Hurd-arm code paths under a stubbed
+`geos-kernel = 'hurd`; they are skip-class on a dev host that does
+not have the pid1 module loaded. They DO catch regressions in the
+elisp dispatch logic; they DO NOT exercise `port_hurd.c` or prove
+anything about real Hurd RPCs.
+
+The first real Hurd boot will replace every "NO" in this table with
+"YES on YYYY-MM-DD" or with a "fixed at <commit>" link. Either is
+forward motion; staying at "NO" is the failure mode.
