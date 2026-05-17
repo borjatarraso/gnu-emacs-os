@@ -227,8 +227,22 @@ was unaffected.  with this patch `pid1-set-address "eth0"
 "10.0.2.15" 24` returns `t` and the SSH session running over the
 NAT survives the reconfiguration.
 
-boot-as-PID-1 is the next checkpoint and requires an `init=/sbin/
-emacs-init` kernel-cmdline boot inside a Hurd VM.
+boot-as-PID-1 happened on 2026-05-18.  Hurd does not honor an
+`init=` kernel cmdline; the bootstrap server `/hurd/startup` (PID
+1 in Hurd's model) execs `/sbin/init` unconditionally, so the
+install path is `cp /sbin/init /sbin/init.debian-orig` then `cp
+emacs-init /sbin/init`.  the first boot ran through the early-
+mount sequence, hit three bootstrap-order bugs (read-only root at
+init time, tmpfs default-pager missing, `/hurd/tmpfs` argv shape),
+still reached the supervisor loop, attempted to exec
+`/usr/bin/emacs`, fell into the documented crashloop holding
+pattern when the binary turned out to be absent on the Debian
+Hurd snapshot, and stayed alive to reap zombies as designed.
+Receipt + screen capture: `docs/runlogs/2026-05-18-hurd-pid1-
+boot-result.md`.  port->reboot promotion to YES waits on a
+followup boot with the bootstrap-order fixes and a tiny
+`/usr/bin/emacs` stub so the supervisor's spawn-success branch
+runs at least once.
 
 Freeze-tests (`iso-build/freeze-tests/freeze-test-port-hurd.el`)
 exercise the elisp Hurd-arm code paths under a stubbed
@@ -237,6 +251,9 @@ not have the pid1 module loaded. They DO catch regressions in the
 elisp dispatch logic; they DO NOT exercise `port_hurd.c` or prove
 anything about real Hurd RPCs.
 
-The first real Hurd PID-1 boot will replace every "builds on Hurd
-2026-05-17" in this table with "YES on YYYY-MM-DD" or with a "fixed
-at <commit>" link.  staying at "builds" is the failure mode.
+The first real Hurd PID-1 boot landed 2026-05-18 (see runlog).  it
+moves the table forward only for the supervisor loop itself, which
+is C code that runs before any of the per-slot RPC verbs are
+exercised in the boot path.  `port->reboot` stays at "builds" until
+a followup boot lets the supervisor call `host_reboot` from inside
+the loop.  staying at "builds" is the failure mode.
