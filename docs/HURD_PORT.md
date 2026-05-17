@@ -235,14 +235,27 @@ emacs-init /sbin/init`.  the first boot ran through the early-
 mount sequence, hit three bootstrap-order bugs (read-only root at
 init time, tmpfs default-pager missing, `/hurd/tmpfs` argv shape),
 still reached the supervisor loop, attempted to exec
-`/usr/bin/emacs`, fell into the documented crashloop holding
-pattern when the binary turned out to be absent on the Debian
-Hurd snapshot, and stayed alive to reap zombies as designed.
-Receipt + screen capture: `docs/runlogs/2026-05-18-hurd-pid1-
-boot-result.md`.  port->reboot promotion to YES waits on a
-followup boot with the bootstrap-order fixes and a tiny
-`/usr/bin/emacs` stub so the supervisor's spawn-success branch
-runs at least once.
+`/usr/bin/emacs`, fell into the crashloop holding pattern, and
+stayed alive to reap zombies as designed.  Receipt + screen
+capture: `docs/runlogs/2026-05-18-hurd-pid1-boot-result.md`.
+
+post-mortem on the crashloop turned up the real root cause:
+`/hurd/startup` passes a sysvinit-style runlevel token as
+`argv[1]` (e.g. `"6"` after a clean `shutdown -r`).  emacs-init's
+argv-parser blindly set `emacs_path = argv[1]`, so `execve("6")`
+returned ENOENT in a tight loop.  the fix landed on the hurd
+branch and was cherry-picked to main: argv[1..3] are now only
+accepted as paths when they start with `/`, with a breadcrumb
+log on rejection so the next operator does not chase the same
+ghost.  the diagnostic format was also flipped to emit errno
+first, path second, so snprintf truncation drops the path tail
+rather than the errno.
+
+second boot on the same date, with the argv fix in place,
+spawned emacs and rendered the `*scratch*` greeting on
+/dev/console.  receipt: `docs/runlogs/2026-05-18-hurd-pid1-
+emacs-spawn.md`.  the supervisor loop is now a verified path,
+not a hypothetical one.
 
 Freeze-tests (`iso-build/freeze-tests/freeze-test-port-hurd.el`)
 exercise the elisp Hurd-arm code paths under a stubbed
@@ -251,9 +264,11 @@ not have the pid1 module loaded. They DO catch regressions in the
 elisp dispatch logic; they DO NOT exercise `port_hurd.c` or prove
 anything about real Hurd RPCs.
 
-The first real Hurd PID-1 boot landed 2026-05-18 (see runlog).  it
-moves the table forward only for the supervisor loop itself, which
-is C code that runs before any of the per-slot RPC verbs are
-exercised in the boot path.  `port->reboot` stays at "builds" until
-a followup boot lets the supervisor call `host_reboot` from inside
-the loop.  staying at "builds" is the failure mode.
+The first real Hurd PID-1 boot landed 2026-05-18 (see runlog).
+The followup boot the same day shipped the argv fix and got emacs
+spawning.  Both are pinned by screen captures + runlogs in
+`docs/runlogs/`.  `port->reboot` still stays at "builds": calling
+`host_reboot` end-to-end from the booted emacs requires driving
+`M-x pid1-reboot RET` from a console we cannot easily script.
+That promotion is tracked as task #98 and is the last gating
+item for the row in the table.
