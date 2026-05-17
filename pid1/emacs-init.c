@@ -1283,10 +1283,8 @@ main(int argc, char **argv)
      * carries exactly one backend. */
 #ifdef PORT_HURD
     port = &port_hurd_impl;
-    setenv("GEOS_KERNEL", "hurd", 1);
 #else
     port = &port_linux_impl;
-    setenv("GEOS_KERNEL", "linux", 1);
 #endif
     port_require_or_abort();
 

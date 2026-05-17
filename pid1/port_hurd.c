@@ -637,6 +637,7 @@ hurd_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
  * the symmetry is what lets emacs-init.c pick one or the other at
  * compile time without touching the call sites. */
 const port_caps port_hurd_impl = {
+    .kernel_name       = "hurd",
     .mount             = hurd_mount,
     .set_hostname      = hurd_set_hostname,
     .bring_up_lo       = hurd_bring_up_lo,
