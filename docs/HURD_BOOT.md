@@ -36,15 +36,17 @@ because it gives you a known-good Hurd glibc and a working `apt`.
 
 ```
 apt-get update
-apt-get install -y build-essential libhurd-dev libhurd-mach-dev \
-                   libihash-dev libstore-dev mig pkg-config
+apt-get install -y build-essential libhurd-dev libihash-dev \
+                   libstore-dev mig pkg-config
 ```
 
-The libraries we link against (`-lhurduser`, `-lhurd`, `-lmach`)
-come from `libhurd-dev`; the Mach IPC stubs come from
-`libhurd-mach-dev`. `mig` generates RPC stubs at compile time from
-the `.defs` files the Mach RPC system uses; the Hurd toolchain ships
-it.
+The libraries we link against (`-lhurduser`, `-lmachuser`,
+`-lfshelp`) all come from `libhurd-dev` on a modern Debian Hurd
+toolchain.  The historical separate `libhurd-mach-dev` package
+is gone; what it used to provide is now folded into glibc and
+into the user-side `-luser` stubs.  `mig` generates RPC stubs at
+compile time from the `.defs` files the Mach RPC system uses;
+the Hurd toolchain ships it.
 
 ## Step 2: clone GEOS and check out the hurd branch
 
@@ -62,11 +64,24 @@ side-branch contract in `docs/HURD_PORT.md`.
 ```
 cd pid1
 make clean
-make PORT=hurd
+make PORT=hurd STATIC=0
 ```
 
-Expected output: `pid1/emacs-init` and `pid1/pid1-module.so`, both
-linked against `-lhurduser -lhurd -lmach`.
+`STATIC=0` is required on Debian Hurd: the static `libfshelp.a`
+shipped by libhurd-dev references `__assert_fail_backtrace`, a
+glibc-debug symbol that the static glibc archive does not export.
+A dynamic link picks it up fine.  The downside is that the boot
+binary now has DT_NEEDED entries on libfshelp / libhurduser /
+libmachuser; those are provided by libhurd-dev and ship under
+/lib on the Debian Hurd rootfs, so the dynamic linker resolves
+them at boot.  When the v0.8 cross-toolchain runner comes online
+we revisit whether a static link is achievable upstream.
+
+Expected output: `pid1/emacs-init` (and `pid1/pid1-module.so` if
+you also `make module`), linked against `-lfshelp -lhurduser
+-lmachuser`.  The historical `-lhurd` / `-lmach` standalone .so
+files are gone on a modern Debian Hurd toolchain (folded into
+glibc); the Makefile reflects this.
 
 **Known unknowns** (this is the first time anyone runs this; expect
 breakage in any of):
@@ -95,46 +110,89 @@ keeps Linux green.
 ## Step 4: install GEOS into the Hurd VM
 
 The Hurd build of GEOS does NOT use Guix's `system reconfigure`
-flow today because Guix-on-Hurd is still maturing. The bare-minimum
-manual install:
+flow today because Guix-on-Hurd is still maturing.
+
+**Hurd does not honor an `init=` kernel cmdline.**  I confirmed
+this on a Debian GNU/Hurd 2026-03 snapshot on 2026-05-18: GRUB
+hands control to `gnumach`, gnumach starts `/hurd/startup` as
+the bootstrap PID 1, and startup execs `/sbin/init`
+unconditionally.  There is no `argv[1]=path-to-init` hook.
+
+So the install path is: **replace /sbin/init in place**, after
+keeping a backup the maintenance shell can fall back to.
 
 ```
-install -m 755 pid1/emacs-init /sbin/emacs-init
-install -m 644 pid1/pid1-module.so /lib/pid1-module.so
+# inside the Hurd VM, as root
+cp /sbin/init /sbin/init.debian-orig
+cp pid1/emacs-init /sbin/init
+cp pid1/emacs-init /usr/sbin/init     # sysvinit keeps both in sync
 mkdir -p /etc /var/log /run
 echo "geos-hurd" > /etc/hostname
+sync
 ```
 
-Boot into the Hurd kernel with `init=/sbin/emacs-init` on the
-kernel command line. In GRUB:
+Then reboot the VM **cleanly** from inside Hurd (`shutdown -r
+now`).  Do NOT use QEMU's `system_reset` monitor command for the
+swap-in reboot: it is a hard reset, ext2fs has not flushed, and
+the next boot drops to a single-user maintenance shell for fsck
+before /sbin/init runs.  I learned this the hard way on the
+second attempt today.
+
+GRUB does not need editing.  The Debian Hurd installer's default
+entry uses the standard sequence below and we change nothing in
+it:
 
 ```
-multiboot /boot/gnumach.gz root=device:hd0s1
-module /hurd/ext2fs.static --readonly --multiboot-command-line='${kernel-command-line}' --host-priv-port='${host-port}' --device-master-port='${device-port}' --exec-server-task='${exec-task}' -T typed '${root}' '$(task-create)' '$(task-resume)'
+multiboot /boot/gnumach.gz root=device:hd0s0
+module /hurd/ext2fs.static ...
 module /lib/ld.so.1 /hurd/exec '$(exec-task=task-create)'
-module /sbin/emacs-init
 ```
 
-The trailing `module /sbin/emacs-init` line is the only GEOS-
-specific addition; everything above it is the standard Hurd boot
-sequence.
+`/hurd/startup` will exec `/sbin/init`, which is now the GEOS
+supervisor.
 
 ## Step 5: expected boot sequence
 
-In the order they appear on /dev/console:
+In the order they appear on /dev/console (transcript of the
+2026-05-18 first-boot, see
+`docs/runlogs/2026-05-18-hurd-pid1-boot-result.md`):
 
 ```
-pid1: /etc/hostname applied: geos-hurd
-pid1: /var ... (probably "falling through to tmpfs", since
-      /dev/disk/by-label/ does not exist on Hurd)
-pid1: /run/current-system not linked   (no Guix activation today)
-pid1: GEOS_KERNEL splice ... (if this aborts, port->kernel_name
-      is NULL — bug in port_hurd.c initializer)
-pid1: emacs spawned
+pid1: mkdir /tmp failed: Read-only file system
+/hurd/tmpfs: No default pager (memory manager) is running
+pid1: mount tmpfs -> /tmp (tmpfs) failed: Input/output error
+pid1: mkdir /var failed: Read-only file system
+pid1: /var mount failed entirely: Input/output error
+pid1: INFO no gnu.system= in /etc/geos-cmdline,
+      /run/current-system not linked (expected on manual Hurd install)
+pid1: sethostname(geos-hurd) failed: Read-only file system
+pid1: entering supervisor loop
+pid1: execve failed (<errno>): /usr/bin/emacs    (only if emacs is
+      missing OR the exec translator chokes on the binary)
 ```
 
-Then Emacs takes over and prints whatever core/state.el's banner
-emits.
+The first six lines are diagnostic noise from the bootstrap-order
+gap: `/sbin/init` runs BEFORE Debian Hurd's `checkroot.sh` would
+remount root rw under sysvinit (we replaced /sbin/init, so that
+step is gone).  The supervisor reaches its loop regardless and
+attempts to exec emacs.
+
+If emacs is properly installed and spawns, the supervisor falls
+silent and the emacs banner takes over the console.  If emacs is
+absent or unspawnable, the supervisor crashloops ~10 times and
+then enters the holding pattern:
+
+```
+pid1: emacs crashloop, entering holding pattern; supervisor will
+      reap zombies but not respawn emacs
+```
+
+The holding pattern is the documented degraded state.  pid1 stays
+alive, reaping zombies, until an operator reboots.
+
+Three bootstrap-order fixes are tracked separately and will reduce
+the noise; see the runlog.  They are not blockers for "emacs
+spawned at all".
 
 ## Step 6: smoke test
 
