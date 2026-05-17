@@ -355,6 +355,107 @@ M-x packages       manifest readout of the active Guix profile
 Each buffer derives from `special-mode`, has a refresh timer, and
 documents its keys at the top of its file.
 
+## stage 3.5: dual-kernel boundary (v0.7.x and later)
+
+Everything described above is what runs on Linux today. The
+v0.7.x cycle factored the kernel-specific surface into an
+explicit seam so the same source tree can boot on the GNU Hurd,
+which is the next supported kernel. The architectural picture
+is in `docs/ARCHITECTURE.md` (Level 3); the contract here is
+how it lands in the code.
+
+### the C seam
+
+`pid1/port_layer.h` declares a function-pointer struct
+`port_caps` with nine slots: `kernel_name`, `mount`,
+`set_hostname`, `bring_up_lo`, `set_address`,
+`set_route_default`, `reboot`, `suspend`, `get_peer_cred`.
+`pid1/port_linux.c` holds the Linux body for every slot.
+`pid1/port_hurd.c` (which lives only on the `hurd` side branch)
+holds the Hurd body. `pid1/emacs-init.c` calls `port->X()` and
+never touches a raw syscall directly except in code paths that
+are demonstrably kernel-agnostic (`open(2)`, `read(2)`, etc).
+
+Wiring happens once, at the very top of `main()`:
+
+```c
+port = &port_linux_impl;       /* &port_hurd_impl under PORT=hurd */
+port_require_or_abort();
+```
+
+`port_require_or_abort` walks every slot and aborts with a loud
+`/dev/console` message if any is `NULL`. A missing registration
+becomes a crash at boot rather than a null deref the first time
+the slot is exercised.
+
+### the elisp seam
+
+`emacs-init/core/port.el` defines `geos-kernel`:
+
+```elisp
+(defvar geos-kernel
+  (intern (or (getenv "GEOS_KERNEL") "linux")))
+```
+
+`pid1` splices `GEOS_KERNEL=<port->kernel_name>` into the envp of
+`spawn_emacs` (commit `a53304b`), so the elisp side never has to
+call out to `uname -s`. Files that have to do something kernel-
+specific (`core/network.el`, `core/state.el`, `buffers/disks.el`,
+`install/disk.el`, `user/userland/uname.el`,
+`services/journal-tail.el`, `buffers/journal.el`,
+`user/userland/audio.el`, `buffers/audio.el`) factor their Linux
+bodies into `*-linux` helpers and dispatch through `geos-kernel`.
+The Hurd arm either degrades cleanly (nil, banner) or signals
+`geos-port-unimplemented` until a real backend lands.
+
+### freeze-test discipline
+
+`iso-build/freeze-tests/freeze-test-port-hurd.el` exercises the
+elisp Hurd-arm code paths under a stubbed `geos-kernel = 'hurd`.
+A refactor of any Linux arm that silently flattens its Hurd
+counterpart fails the `port/*` sub-checks. The sub-checks emit a
+`'skip` result class when the underlying module is absent
+(`emacs -Q -batch` dev host) so CI can distinguish "module
+unbound" from "regression".
+
+### boot path differs on Hurd
+
+On Linux, GRUB hands the kernel an `init=` cmdline that names
+the pid1 binary directly. On Hurd, GRUB hands a multiboot module
+chain (pci-arbiter, acpi, rumpdisk, ext2fs, exec) and the
+microkernel spawns `/hurd/startup` as the unconditional PID 1.
+`/hurd/startup` then `execve`s `/sbin/init` as the user-mode
+init. The install path for emacs-init on Hurd is "replace
+`/sbin/init`", not "edit the kernel cmdline".
+
+The pseudo-filesystem mounts in `main()` (`/proc`, `/sys`,
+`/dev`, `/run`, `/tmp`, `/dev/pts`) also need different
+treatment on Hurd: `/proc` is a translator, `/dev` is real,
+`/sys` does not exist. The Hurd boot path skips the Linux-
+specific entries; `do_mount` already logs-and-continues on
+failure, but the gnu.system=-derived `/run/current-system`
+linkage in `link_current_system()` needs a Hurd analogue that
+does not depend on `/proc/cmdline`. This design gap is tracked
+in `docs/runlogs/2026-05-18-hurd-pid1-boot-design.md`.
+
+### verification ladder
+
+Promotion from "code-side written" to "actually runs on Hurd"
+goes through three states, tracked in `docs/HURD_PORT.md`:
+
+  1. **NO**: never touched a real Hurd kernel.
+  2. **builds on Hurd YYYY-MM-DD**: compiles + links + `ldd -r`
+     clean against real Hurd headers and libraries; symbol
+     table shows the slot; body NOT exercised against a live
+     Mach RPC server.
+  3. **YES on YYYY-MM-DD**: actually invoked on a running Hurd
+     kernel and observed to do the right thing.
+
+Each "YES" promotion is backed by a sanitized verification
+receipt under `docs/runlogs/YYYY-MM-DD-<tag>.md`. Receipts are
+append-only: a regression gets a new dated runlog, not an edit
+to the historical one.
+
 ## stage 4: shutdown
 
 Two paths:
@@ -374,7 +475,12 @@ event. Without these, there is no way to shut down: there is no
 
 ## what to read next
 
+  - `docs/ARCHITECTURE.md` for the three-zoom-level picture of the
+    whole stack, including the Level 3 dual-kernel detail.
   - `pid1/emacs-init.c` end-to-end. The whole PID 1 path is one file.
+  - `pid1/port_layer.h` + `pid1/port_linux.c` for the kernel seam.
+    Skim `pid1/port_hurd.c` on the `hurd` side branch for the
+    second backend.
   - `emacs-init/core/panic.el`. The error-trap pattern is the most
     important piece of project-wide style.
   - `emacs-init/core/state.el` and `docs/STATE_LAYOUT.md`. The

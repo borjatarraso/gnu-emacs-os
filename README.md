@@ -41,7 +41,9 @@ You need a Linux host with KVM and Guix installed. Boot to a
 usable EXWM frame takes about eleven seconds. Full instructions
 in [docs/INSTALL.md](docs/INSTALL.md). The why is in
 [docs/MANIFESTO.md](docs/MANIFESTO.md), and the manifesto is the
-document I would actually rather you read first.
+document I would actually rather you read first. The picture is
+in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (three zoom
+levels, including the dual-kernel Linux + Hurd seam).
 
 ## what works
 
