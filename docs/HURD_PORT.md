@@ -110,7 +110,10 @@ rollback.
     #ifdef was dropped, since `port->kernel_name` is now the
     single source of truth. Makefile carries a
     `PORT=linux|hurd` switch with `-DPORT_HURD` and the Hurd
-    link line (`-lhurduser -lhurd -lmach`).
+    link line (`-lhurduser -lmachuser`, corrected on the side
+    branch at `7c2d6bc` after the 2026-05-17 build verification:
+    Debian Hurd's libhurd-dev folds `libhurd.so` / `libmach.so`
+    into glibc and exposes only the `-luser` user-side stubs).
   - guix-system and smoke test on the `hurd` branch:
     `guix-system/system-hurd.scm` (kernel `gnumach`, drops Xorg /
     emacs-exwm / dhcpcd / alsa / install wizard, console-only)
@@ -129,20 +132,32 @@ For the boot recipe (what a Hurd-VM operator runs to verify
 ## Verification status
 
 Code-side completion is high; ground-truth verification on a real
-Hurd kernel is at zero. Honesty matters here, so each port surface
-gets a line.
+Hurd kernel is at first-checkpoint as of 2026-05-17. Honesty matters
+here, so each port surface gets a line.
+
+The verification levels in the last column:
+
+  - **NO**: never touched a real Hurd kernel.
+  - **builds on Hurd 2026-05-17**: compiles and links cleanly against
+    real Debian GNU/Hurd 0.9 / GNU-Mach 1.8 headers and libraries;
+    `ldd -r` resolves every dynamic symbol; the per-slot static
+    function is present in the binary's symbol table.  the body has
+    NOT been exercised against a live Mach RPC server; a wrong-shape
+    request struct could still fail at runtime.
+  - **YES on YYYY-MM-DD**: actually invoked on a running Hurd kernel
+    and observed to do the right thing.
 
 | Surface | Code status | Verified on Hurd? |
 |---|---|---|
 | `port->kernel_name` | both backends populated | n/a, identity slot |
-| `port->mount` (Hurd: `file_set_translator`) | written, skeptic-clean | NO |
-| `port->set_hostname` (Hurd: POSIX) | written | NO |
-| `port->bring_up_lo` (Hurd: pfinet SIOCSIFFLAGS) | written | NO |
-| `port->set_address` (Hurd: pfinet SIOCSIFADDR+) | written | NO |
-| `port->set_route_default` (Hurd: pfinet SIOCADDRT) | written | NO |
-| `port->reboot` (Hurd: `host_reboot` Mach RPC) | written | NO |
+| `port->mount` (Hurd: `file_set_translator`) | written, skeptic-clean | builds on Hurd 2026-05-17 |
+| `port->set_hostname` (Hurd: POSIX) | written | builds on Hurd 2026-05-17 |
+| `port->bring_up_lo` (Hurd: pfinet SIOCSIFFLAGS) | written | builds on Hurd 2026-05-17 |
+| `port->set_address` (Hurd: pfinet SIOCSIFADDR+) | written | builds on Hurd 2026-05-17 |
+| `port->set_route_default` (Hurd: pfinet SIOCADDRT) | rewritten 2026-05-17 to use Hurd's `ifrtreq_t` instead of Linux `struct rtentry` | builds on Hurd 2026-05-17 |
+| `port->reboot` (Hurd: `host_reboot` Mach RPC) | written | builds on Hurd 2026-05-17 |
 | `port->suspend` (Hurd: ENOSYS forever) | written | n/a, design |
-| `port->get_peer_cred` (Hurd: ENOSYS, supervisor RPC poll soft-fails) | written | NO |
+| `port->get_peer_cred` (Hurd: ENOSYS, supervisor RPC poll soft-fails) | written | builds on Hurd 2026-05-17 |
 | `geos-kernel` elisp defvar (reads `GEOS_KERNEL` env) | runs everywhere | YES on Linux |
 | GEOS_KERNEL env splice (`port->kernel_name` → execve envp → per-user emacs) | implemented (`a53304b`) | YES on Linux |
 | `core/network.el` Linux/Hurd dispatch | implemented | YES on Linux, NO on Hurd |
@@ -153,6 +168,32 @@ gets a line.
 | `services/journal-tail.el` Hurd no-op | implemented | YES on Linux, NO on Hurd |
 | `user/userland/audio.el` Hurd not-implemented banner | implemented | YES on Linux, NO on Hurd |
 
+The 2026-05-17 verification pass ran `docs/HURD_BOOT.md` steps 1-3
+end-to-end on a fresh Debian GNU/Hurd 2026-03 snapshot VM.  the
+build chain surfaced four issues that the desk review on Linux had
+not caught; the fixes landed on the hurd side branch as commit
+`7c2d6bc`:
+
+  - emacs-init.c was unconditionally including `<linux/if.h>`,
+    `<net/route.h>`, `<sys/mount.h>`, `<sys/reboot.h>`.  those
+    headers do not exist on Hurd; gated behind `!PORT_HURD` with
+    Linux-compatible fallback constants for the Hurd path.
+  - `PATH_MAX` is intentionally undefined on Hurd (no max path
+    length is a Hurd feature); a 4096 fallback closed the gap for
+    the few stack-buffer sites in pid1.
+  - port_hurd.c's `hurd_set_route_default` was using Linux's
+    `struct rtentry`; on Hurd pfinet's SIOCADDRT takes `ifrtreq_t`
+    instead.  rewritten body, identical semantics.
+  - the Makefile link line `-lhurduser -lhurd -lmach` does not link
+    on a modern Debian Hurd toolchain: the standalone `libhurd.so`
+    and `libmach.so` no longer exist (folded into glibc); user-side
+    RPC stubs live in `-lhurduser` and `-lmachuser`.
+
+`ldd -r emacs-init` on the resulting binary resolves every dynamic
+symbol; `nm emacs-init` shows all nine port_caps slots present.
+boot-as-PID-1 is the next checkpoint and requires an `init=/sbin/
+emacs-init` kernel-cmdline boot inside a Hurd VM.
+
 Freeze-tests (`iso-build/freeze-tests/freeze-test-port-hurd.el`)
 exercise the elisp Hurd-arm code paths under a stubbed
 `geos-kernel = 'hurd`; they are skip-class on a dev host that does
@@ -160,6 +201,6 @@ not have the pid1 module loaded. They DO catch regressions in the
 elisp dispatch logic; they DO NOT exercise `port_hurd.c` or prove
 anything about real Hurd RPCs.
 
-The first real Hurd boot will replace every "NO" in this table with
-"YES on YYYY-MM-DD" or with a "fixed at <commit>" link. Either is
-forward motion; staying at "NO" is the failure mode.
+The first real Hurd PID-1 boot will replace every "builds on Hurd
+2026-05-17" in this table with "YES on YYYY-MM-DD" or with a "fixed
+at <commit>" link.  staying at "builds" is the failure mode.
