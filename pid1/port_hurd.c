@@ -699,18 +699,39 @@ hurd_reboot_cmd(int cmd)
         errno = EINVAL;
         return -1;
     }
-    /* the Mach host port for the reboot RPC.  mach_host_self()
-     * returns a send right to the host control port; this is what
-     * gnumach uses to authorise the RPC (the caller must hold the
-     * privileged host port, which PID 1 does by default since it
-     * inherits it from the kernel-launched task).
+    /* the Mach host port for the reboot RPC.  this is the privileged
+     * "host control" port, not the unprivileged host name port that
+     * `mach_host_self()` returns.  gnumach refuses `host_reboot` from
+     * the unprivileged port with KERN_INVALID_HOST.
+     *
+     * the standard route to the privileged port on Hurd is the proc
+     * server: `get_privileged_ports(&host_priv, NULL)` asks
+     * `/hurd/proc` for the cached host control port (proc seeds it
+     * from gnumach at bootstrap, and re-vends it to any task whose
+     * authority lets it ask).  root suffices on a default Debian
+     * Hurd; non-root callers get KERN_NO_ACCESS, which we map to
+     * EACCES so the elisp layer can surface a useful message instead
+     * of "invalid argument" when an unprivileged user hits the RPC.
      *
      * we deallocate the send right on every exit path: success is
      * unreachable (the kernel stops scheduling us) but defensive
-     * cleanup keeps the body honest. */
-    mach_port_t host = mach_host_self();
-    error_t rc = host_reboot(host, flag);
-    mach_port_deallocate(mach_task_self(), host);
+     * cleanup keeps the body honest.  the first verification of this
+     * slot on 2026-05-18 hit EINVAL with the old `mach_host_self()`
+     * path; that runlog is `docs/runlogs/2026-05-18-hurd-pid1-host-
+     * reboot-einval.md` and was the trigger for switching to
+     * `get_privileged_ports`. */
+    mach_port_t host_priv = MACH_PORT_NULL;
+    error_t rc = get_privileged_ports(&host_priv, NULL);
+    if (rc) {
+        switch (rc) {
+        case KERN_NO_ACCESS:       errno = EACCES; break;
+        case KERN_INVALID_HOST:    errno = EINVAL; break;
+        default:                   errno = EIO;    break;
+        }
+        return -1;
+    }
+    rc = host_reboot(host_priv, flag);
+    mach_port_deallocate(mach_task_self(), host_priv);
     if (rc) {
         /* error_t from host_reboot is a kern_return_t, NOT a POSIX
          * errno.  the convention in Hurd's libc is that
