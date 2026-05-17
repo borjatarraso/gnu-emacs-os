@@ -2083,15 +2083,29 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
             return Qnil;
         return pid1_signal_errno(env, "pid1: rpc-poll: accept", errno);
     }
-    /* blocking + timeout: bound the wedge time a slow client can cause. */
+    /* blocking + timeout: bound the wedge time a slow client can cause.
+     * SO_RCVTIMEO/SO_SNDTIMEO are POSIX-optional; Hurd's pflocal returns
+     * ENOPROTOOPT (verified 2026-05-17 on Debian GNU/Hurd 2026-03).  on
+     * a kernel that doesn't support the timeout, the read/write below
+     * just block as long as the peer holds the connection open; that
+     * removes a safety bound but is a degradation, not a correctness
+     * bug, and it is strictly better than panicking the 200ms tick on
+     * every client connection.  any other errno is a real failure on a
+     * backend that normally implements the call, so still surfaced. */
     struct timeval tv;
     tv.tv_sec = RPC_TIMEOUT_SEC;
     tv.tv_usec = 0;
-    if (setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0 ||
-        setsockopt(conn, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) < 0) {
+    if (setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0
+        && errno != ENOPROTOOPT) {
         int err = errno;
         close(conn);
-        return pid1_signal_errno(env, "pid1: rpc-poll: timeout setup", err);
+        return pid1_signal_errno(env, "pid1: rpc-poll: SO_RCVTIMEO", err);
+    }
+    if (setsockopt(conn, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) < 0
+        && errno != ENOPROTOOPT) {
+        int err = errno;
+        close(conn);
+        return pid1_signal_errno(env, "pid1: rpc-poll: SO_SNDTIMEO", err);
     }
     /* peer credentials, through the port layer.  on Linux this is
      * getsockopt(SO_PEERCRED) returning a ucred snapshot taken at the
