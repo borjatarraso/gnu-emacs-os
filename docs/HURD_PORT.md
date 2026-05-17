@@ -151,10 +151,10 @@ The verification levels in the last column:
 |---|---|---|
 | `port->kernel_name` | both backends populated | n/a, identity slot |
 | `port->mount` (Hurd: `fshelp_start_translator` + `file_set_translator`) | rewritten 2026-05-17 (hurd branch `e3fd411`) to fork the translator via libfshelp before binding it; the prior body passed `MACH_PORT_NULL` as the active port and was a silent no-op | YES on 2026-05-17 (`/hurd/tmpfs 256M` round-trip: showtrans, df, write, settrans -g) |
-| `port->set_hostname` (Hurd: POSIX) | written | builds on Hurd 2026-05-17 |
-| `port->bring_up_lo` (Hurd: pfinet SIOCSIFFLAGS) | written | builds on Hurd 2026-05-17 |
-| `port->set_address` (Hurd: pfinet SIOCSIFADDR+) | written | builds on Hurd 2026-05-17 |
-| `port->set_route_default` (Hurd: pfinet SIOCADDRT) | rewritten 2026-05-17 to use Hurd's `ifrtreq_t` instead of Linux `struct rtentry` | builds on Hurd 2026-05-17 |
+| `port->set_hostname` (Hurd: POSIX) | written | YES on 2026-05-17 (`pid1-set-hostname "geos-hurd"` returned `t`, hostname changed) |
+| `port->bring_up_lo` (Hurd: pfinet SIOCSIFFLAGS) | written | YES on 2026-05-17 (lo came up UP/LOOPBACK/RUNNING) |
+| `port->set_address` (Hurd: pfinet SIOCSIFADDR+) | normalizes bare ifnames (hurd branch `b031db5`); `"eth0"` -> `"/dev/eth0"` before the ioctl, `"lo"` passes through | YES on 2026-05-17 (`pid1-set-address "eth0" "10.0.2.15" 24` returned `t` after the normalization fix; bare `"eth0"` had returned ENODEV before) |
+| `port->set_route_default` (Hurd: pfinet SIOCADDRT) | rewritten 2026-05-17 to use Hurd's `ifrtreq_t`; ifname normalization shared with `set_address` (hurd branch `b031db5`) | YES on 2026-05-17 (`pid1-set-route-default "10.0.2.2" "eth0"` returned `t`, NAT gateway stayed reachable) |
 | `port->reboot` (Hurd: `host_reboot` Mach RPC) | written | builds on Hurd 2026-05-17 |
 | `port->suspend` (Hurd: ENOSYS forever) | written | n/a, design |
 | `port->get_peer_cred` (Hurd: ENOSYS, supervisor RPC poll soft-fails) | written | builds on Hurd 2026-05-17 |
@@ -209,6 +209,23 @@ verification round-trip: `(pid1-mount "none" "/tmp/geos-mp-test"
 `df -h` shows the mount; `echo > .../sentinel` writes to the
 translator; `settrans -g` detaches and the sentinel disappears
 (it lived in tmpfs, not the underlying inode).
+
+The second runtime gap surfaced in the networking verbs: pfinet on
+a stock Debian Hurd install keys hardware interfaces by the devnode
+translator path passed to `/hurd/pfinet` at settrans time (i.e.
+`/dev/eth0`), not by the bare `eth0` name the Linux backend uses.
+`pid1-set-address "eth0" ...` returned ENODEV; the same call with
+`"/dev/eth0"` succeeded.  the supervisor speaks Linux-shaped
+ifnames, so the translation belongs in the backend, not the elisp
+callers.  fixed on the hurd branch at `b031db5` by adding
+`hurd_normalize_ifname` and routing both `hurd_set_address` and
+`hurd_set_route_default` through it.  rule: prepend `/dev/` unless
+the name starts with `/` (already an absolute devnode path) or is
+literally `"lo"` (pfinet special-cases loopback regardless of
+devnode configuration).  `bring_up_lo` uses the literal `"lo"` and
+was unaffected.  with this patch `pid1-set-address "eth0"
+"10.0.2.15" 24` returns `t` and the SSH session running over the
+NAT survives the reconfiguration.
 
 boot-as-PID-1 is the next checkpoint and requires an `init=/sbin/
 emacs-init` kernel-cmdline boot inside a Hurd VM.
