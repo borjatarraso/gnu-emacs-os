@@ -155,7 +155,7 @@ The verification levels in the last column:
 | `port->bring_up_lo` (Hurd: pfinet SIOCSIFFLAGS) | written | YES on 2026-05-17 (lo came up UP/LOOPBACK/RUNNING) |
 | `port->set_address` (Hurd: pfinet SIOCSIFADDR+) | normalizes bare ifnames (hurd branch `b031db5`); `"eth0"` -> `"/dev/eth0"` before the ioctl, `"lo"` passes through | YES on 2026-05-17 (`pid1-set-address "eth0" "10.0.2.15" 24` returned `t` after the normalization fix; bare `"eth0"` had returned ENODEV before) |
 | `port->set_route_default` (Hurd: pfinet SIOCADDRT) | rewritten 2026-05-17 to use Hurd's `ifrtreq_t`; ifname normalization shared with `set_address` (hurd branch `b031db5`) | YES on 2026-05-17 (`pid1-set-route-default "10.0.2.2" "eth0"` returned `t`, NAT gateway stayed reachable) |
-| `port->reboot` (Hurd: `host_reboot` Mach RPC) | written | builds on Hurd 2026-05-17 |
+| `port->reboot` (Hurd: `host_reboot` Mach RPC) | rewritten to use `get_privileged_ports` instead of `mach_host_self` (hurd branch `72f86f6`); the unprivileged host name port was rejected with KERN_INVALID_HOST | **YES on 2026-05-18** (`(pid1-reboot)` from emacs --batch dropped the SSH session and GRUB came back; emacs respawned on the fresh boot) |
 | `port->suspend` (Hurd: ENOSYS forever) | written | n/a, design |
 | `port->get_peer_cred` (Hurd: ENOSYS, supervisor RPC poll soft-fails) | written; surrounding rpc-poll tolerates `SO_RCVTIMEO`/`SO_SNDTIMEO` returning ENOPROTOOPT on Hurd's pflocal (`ffe6150` on main, `e4f72de` on hurd) | YES on 2026-05-17 (AF_UNIX client connect + `pid1-rpc-poll` returned `nil`, stderr logged "peer cred unsupported on this kernel" once; second poll returned `nil` without re-logging, confirming the `warned_enosys` gate) |
 | `geos-kernel` elisp defvar (reads `GEOS_KERNEL` env) | runs everywhere | YES on Linux |
@@ -264,11 +264,15 @@ not have the pid1 module loaded. They DO catch regressions in the
 elisp dispatch logic; they DO NOT exercise `port_hurd.c` or prove
 anything about real Hurd RPCs.
 
-The first real Hurd PID-1 boot landed 2026-05-18 (see runlog).
-The followup boot the same day shipped the argv fix and got emacs
-spawning.  Both are pinned by screen captures + runlogs in
-`docs/runlogs/`.  `port->reboot` still stays at "builds": calling
-`host_reboot` end-to-end from the booted emacs requires driving
-`M-x pid1-reboot RET` from a console we cannot easily script.
-That promotion is tracked as task #98 and is the last gating
-item for the row in the table.
+Three 2026-05-18 runlogs close the verification gap end-to-end:
+the first PID-1 boot (`2026-05-18-hurd-pid1-boot-result.md`),
+the argv-fix followup that got emacs spawning
+(`2026-05-18-hurd-pid1-emacs-spawn.md`), and the host_reboot
+Mach RPC end-to-end verification
+(`2026-05-18-hurd-pid1-reboot.md`).  The reboot RPC needed one
+real code change: `hurd_reboot_cmd` was calling
+`mach_host_self()` (the unprivileged host name port), which
+gnumach rejects for `host_reboot`; the fix uses
+`get_privileged_ports(&host_priv, NULL)` from `<hurd.h>` to
+fetch the proc-server-cached privileged port.  Live on the hurd
+branch as `72f86f6`.
