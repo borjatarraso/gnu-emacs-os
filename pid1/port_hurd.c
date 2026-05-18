@@ -873,47 +873,88 @@ hurd_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
     return -1;
 }
 
-/* client-side auth handshake.  the Hurd peer-cred model is
- * bidirectional: pflocal does not expose a SO_PEERCRED-equivalent, so
- * the client and the supervisor have to co-operate against the gnumach
- * auth server before the supervisor knows who the client is.  the
- * client side of that dance lives here, and the full design is at
- * docs/v08-hurd-peer-cred-design.md (sections 3.2 and 3.3).
- *
- * the real body, due in v0.8 step 4 of the implementation order, will
- * do three things on every connection:
- *
- *   1. allocate a fresh rendezvous Mach port (mach_port_allocate with
- *      MACH_PORT_RIGHT_RECEIVE, then extract a send right).  this port
- *      is the shared secret that ties this client to this server
- *      handshake; only the two ends will ever hold a send right to it,
- *      so neither side can be spoofed.
- *   2. sendmsg(fd, ...) a 1-byte placeholder payload with the
- *      rendezvous send right attached as ancillary data via pflocal's
- *      SCM_PORT-equivalent cmsg.  the supervisor's get_peer_cred body
- *      consumes the placeholder byte and the cmsg before it reads the
- *      4-byte length prefix that opens the existing wire format.
- *   3. call auth_user_authenticate(getauth(), rendez,
- *      MACH_MSG_TYPE_MOVE_SEND, ...) on the gnumach auth server to
- *      register the client side of the dance.  the supervisor's
- *      matching auth_server_authenticate call rendezvous-matches us and
- *      gets back our effective uid/gid.
- *
- * every exit path will mach_port_deallocate(mach_task_self(), rendez)
- * to keep PID-1-adjacent processes from leaking a port per RPC
- * connection.  until the real body lands the slot returns ENOSYS so
- * the supervisor-side rpc-poll path keeps soft-failing the same way
- * it does for hurd_get_peer_cred today; the elisp dispatcher in
- * rpc-client.el sees the ENOSYS and falls back to its no-auth-prefix
- * code path (which the supervisor will also reject, just consistently).
- *
- * (void)fd cast keeps -Wunused-parameter -Werror clean, same shape as
- * hurd_get_peer_cred above and hurd_suspend before that. */
+/* client-side half of the v0.8 peer-cred rendezvous dance; design and
+ * prose at docs/v08-hurd-peer-cred-design.md section 3.3.  the server
+ * counterpart is hurd_get_peer_cred above.  one rendezvous receive
+ * right is allocated, send-rightified, shipped over the AF_UNIX cmsg
+ * channel with a single-NUL placeholder iov, and registered with the
+ * gnumach auth server via auth_user_authenticate; every exit branch
+ * deallocates whichever Mach ports it allocated. */
 static int
 hurd_client_auth_handshake(int fd)
 {
-    (void)fd;
-    errno = ENOSYS;
+    mach_port_t rendez = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(),
+                                          MACH_PORT_RIGHT_RECEIVE,
+                                          &rendez);
+    if (kr != KERN_SUCCESS) {
+        errno = (kr == MACH_SEND_INVALID_DEST) ? EAGAIN : EACCES;
+        return -1;
+    }
+
+    kr = mach_port_insert_right(mach_task_self(), rendez, rendez,
+                                MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        mach_port_deallocate(mach_task_self(), rendez);
+        errno = EACCES;
+        return -1;
+    }
+
+    /* sendmsg payload: a single NUL placeholder byte so pflocal has
+     * something to attach the ancillary data to, plus one SCM_RIGHTS
+     * cmsg carrying the rendezvous send right as a single int.  the
+     * union enforces correct alignment for the cmsghdr buffer (raw
+     * char[] is not guaranteed cmsghdr-aligned on every ABI). */
+    char placeholder = '\0';
+    struct iovec iov = { .iov_base = &placeholder, .iov_len = 1 };
+    union {
+        struct cmsghdr h;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } cmsg_u;
+    memset(&cmsg_u, 0, sizeof cmsg_u);
+    struct msghdr msg;
+    memset(&msg, 0, sizeof msg);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_u.buf;
+    msg.msg_controllen = sizeof cmsg_u.buf;
+
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+    cm->cmsg_level = SOL_SOCKET;
+    cm->cmsg_type  = SCM_RIGHTS;
+    cm->cmsg_len   = CMSG_LEN(sizeof(int));
+    int rendez_as_int = (int)rendez;
+    memcpy(CMSG_DATA(cm), &rendez_as_int, sizeof rendez_as_int);
+
+    if (sendmsg(fd, &msg, 0) < 0) {
+        int saved = errno;
+        mach_port_deallocate(mach_task_self(), rendez);
+        errno = saved;
+        return -1;
+    }
+
+    /* register the client side with the auth server.  on success the
+     * server hands back a reply_port we have no further use for; drop
+     * the ref alongside rendez.  MACH_SEND_INVALID_DEST means the auth
+     * server is momentarily unreachable (boot-time race per design
+     * section 4); surface EAGAIN so the caller can retry on the next
+     * tick rather than hard-fail the connection. */
+    mach_port_t reply_port = MACH_PORT_NULL;
+    kr = auth_user_authenticate(getauth(), rendez,
+                                MACH_MSG_TYPE_COPY_SEND,
+                                &reply_port);
+    mach_port_deallocate(mach_task_self(), rendez);
+
+    if (kr == KERN_SUCCESS) {
+        if (MACH_PORT_VALID(reply_port))
+            mach_port_deallocate(mach_task_self(), reply_port);
+        return 0;
+    }
+    if (kr == MACH_SEND_INVALID_DEST) {
+        errno = EAGAIN;
+        return -1;
+    }
+    errno = EACCES;
     return -1;
 }
 
