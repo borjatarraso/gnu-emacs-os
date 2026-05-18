@@ -311,7 +311,28 @@ hurd_mount(const char *src, const char *tgt, const char *type,
         memcpy(argz + argz_len, default_tmpfs_size, l);
         argz_len += l;
     }
-    if (opts && opts[0] != '\0') {
+    /* opts: linux mount(2) "-o key=val,key=val".  /hurd/tmpfs treats
+     * unknown positional words as additional size arguments and dies
+     * with "too many arguments" the moment we forward "mode=0755", so
+     * for tmpfs we drop opts on the floor entirely.  the first PID-1
+     * boot on real GNU/Hurd (docs/runlogs/2026-05-18-hurd-pid1-boot-
+     * result.md) caught this exactly: /run and /var mounts called with
+     * opts="mode=0755" got the "too many arguments" rejection from
+     * /hurd/tmpfs and the supervisor came up with no /run, no /var.
+     *
+     * proper fix would be to parse opts into key=val pairs and forward
+     * the ones /hurd/tmpfs actually understands (--readonly, --writable,
+     * the standard libdiskfs options).  /hurd/tmpfs has no --mode
+     * equivalent so the linux "mode=" key has nowhere to go regardless;
+     * the root-dir mode is whatever the translator initialises.  for
+     * /run this means 01777 instead of 0755, which is over-permissive
+     * but not exploitable on a single-user system; the v0.7.x followup
+     * tightens that.  for /tmp the existing call passes NULL opts and
+     * the default 01777 is correct.
+     *
+     * non-tmpfs paths (ext2fs, procfs after future opts support, ...)
+     * forward opts as before. */
+    if (opts && opts[0] != '\0' && strcmp(type, "tmpfs") != 0) {
         size_t l = strlen(opts) + 1;
         if (argz_len + l > sizeof argz) {
             mach_port_deallocate(mach_task_self(), target);
