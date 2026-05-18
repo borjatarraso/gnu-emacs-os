@@ -38,6 +38,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* POSIX networking headers.  Hurd's glibc ships these with the same
@@ -67,10 +68,33 @@
 #include <hurd.h>
 #include <hurd/auth.h>
 #include <hurd/fshelp.h>
-#include <hurd/fsys.h>
+/* NOT including <hurd/fsys.h> on purpose: that header is the user-side
+ * fsys RPC stub set whose fsys_getroot prototype takes a separate
+ * dotdot_nodePoly argument.  the MIG-generated fsys_S.h we include
+ * below (server side) has the matching SERVER prototype we need to
+ * implement; having both headers in scope is a compile-time conflict
+ * ("conflicting types for 'fsys_getroot'").  every constant we used
+ * to get out of <hurd/fsys.h> (FS_TRANS_*, FS_RETRY_*, fsys_t,
+ * retry_type) comes from <hurd/hurd_types.h>, transitively included
+ * through <hurd.h>. */
+#include <hurd/ports.h>
 #include <hurd/process.h>
 #include <mach.h>
 #include <mach/mach_host.h>
+#include <mach/message.h>
+#include <mach/mig_errors.h>
+
+/* MIG-generated fsys server demuxer.  generated from
+ * /usr/include/x86_64-gnu/hurd/fsys.defs at build time by the rule in
+ * pid1/Makefile (PORT=hurd path).  the _S.h declares fsys_server(in,
+ * out) plus the user-side prototypes (fsys_getroot, fsys_goaway, ...)
+ * we implement below; weak EOPNOTSUPP defaults emitted into the
+ * generated fsysServer.c via -DMIG_EOPNOTSUPP cover every stub we do
+ * not need so the unused ones link cleanly without us having to write
+ * a one-line body each.  see also docs/v08-hurd-peer-cred-design.md
+ * section 3.5.7 for the rationale on using MIG for fsys but
+ * hand-rolling our own GEOS_AUTH_SUBMIT_NONCE verb. */
+#include "fsys_S.h"
 
 /* mount(2) becomes "bind a translator" on Hurd.
  *
@@ -831,8 +855,21 @@ hurd_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
     gid_t *egid_buf = NULL, *agid_buf = NULL;
     mach_msg_type_number_t n_euid = 0, n_auid = 0, n_egid = 0, n_agid = 0;
 
+    /* the modern (gnumach-current) auth_server_authenticate signature
+     * takes 13 args: (handle, rendezvous, rendezvousPoly, newport,
+     * newportPoly, &euids, &n_euids, &auids, &n_auids, &egids, &n_egids,
+     * &agids, &n_agids).  newport is the auth server's reply send
+     * right; for a server-side peer-cred read we hand MACH_PORT_NULL
+     * because we are not registering a new identity, only resolving the
+     * client's existing one.  the slice-5 rewrite will move this body to
+     * read from pending_auth[] instead of calling auth_server_authenticate
+     * inline; the patched call here keeps the file compiling under
+     * Debian Hurd 0.9's libhurd headers, no behaviour change vs the
+     * pre-existing intent. */
     error_t rc = auth_server_authenticate(getauth(),
                                           rendez, MACH_MSG_TYPE_COPY_SEND,
+                                          MACH_PORT_NULL,
+                                          MACH_MSG_TYPE_COPY_SEND,
                                           &euid_buf, &n_euid,
                                           &auid_buf, &n_auid,
                                           &egid_buf, &n_egid,
@@ -958,98 +995,436 @@ hurd_client_auth_handshake(int fd)
     return -1;
 }
 
-/* slice 2 of v0.8 design 2.2: publish the supervisor's long-lived auth
- * port as an active translator at /servers/geos-auth.  see
- * docs/v08-hurd-peer-cred-design.md section 3.5.1 (Option A picked) and
- * section 3.5.4 (slice 3 will drain it via a non-blocking mach_msg
- * inside Fpid1_rpc_poll).
+/* slice 3 of v0.8 design 2.2: publish the supervisor's long-lived auth
+ * port as an active translator at /servers/geos-auth via libports.  see
+ * docs/v08-hurd-peer-cred-design.md sections 3.5.4 (per-tick drain)
+ * and 3.5.7 (the slice 2 transport finding that forced this rewrite).
  *
- * the chosen mechanism is the "active translator" variant of
- * file_set_translator: we hand it a SEND right and the filesystem
- * records that send right as the live translator.  any client doing
- * file_name_lookup("/servers/geos-auth", 0, 0) gets a fresh send right
- * to that same port routed back via fsys_getroot.  this is exactly the
- * shape /hurd/auth itself uses to expose the auth server.
+ * the slice 2 attempt installed a bare mach_port_allocate'd receive
+ * port via file_set_translator and got KERN_SUCCESS, but
+ * file_name_lookup("/servers/geos-auth", 0, 0) silently bypassed the
+ * "active translator" and returned the bare file node instead.  cause:
+ * the kernel records that a translator exists but the lookup path
+ * only routes traffic to it if there is a process at the other end
+ * answering the fsys protocol.  a bare receive port with nothing
+ * draining it is not such a process.
  *
- * mechanics, in order:
+ * slice 3 fixes this with libports.  every translator under /hurd/
+ * uses the same shape:
  *
- *   1. mach_port_allocate(MACH_PORT_RIGHT_RECEIVE) for the receive
- *      right the supervisor will mach_msg-drain from on the next tick
- *      (slice 3).  stashed in a file-static slot so the drain code can
- *      reach it without re-allocating.
- *   2. mach_port_insert_right(MAKE_SEND) bumps the user-ref count for
- *      the send side; without this we cannot hand out send rights to
- *      clients later (file_set_translator copies one for the fs record
- *      but a clean MAKE_SEND keeps the supervisor's own send ref for
- *      diagnostics and for any future direct-publish path).
- *   3. open("/servers/geos-auth", O_CREAT|O_WRONLY, 0600) + close to
- *      guarantee the file exists.  /servers/ is part of the stock
- *      Debian Hurd boot tree; a missing /servers/ would be a wildly
- *      broken system and we surface that as ENOENT rather than try to
- *      mkdir it ourselves.
- *   4. file_name_lookup("/servers/geos-auth", O_NOTRANS, 0) gets us a
- *      file port to the underlying node (NOT to any translator already
- *      sitting there: O_NOTRANS gives us the bare file).
- *   5. file_set_translator(file, 0, FS_TRANS_SET|FS_TRANS_FORCE, 0,
- *                          NULL, 0, send_right, COPY_SEND) installs
- *      our send right as the active translator.  passive_flags=0 +
- *      passive=NULL means "do not also write a passive translator
- *      record to disk"; if the supervisor exits the active translator
- *      goes with it, which is exactly what we want (a stale send
- *      right pointing at a dead supervisor would be worse than no
- *      translator at all; the next supervisor reinstalls fresh).
+ *   - one ports_create_bucket() at startup; the bucket owns a portset
+ *     plus the bookkeeping ports library needs (notify_port for
+ *     dead-name notifications, a hash table from port-name to
+ *     object).
+ *   - one ports_create_class(...) per "kind" of port the server hands
+ *     out.  we have exactly one kind: the auth root.
+ *   - one ports_create_port(class, bucket, sizeof(struct port_info),
+ *     &out) per actual port object the server vends.  again, one for
+ *     us (the singleton auth root).  the object is a `struct
+ *     port_info' the library zero-allocates and tracks; we get back
+ *     a pointer to it.
+ *   - to hand a send right to clients (via file_set_translator), we
+ *     call ports_get_send_right(obj) which returns a freshly-vended
+ *     send right name.  the receive right is owned by libports
+ *     forever; we never touch it directly.
  *
- * the static slot hurd_auth_port:
+ * we then call file_set_translator with that send right.  this time
+ * file_name_lookup("/servers/geos-auth", 0, 0) issues fsys_getroot to
+ * our send right, the message arrives on the bucket's portset, our
+ * drain loop (hurd_auth_drain) pulls it out and dispatches via the
+ * MIG-generated fsys_server() demuxer, which calls our S_fsys_getroot
+ * stub, which returns another send right to the same auth port (so
+ * the client ends up with a working send right to file_name_lookup
+ * traffic against /servers/geos-auth).
  *
- *   slice 3 (see design 3.5.4) reads this from inside Fpid1_rpc_poll
- *   via mach_msg(MACH_RCV_MSG|MACH_RCV_TIMEOUT, timeout=0, ...).  the
- *   slot stays MACH_PORT_NULL until the publish succeeds; on success
- *   it holds the RECEIVE right (not a send right -- send rights are
- *   what file_set_translator vended to the kernel and what clients
- *   will hold).
+ * idempotency: if auth_port_obj is already non-NULL we return -1/EBUSY.
+ * libports bucket state is non-trivial to tear down cleanly and the
+ * supervisor only ever calls this once; a second call indicates a
+ * caller bug we want to surface, not paper over.
  *
- * idempotency: if hurd_auth_port is already non-NULL on entry we return
- * -1/EBUSY.  the supervisor calls this exactly once at startup; a
- * second call indicates a wiring bug we want to surface, not to paper
- * over by silently reusing the existing port (which would also leak
- * the new allocation if we got that far).
- *
- * error translation: kern_return_t values from mach_port_* and
- * file_set_translator do NOT escape this function as errno.  same
- * convention the rest of this file uses; see hurd_mount and
- * hurd_reboot_cmd for the same pattern. */
+ * error translation: kern_return_t values from mach_port_*,
+ * ports_create_*, and file_set_translator do NOT escape this function
+ * as errno.  same convention the rest of this file uses; see
+ * hurd_mount and hurd_reboot_cmd for the same pattern. */
 
-static mach_port_t hurd_auth_port = MACH_PORT_NULL;
+/* libports state.  the three slots are populated together by
+ * hurd_publish_auth_port and are read by hurd_auth_drain and our
+ * fsys_getroot stub.  NULL/empty until publish succeeds; non-NULL
+ * means "auth channel live, drain at every tick". */
+static struct port_bucket *auth_bucket = NULL;
+static struct port_class  *auth_class  = NULL;
+static struct port_info   *auth_port_obj = NULL;
+
+/* pending-auth table.  populated by S_geos_auth_submit_nonce as it
+ * extracts {uid, gid} via auth_server_authenticate; read by slice 5's
+ * hurd_get_peer_cred rewrite (still on its old code-path today; slice
+ * 5 rewrites it to consult this table by nonce).
+ *
+ * fixed-size array on purpose: PID 1 forbids malloc in hot paths and
+ * the auth path is hot (every client connection).  16 concurrent
+ * pending handshakes is well above what 200ms-tick poller can race;
+ * a 17th evicts the oldest expired row first.  TTL is 5 seconds per
+ * §3.5.5 ("an abandoned handshake should never wedge").
+ *
+ * not thread-safe by construction: emacs is single-threaded and
+ * hurd_auth_drain runs exclusively from the elisp main loop.  if a
+ * future libports threadpool ever serves requests in parallel, this
+ * table needs a mutex.  documented in port_layer.h's auth_drain
+ * docstring. */
+#define GEOS_AUTH_PENDING_MAX 16
+#define GEOS_AUTH_NONCE_LEN   16
+#define GEOS_AUTH_TTL_SECS    5
+
+struct pending_auth_row {
+    uint8_t   nonce[GEOS_AUTH_NONCE_LEN];
+    uint32_t  uid;
+    uint32_t  gid;
+    time_t    expiry;       /* 0 = empty slot */
+};
+
+static struct pending_auth_row pending_auth[GEOS_AUTH_PENDING_MAX];
+
+/* private GEOS RPC verb id.  picked outside both the fsys subsystem
+ * range (22000-22999) and the libports notify range (default 64-71)
+ * to avoid any chance of overlap.  the value is documented here and
+ * referenced from the standalone test harness so the two sides agree
+ * on the wire format. */
+#define GEOS_AUTH_SUBMIT_NONCE_MSGID 90001
+
+/* expose a hash of the table's contents for the standalone harness;
+ * 0 means "no entries", any other value lets the harness assert that
+ * a submit_nonce changed the table without us needing to leak the
+ * uid/gid through a side channel.  not part of the production
+ * interface; gated by a static-only forward declaration.  the harness
+ * links against its own copy (tests/hurd-publish-auth-port.c carries
+ * a mirror); production port_hurd.c never reaches the body via the
+ * port_caps table, hence the unused-function attribute. */
+static unsigned long pending_auth_fingerprint(void) __attribute__((unused));
+
+/* the legacy GNU Mach msg-type descriptors we hand-roll for the
+ * submit-nonce verb.  the format predates MIG's modern descriptors and
+ * matches what GNU Mach's auth_server_authenticate uses (verified
+ * against the side-channel probe at tests/hurd-mach-sidechannel.c).
+ *
+ * the fields are:
+ *   msgt_name      = MACH_MSG_TYPE_*  (PORT_NAME, MOVE_SEND, BYTE, ...)
+ *   msgt_size      = bits per element (32 for ports on 32-bit, 64 on
+ *                    64-bit; 8 for bytes)
+ *   msgt_number    = element count
+ *   msgt_inline    = 1 (we always send inline)
+ *   msgt_longform  = 0 (short form fits everything we send)
+ *   msgt_deallocate= 0
+ *
+ * keeping a constexpr-style table here matches the readability of the
+ * MIG-generated auth-server stubs, which is the closest reference for
+ * this wire format. */
+struct submit_nonce_request {
+    mach_msg_header_t Head;
+    mach_msg_type_t   rendez_type;
+    mach_port_t       rendez;
+    mach_msg_type_t   nonce_type;
+    uint8_t           nonce[GEOS_AUTH_NONCE_LEN];
+};
+
+/* MIG-style empty reply: just a header + the standard RetCode type
+ * descriptor + a 4-byte kern_return_t.  used to reply to submit-nonce
+ * sends so the kernel does not stall waiting for a reply on a port we
+ * never demuxed. */
+typedef struct {
+    mach_msg_header_t Head;
+    mach_msg_type_t   RetCodeType;
+    kern_return_t     RetCode;
+} mig_reply_t;
+
+/* RetCode type descriptor.  format taken from MIG's generated server
+ * code for any routine: msgt_name=INTEGER_32, size=32, number=1,
+ * inline=1, longform=0, deallocate=0.  hand-coded here because we do
+ * not pull in MIG for our private verb (only for fsys); see §3.5.3. */
+static const mach_msg_type_t geos_retcode_type = {
+    .msgt_name       = MACH_MSG_TYPE_INTEGER_32,
+    .msgt_size       = 32,
+    .msgt_number     = 1,
+    .msgt_inline     = 1,
+    .msgt_longform   = 0,
+    .msgt_deallocate = 0,
+    .msgt_unused     = 0,
+};
+
+/* S_fsys_getroot: when a client task does
+ * `file_name_lookup("/servers/geos-auth", 0, 0)`, libdiskfs in that
+ * task sends fsys_getroot to the active-translator send right our
+ * file_set_translator call planted.  the message lands in our libports
+ * bucket; the MIG-generated fsys_server demuxer routes it here.
+ *
+ * the contract is: return a send right to the "root file" the
+ * translator exposes, plus do_retry=FS_RETRY_NORMAL with an empty
+ * retry_name to tell libdiskfs "you found it, do not look further".
+ * we hand back a fresh send right to our auth port itself (the same
+ * port the fsys_getroot arrived on); the client then does its
+ * geos_auth_submit_nonce RPC against that send right.
+ *
+ * filePoly = MACH_MSG_TYPE_MAKE_SEND: the kernel mints a brand-new
+ * send right from our receive right's user-ref.  this is the standard
+ * pattern translators use to hand out a port the client task owns
+ * separately from any port we hold.  cleaner than MOVE/COPY_SEND
+ * here because we are vending from a long-lived receive right, not
+ * passing along an inherited send right. */
+kern_return_t
+fsys_getroot (fsys_t fsys,
+              mach_port_t dotdot_node,
+              const_idarray_t gen_uids,
+              mach_msg_type_number_t gen_uids_cnt,
+              const_idarray_t gen_gids,
+              mach_msg_type_number_t gen_gids_cnt,
+              int flags,
+              retry_type *do_retry,
+              string_t retry_name,
+              mach_port_t *file,
+              mach_msg_type_name_t *filePoly)
+{
+    (void)fsys; (void)gen_uids; (void)gen_uids_cnt;
+    (void)gen_gids; (void)gen_gids_cnt; (void)flags;
+    /* dotdot_node is the client's port to our parent directory; we
+     * have no use for it and the MIG-generated demuxer counts on us
+     * dropping the ref ourselves (it does NOT auto-deallocate input
+     * port rights on success). */
+    if (MACH_PORT_VALID(dotdot_node))
+        mach_port_deallocate(mach_task_self(), dotdot_node);
+    if (auth_port_obj == NULL)
+        return EOPNOTSUPP;
+    *do_retry = FS_RETRY_NORMAL;
+    retry_name[0] = '\0';
+    /* ports_get_right returns the bare port-name of the receive right
+     * we own; MAKE_SEND tells the kernel to mint a fresh send right
+     * against that name when the reply marshals out.  the supervisor
+     * never sees the kernel's send-ref bump; libports' no-senders
+     * notification machinery counts them for us. */
+    *file = ports_get_right(auth_port_obj);
+    *filePoly = MACH_MSG_TYPE_MAKE_SEND;
+    return KERN_SUCCESS;
+}
+
+/* fingerprint hash over occupied pending_auth rows.  used by the
+ * standalone harness to detect that submit_nonce mutated the table
+ * without leaking uid/gid through any side channel.  pure data hash
+ * over nonce+uid+gid; expiry intentionally excluded (the wall clock
+ * makes runs non-deterministic). */
+static unsigned long
+pending_auth_fingerprint(void)
+{
+    unsigned long h = 1469598103934665603UL; /* FNV-1a 64-bit offset */
+    for (int i = 0; i < GEOS_AUTH_PENDING_MAX; i++) {
+        if (pending_auth[i].expiry == 0) continue;
+        for (int j = 0; j < GEOS_AUTH_NONCE_LEN; j++) {
+            h ^= pending_auth[i].nonce[j];
+            h *= 1099511628211UL;
+        }
+        h ^= pending_auth[i].uid;
+        h *= 1099511628211UL;
+        h ^= pending_auth[i].gid;
+        h *= 1099511628211UL;
+    }
+    return h;
+}
+
+/* drop the oldest-expiring row from the pending-auth table.  returns
+ * the slot index that was vacated (or 0 if the table was already
+ * empty enough that the caller can pick any slot).  used both as a
+ * GC pass at the top of submit_nonce and as the eviction-on-full
+ * fallback when 16 concurrent handshakes are queued. */
+static int
+pending_auth_gc(void)
+{
+    time_t now = time(NULL);
+    int oldest_idx = 0;
+    time_t oldest_expiry = pending_auth[0].expiry;
+    for (int i = 0; i < GEOS_AUTH_PENDING_MAX; i++) {
+        if (pending_auth[i].expiry != 0 && pending_auth[i].expiry < now) {
+            memset(&pending_auth[i], 0, sizeof pending_auth[i]);
+        }
+        if (oldest_expiry == 0 ||
+            (pending_auth[i].expiry != 0 &&
+             pending_auth[i].expiry < oldest_expiry)) {
+            oldest_idx = i;
+            oldest_expiry = pending_auth[i].expiry;
+        }
+    }
+    return oldest_idx;
+}
+
+/* find a free slot, evicting the oldest occupied one if all 16 are
+ * taken.  always returns a valid index. */
+static int
+pending_auth_alloc_slot(void)
+{
+    (void)pending_auth_gc();
+    for (int i = 0; i < GEOS_AUTH_PENDING_MAX; i++) {
+        if (pending_auth[i].expiry == 0) return i;
+    }
+    /* table full of live rows; evict the oldest. */
+    int idx = pending_auth_gc();
+    memset(&pending_auth[idx], 0, sizeof pending_auth[idx]);
+    return idx;
+}
+
+/* dispatch handler for our private geos_auth_submit_nonce verb.
+ * called from hurd_auth_drain when a message with
+ * msgh_id=GEOS_AUTH_SUBMIT_NONCE_MSGID arrives on the auth port.
+ *
+ * INP carries:
+ *   - one MOVE_SEND port descriptor (the client's rendezvous send right)
+ *   - 16 inline bytes (the nonce)
+ *
+ * we:
+ *   1. run auth_server_authenticate against the rendezvous to extract
+ *      the client's effective uid/gid set.  the auth server matches
+ *      the rendezvous to whatever auth_user_authenticate call the
+ *      client is making concurrently (the client's
+ *      hurd_client_auth_handshake body); only the client task
+ *      holding the matching receive right can complete the dance, so
+ *      no other task can spoof a credential by guessing the nonce.
+ *   2. on success, insert {nonce, uid[0], gid[0], now+TTL} into the
+ *      pending_auth table.  slice 5's hurd_get_peer_cred looks up by
+ *      nonce and reads back uid/gid.
+ *   3. on failure, drop everything on the floor.  the client retries.
+ *   4. send an empty reply back via OUTP so the kernel does not
+ *      indefinitely block.  RetCode communicates success/failure but
+ *      no caller actually reads it today (the client side is fire-
+ *      and-forget; the AF_UNIX read of the matched uid/gid is the
+ *      synchronization point).
+ *
+ * port lifecycle: the rendezvous send right arrived as MOVE_SEND, so
+ * our task owns the ref now.  auth_server_authenticate consumes it
+ * (it has to: the auth server needs the right to call
+ * mach_port_request_notification on it).  if the call fails before
+ * the auth server takes the right, we deallocate it ourselves. */
+static void
+S_geos_auth_submit_nonce(struct submit_nonce_request *inp,
+                         mig_reply_t *outp)
+{
+    /* always-set reply header.  msgh_size is overwritten below to
+     * sizeof the reply struct; msgh_id = inp->msgh_id + 100 mirrors
+     * the MIG convention for reply ids on subsystem 900xx.  msgh_bits
+     * swaps remote/local: the reply travels back on inp's old
+     * remote port (the reply-port the kernel filled in for us). */
+    mach_msg_header_t *rh = &outp->Head;
+    rh->msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(inp->Head.msgh_bits),
+                                   0);
+    rh->msgh_size = sizeof(*outp);
+    rh->msgh_remote_port = inp->Head.msgh_remote_port;
+    rh->msgh_local_port = MACH_PORT_NULL;
+    rh->msgh_seqno = 0;
+    rh->msgh_id = inp->Head.msgh_id + 100;
+    outp->RetCodeType = geos_retcode_type;
+    outp->RetCode = KERN_SUCCESS;
+
+    /* sanity: must have the rendezvous-port descriptor plus the
+     * 16-byte nonce descriptor we documented.  a malformed message
+     * gets a MIG_BAD_ARGUMENTS reply but does NOT crash the drain. */
+    if (inp->Head.msgh_size < sizeof(*inp)) {
+        outp->RetCode = MIG_BAD_ARGUMENTS;
+        return;
+    }
+    /* dispose of the rendezvous regardless of outcome; the auth
+     * server takes its own ref when authenticate succeeds. */
+    mach_port_t rendez = inp->rendez;
+    if (rendez == MACH_PORT_NULL || !MACH_PORT_VALID(rendez)) {
+        outp->RetCode = MIG_BAD_ARGUMENTS;
+        return;
+    }
+
+    /* slice 3 scope: prove the drain dispatches submit_nonce by
+     * recording the row WITHOUT calling auth_server_authenticate.
+     * the full 13-arg auth_server_authenticate dance (rendezvous +
+     * newport rendezvous-port protocol) lands in slice 4 once the
+     * client-side hurd_client_auth_handshake has a real body to
+     * mate with.  for slice 3 we record the nonce with sentinel
+     * uid/gid so the test harness can see the table mutate; the
+     * client never reads back through this row until slice 5.
+     *
+     * the rendezvous send right is dropped here because we do
+     * nothing with it in this slice; slice 4 will hand it to
+     * auth_server_authenticate per §3.5.2. */
+    (void)mach_port_deallocate(mach_task_self(), rendez);
+    int slot = pending_auth_alloc_slot();
+    memcpy(pending_auth[slot].nonce, inp->nonce, GEOS_AUTH_NONCE_LEN);
+    pending_auth[slot].uid = (uint32_t)-1;   /* sentinel: slice 4 fills */
+    pending_auth[slot].gid = (uint32_t)-1;
+    pending_auth[slot].expiry = time(NULL) + GEOS_AUTH_TTL_SECS;
+}
+
+/* our top-level demuxer: chained fsys_server_routine (for fsys_getroot
+ * from libdiskfs) then ports_notify_server (for libports' own
+ * bookkeeping notifications: no-senders on the auth port, dead-name on
+ * cached client send rights).  our private submit_nonce verb is
+ * dispatched by its msgh_id without going through MIG, since
+ * hand-rolling one message is cheaper than carrying MIG just for it
+ * (§3.5.3).
+ *
+ * MIG's user-facing demuxer API on this libmig build is the table
+ * lookup helper fsys_server_routine(InHeadP): it returns a
+ * mig_routine_t (function pointer) if the msgh_id falls inside the
+ * fsys subsystem range (22000-22011), NULL otherwise.  the boolean
+ * fsys_server() that some older MIG vintages emit is absent here, so
+ * we drive the routine pointer ourselves. */
+static int
+geos_auth_demuxer(mach_msg_header_t *inp, mach_msg_header_t *outp)
+{
+    if (inp->msgh_id == GEOS_AUTH_SUBMIT_NONCE_MSGID) {
+        S_geos_auth_submit_nonce((struct submit_nonce_request *)inp,
+                                 (mig_reply_t *)outp);
+        return 1;
+    }
+    mig_routine_t fr = fsys_server_routine(inp);
+    if (fr != 0) {
+        (*fr)(inp, outp);
+        return 1;
+    }
+    if (ports_notify_server(inp, outp))
+        return 1;
+    /* unknown id: leave outp untouched and return 0 so libports knows
+     * we did not handle it.  the bucket reports the unhandled id and
+     * drops the message (any reply port included gets deallocated by
+     * libports' default rejection path). */
+    return 0;
+}
 
 static int
 hurd_publish_auth_port(void)
 {
-    if (hurd_auth_port != MACH_PORT_NULL) {
+    if (auth_port_obj != NULL) {
         errno = EBUSY;
         return -1;
     }
 
-    /* step 1: allocate the receive right that slice 3 will drain. */
-    mach_port_t recv = MACH_PORT_NULL;
-    kern_return_t kr = mach_port_allocate(mach_task_self(),
-                                          MACH_PORT_RIGHT_RECEIVE,
-                                          &recv);
-    if (kr != KERN_SUCCESS) {
-        errno = (kr == KERN_RESOURCE_SHORTAGE) ? ENOMEM : EIO;
+    /* step 1: create the libports bucket + class.  bucket owns the
+     * portset everything goes onto; class owns the cleanup callback
+     * (NULL: we never destroy the auth port). */
+    auth_bucket = ports_create_bucket();
+    if (auth_bucket == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    auth_class = ports_create_class(NULL, NULL);
+    if (auth_class == NULL) {
+        /* libports has no public bucket-destroy; the bucket leaks until
+         * process exit, which is acceptable for an unreachable
+         * one-shot startup failure. */
+        auth_bucket = NULL;
+        errno = ENOMEM;
         return -1;
     }
 
-    /* step 2: mint a send right against the same name.  COPY_SEND on
-     * file_set_translator below would also vend the kernel a send right,
-     * but having our own send-right user-ref keeps the supervisor able
-     * to mint additional send rights without re-running this dance. */
-    kr = mach_port_insert_right(mach_task_self(), recv, recv,
-                                MACH_MSG_TYPE_MAKE_SEND);
-    if (kr != KERN_SUCCESS) {
-        /* drop the receive right we just allocated; do NOT leak. */
-        (void)mach_port_mod_refs(mach_task_self(), recv,
-                                 MACH_PORT_RIGHT_RECEIVE, -1);
-        errno = EIO;
+    /* step 2: create the singleton auth port object.  sizeof(struct
+     * port_info) is the canonical minimum size; libports does NOT
+     * allocate trailing user data unless you ask for more. */
+    struct port_info *pi = NULL;
+    error_t kr = ports_create_port(auth_class, auth_bucket,
+                                   sizeof(struct port_info), &pi);
+    if (kr != KERN_SUCCESS || pi == NULL) {
+        auth_class = NULL;
+        auth_bucket = NULL;
+        errno = (kr == KERN_RESOURCE_SHORTAGE) ? ENOMEM : EIO;
         return -1;
     }
 
@@ -1057,56 +1432,62 @@ hurd_publish_auth_port(void)
      * an existing file is fine (O_CREAT without O_EXCL); a missing
      * /servers/ directory surfaces as ENOENT from open(2) which we
      * propagate, since fabricating /servers/ ourselves would mask a
-     * broken bootstrap.  mode 0600: only root reads/writes the node;
-     * the actual translator publishing happens regardless of the
-     * file mode (the filesystem keys the translator on the node, not
-     * on its permissions), so 0600 is purely "no point exposing the
-     * empty file to other users". */
+     * broken bootstrap.  mode 0600: the filesystem keys the
+     * translator on the node not on its permissions, but tighter is
+     * cheaper to keep clean than looser. */
     int fd = open("/servers/geos-auth", O_CREAT | O_WRONLY, 0600);
     if (fd < 0) {
         int saved = errno;
-        (void)mach_port_deallocate(mach_task_self(), recv);
-        (void)mach_port_mod_refs(mach_task_self(), recv,
-                                 MACH_PORT_RIGHT_RECEIVE, -1);
+        ports_port_deref(pi);
+        auth_class = NULL;
+        auth_bucket = NULL;
         errno = saved;
         return -1;
     }
     (void)close(fd);
 
-    /* step 4: get a file port to the bare node (O_NOTRANS so we do not
-     * chain behind any pre-existing translator).  any pre-existing
+    /* step 4: get a file port to the bare node (O_NOTRANS so we do
+     * not chain behind any pre-existing translator).  any pre-existing
      * translator gets FS_TRANS_FORCE-replaced in step 5. */
     file_t node = file_name_lookup("/servers/geos-auth", O_NOTRANS, 0);
     if (node == MACH_PORT_NULL) {
         int saved = errno;
-        (void)mach_port_deallocate(mach_task_self(), recv);
-        (void)mach_port_mod_refs(mach_task_self(), recv,
-                                 MACH_PORT_RIGHT_RECEIVE, -1);
+        ports_port_deref(pi);
+        auth_class = NULL;
+        auth_bucket = NULL;
         errno = saved ? saved : EIO;
         return -1;
     }
 
-    /* step 5: install the send right as the active translator.  passive
-     * fields zeroed so no on-disk passive record is written (the
-     * supervisor is the only source of truth; if it dies the next boot
-     * republishes).  COPY_SEND on the active port disposition: the
-     * kernel takes its own ref, ours stays valid through the call. */
+    /* step 5: install a libports-vended send right as the active
+     * translator.  passive fields zeroed so no on-disk passive record
+     * is written.
+     *
+     * MOVE_SEND vs COPY_SEND: ports_get_send_right returns a fresh
+     * user-ref each time; we hand the ref straight to the kernel via
+     * MOVE_SEND so our task's user-ref count drops back to the
+     * libports-managed baseline.  COPY_SEND would mint a second ref
+     * we would then have to ports-deallocate, which is more code for
+     * no behaviour difference. */
+    mach_port_t send_right = ports_get_send_right(pi);
     kr = file_set_translator(node,
                              0,                          /* passive_flags */
                              FS_TRANS_SET | FS_TRANS_FORCE, /* active_flags */
                              0,                          /* oldtrans_flags */
                              NULL, 0,                    /* passive argz */
-                             recv,                       /* active port */
-                             MACH_MSG_TYPE_COPY_SEND);
+                             send_right,                 /* active port */
+                             MACH_MSG_TYPE_MOVE_SEND);
     (void)mach_port_deallocate(mach_task_self(), node);
 
     if (kr != KERN_SUCCESS) {
-        /* unwind the receive + send rights; nothing got published, so
-         * the supervisor's state stays at "no auth port" for the next
-         * call.  mapping mirrors hurd_mount's error switch. */
-        (void)mach_port_deallocate(mach_task_self(), recv);
-        (void)mach_port_mod_refs(mach_task_self(), recv,
-                                 MACH_PORT_RIGHT_RECEIVE, -1);
+        /* MOVE_SEND was already consumed by the (failed) call, so we
+         * do not deallocate send_right ourselves.  the port object
+         * deref releases libports' bookkeeping; the underlying
+         * receive right then has no holders and the kernel reclaims
+         * it.  mapping mirrors hurd_mount's error switch. */
+        ports_port_deref(pi);
+        auth_class = NULL;
+        auth_bucket = NULL;
         switch (kr) {
         case KERN_INVALID_ARGUMENT:    errno = EINVAL; break;
         case KERN_NO_ACCESS:           errno = EACCES; break;
@@ -1118,8 +1499,97 @@ hurd_publish_auth_port(void)
         return -1;
     }
 
-    /* commit: slot reflects "published".  slice 3 reads this. */
-    hurd_auth_port = recv;
+    /* commit: slot reflects "published".  hurd_auth_drain reads this
+     * to gate its mach_msg loop. */
+    auth_port_obj = pi;
+    memset(pending_auth, 0, sizeof pending_auth);
+    return 0;
+}
+
+/* slice 3 per-tick drain.  pulled exactly once per Fpid1_rpc_poll
+ * tick, bounded at GEOS_AUTH_DRAIN_BATCH messages so an adversarial
+ * fsys_getroot/submit_nonce flood cannot starve the AF_UNIX accept
+ * path that the same tick services right after.  see
+ * docs/v08-hurd-peer-cred-design.md section 3.5.4 for the rationale.
+ *
+ * non-blocking by construction: MACH_RCV_TIMEOUT with timeout=0 means
+ * "return MACH_RCV_TIMED_OUT immediately if the queue is empty"; the
+ * common-case cost is one kernel trap returning an error code.  the
+ * tick budget impact when the channel is idle is negligible (sub-
+ * microsecond).
+ *
+ * reply lifecycle: our demuxer fills the outp header + reply payload;
+ * if reply.msgh_remote_port is valid we send it back via the same
+ * mach_msg call.  the MIG-generated fsys_server demuxer follows the
+ * same convention (the reply port is in the original request's
+ * msgh_remote_port; we forward it through to outp), so the chained
+ * dispatch works without us tracking reply ports separately. */
+#define GEOS_AUTH_DRAIN_BATCH 16
+#define GEOS_AUTH_DRAIN_BUF   8192
+
+static int
+hurd_auth_drain(void)
+{
+    if (auth_port_obj == NULL || auth_bucket == NULL) {
+        /* publish_auth_port has not run yet (or failed).  surface
+         * ENOSYS so the supervisor's tick can skip the drain without
+         * panicking; same shape the get_peer_cred slot uses today. */
+        errno = ENOSYS;
+        return -1;
+    }
+
+    /* one stack-allocated buffer used for both receive and reply.
+     * 8 KiB is roomy: fsys_getroot's request is ~80 B, reply is
+     * 1112 B, our submit_nonce request is ~80 B.  no malloc anywhere
+     * in the drain (PID 1 hot-path rule). */
+    union {
+        mach_msg_header_t hdr;
+        uint8_t buf[GEOS_AUTH_DRAIN_BUF];
+    } in_msg, out_msg;
+
+    for (int i = 0; i < GEOS_AUTH_DRAIN_BATCH; i++) {
+        memset(&in_msg, 0, sizeof in_msg);
+        in_msg.hdr.msgh_local_port = auth_bucket->portset;
+        in_msg.hdr.msgh_size = sizeof in_msg;
+        kern_return_t kr = mach_msg(&in_msg.hdr,
+                                    MACH_RCV_MSG | MACH_RCV_TIMEOUT |
+                                        MACH_RCV_LARGE,
+                                    0,
+                                    sizeof in_msg,
+                                    auth_bucket->portset,
+                                    0,                /* timeout = 0 ms */
+                                    MACH_PORT_NULL);
+        if (kr == MACH_RCV_TIMED_OUT)
+            return 0;
+        if (kr == MACH_RCV_TOO_LARGE) {
+            /* message larger than our buffer; drop it (request was
+             * out of spec for any verb we support).  loop again to
+             * keep draining. */
+            continue;
+        }
+        if (kr != KERN_SUCCESS) {
+            errno = EIO;
+            return -1;
+        }
+
+        memset(&out_msg, 0, sizeof out_msg);
+        /* fill outp.head defaults so a demuxer that fails to set
+         * msgh_size/bits does not produce a bogus reply.  the
+         * MIG-generated demuxers always do set them on success. */
+        out_msg.hdr.msgh_size = 0;
+        (void)geos_auth_demuxer(&in_msg.hdr, &out_msg.hdr);
+        /* send reply iff the demuxer left a valid remote port (i.e.
+         * the original message had a reply port and the demuxer
+         * accepted the call).  one-way messages like
+         * submit_nonce-with-no-reply-port short-circuit here. */
+        if (MACH_PORT_VALID(out_msg.hdr.msgh_remote_port) &&
+            out_msg.hdr.msgh_size > 0) {
+            (void)mach_msg(&out_msg.hdr,
+                           MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                           out_msg.hdr.msgh_size, 0,
+                           MACH_PORT_NULL, 0, MACH_PORT_NULL);
+        }
+    }
     return 0;
 }
 
@@ -1138,6 +1608,7 @@ const port_caps port_hurd_impl = {
     .get_peer_cred         = hurd_get_peer_cred,
     .client_auth_handshake = hurd_client_auth_handshake,
     .publish_auth_port     = hurd_publish_auth_port,
+    .auth_drain            = hurd_auth_drain,
 };
 
 /* the active pointer + the require-or-abort helper live in

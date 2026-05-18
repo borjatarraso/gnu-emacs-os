@@ -160,8 +160,35 @@ PORT_DEFS := -DPORT_HURD
 # scoped to PORT=hurd only.  attribute-style "ldflags += ..." would
 # work too but the explicit assignment is harder to misread when the
 # v0.8 cross-toolchain runner picks this up.
-PORT_BOOT_LIBS   := -lfshelp -lhurduser -lmachuser
-PORT_MODULE_LIBS := -lfshelp -lhurduser -lmachuser
+# slice 3 of v0.8 design-2.2 adds -lports: libports is the canonical
+# Hurd library for translator bookkeeping (port_bucket, port_class,
+# port_info; the no-senders / dead-name notification plumbing).  the
+# slice 3 hurd_publish_auth_port body calls ports_create_bucket /
+# ports_create_class / ports_create_port / ports_get_send_right /
+# ports_notify_server; hurd_auth_drain reads auth_bucket->portset
+# directly.  libports' own NEEDED transitively pulls libihash and
+# libpthread.  ordering: -lports before -lfshelp because libfshelp's
+# helpers in turn call into libports.
+PORT_BOOT_LIBS   := -lports -lfshelp -lhurduser -lmachuser
+PORT_MODULE_LIBS := -lports -lfshelp -lhurduser -lmachuser
+# generated MIG sources for the fsys subsystem.  slice 3 needs an
+# fsys_server() demuxer so libdiskfs's fsys_getroot request (issued by
+# every file_name_lookup("/servers/geos-auth", ...)) reaches our
+# fsys_getroot user stub at port_hurd.c.  -DMIG_EOPNOTSUPP=EOPNOTSUPP
+# tells MIG to emit weak default-EOPNOTSUPP bodies for every fsys
+# routine we do NOT implement (fsys_goaway, fsys_syncfs, ...), so the
+# link line stays one-stub-per-implementation without per-routine
+# stub clutter.  user side discarded into /dev/null because we do
+# not call any fsys RPC ourselves; we only serve them.
+PORT_GEN_SRCS    := fsysServer.c
+PORT_GEN_HDRS    := fsys_S.h
+fsysServer.c fsys_S.h: /usr/include/x86_64-gnu/hurd/fsys.defs
+	mig -DSEQNOS \
+	    -sheader fsys_S.h \
+	    -server fsysServer.c \
+	    -header /dev/null \
+	    -user /dev/null \
+	    /usr/include/x86_64-gnu/hurd/fsys.defs
 else ifeq ($(PORT),linux)
 PORT_SRC  := port_linux.c
 PORT_DEFS :=
@@ -169,6 +196,8 @@ PORT_DEFS :=
 # libc (or, for the module, libcrypt added below).
 PORT_BOOT_LIBS   :=
 PORT_MODULE_LIBS :=
+PORT_GEN_SRCS    :=
+PORT_GEN_HDRS    :=
 else
 $(error pid1/Makefile: PORT must be linux or hurd, got $(PORT))
 endif
@@ -182,16 +211,28 @@ CFLAGS         += $(PORT_DEFS)
 MODULE_CFLAGS  += $(PORT_DEFS)
 
 COMMON_SRCS := emacs-init.c $(PORT_SRC)
-COMMON_HDRS := port_layer.h
+COMMON_HDRS := port_layer.h $(PORT_GEN_HDRS)
 
 # per-TU object files.  the boot and module builds need distinct
 # names because the module build adds -DPID1_MODULE -fPIC and uses
 # its own CFLAGS; sharing a single .o between the two would silently
 # pick whichever was built last (W4, skeptic review 2026-05-12).
-BOOT_OBJS   := emacs-init.boot.o $(PORT_STEM).boot.o
-MODULE_OBJS := emacs-init.mod.o $(PORT_STEM).mod.o
+# PORT_GEN_OBJS adds the MIG-generated objects on the Hurd path
+# (currently fsysServer.boot.o / fsysServer.mod.o); empty on Linux.
+PORT_GEN_OBJS_BOOT := $(PORT_GEN_SRCS:.c=.boot.o)
+PORT_GEN_OBJS_MOD  := $(PORT_GEN_SRCS:.c=.mod.o)
+BOOT_OBJS   := emacs-init.boot.o $(PORT_STEM).boot.o $(PORT_GEN_OBJS_BOOT)
+MODULE_OBJS := emacs-init.mod.o $(PORT_STEM).mod.o $(PORT_GEN_OBJS_MOD)
 
 .PHONY: all default module clean install
+
+# pin the default goal explicitly.  PORT=hurd registers a MIG rule
+# (fsysServer.c fsys_S.h: fsys.defs) BEFORE this point in the file, and
+# the first explicit rule's first target ordinarily becomes Make's
+# default goal.  without this line, `make PORT=hurd` runs only the MIG
+# rule and stops, which is exactly the silent-half-build footgun the
+# Hurd port's slice 3 build chain has to avoid.
+.DEFAULT_GOAL := default
 
 default: emacs-init
 
@@ -202,6 +243,20 @@ module: pid1-module.so
 # boot-path objects.  static-friendly, no PIC, no module ifdef.
 %.boot.o: %.c $(COMMON_HDRS)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# MIG-generated server objects use a relaxed CFLAGS set: MIG output is
+# pre-existing third-party C that the upstream Hurd makefiles compile
+# without -Werror -Wpedantic.  retaining our hardening defaults on this
+# generated TU would block builds on every MIG bump.  the rule applies
+# to PORT_GEN_SRCS only; everything in COMMON_SRCS keeps the strict
+# flags.
+MIG_CFLAGS := -std=c11 -Wall -O2 -fstack-protector-strong -fno-strict-aliasing
+ifeq ($(PORT),hurd)
+fsysServer.boot.o: fsysServer.c fsys_S.h
+	$(CC) $(MIG_CFLAGS) $(PORT_DEFS) -c -o $@ fsysServer.c
+fsysServer.mod.o: fsysServer.c fsys_S.h
+	$(CC) $(MIG_CFLAGS) $(PORT_DEFS) -fPIC -DPID1_MODULE $(EMACS_MODULE_INC) -c -o $@ fsysServer.c
+endif
 
 emacs-init: $(BOOT_OBJS)
 	$(CC) $(CFLAGS) $(STATIC_FLAG) -o $@ $(BOOT_OBJS) $(LDFLAGS) $(PORT_BOOT_LIBS)
@@ -223,4 +278,4 @@ install: emacs-init
 	install -m 0755 emacs-init $(DESTDIR)$(SBINDIR)/emacs-init
 
 clean:
-	rm -f emacs-init pid1-module.so *.o
+	rm -f emacs-init pid1-module.so *.o fsysServer.c fsys_S.h

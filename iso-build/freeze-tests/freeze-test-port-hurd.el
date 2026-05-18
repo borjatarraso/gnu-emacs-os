@@ -23,10 +23,20 @@
 ;;
 ;; current slices:
 ;;
-;;   slice 2 (this commit): freeze-test-port-hurd-publish-auth-port
+;;   slice 2: freeze-test-port-hurd-publish-auth-port
 ;;     asserts (pid1-publish-auth-port) returns t on Hurd when the
 ;;     module is loaded.  on linux or when the binding is absent, the
 ;;     test records 'skip with a diagnostic string.
+;;
+;;   slice 3 (this commit): freeze-test-port-hurd-auth-drain
+;;     asserts (pid1-auth-drain) returns t.  on Linux the body is a
+;;     trivial no-op (linux_auth_drain returns 0), so the test should
+;;     pass even without geos-kernel == 'hurd as long as the binding
+;;     is registered; we keep the same skip-when-unbound pattern so
+;;     it runs cleanly on a host emacs without pid1-module.so.  on
+;;     Hurd the test exercises the libports bucket drain end-to-end
+;;     (the bucket may be empty, which is fine: drain returns 0 on
+;;     empty too).
 ;;
 ;; later slices will append additional tests below.
 
@@ -80,6 +90,50 @@ allocate path."
         (error
          (setq result (format "raised: %S" err))))))
     (freeze-test--port-hurd-record 'port-hurd/publish-auth-port result)
+    result))
+
+(defun freeze-test-port-hurd-auth-drain ()
+  "Slice 3: `pid1-auth-drain' returns t.
+
+contract: the supervisor calls `pid1-auth-drain' at the top of every
+`pid1-rpc-poll' tick.  on Linux the C body is a trivial no-op (returns
+0 with no syscalls); on Hurd it pulls up to 16 mach messages off the
+libports bucket attached to /servers/geos-auth and dispatches
+fsys_getroot / geos_auth_submit_nonce.  in either case the elisp
+binding returns t on success and signals `pid1-error' on failure;
+ENOSYS (the auth port has not been published yet) is surfaced as t
+silently, mirroring the rpc-poll convention.
+
+dev-host behaviour: the `pid1-auth-drain' binding is registered by
+pid1-module.so on every PORT (Linux body returns 0; Hurd body returns
+0 / -1 ENOSYS).  the test skips only when the binding is absent
+(module not loaded); on the dev host with the module loaded, the test
+calls the function and asserts t.  this is intentional: a Linux build
+that returns nil or signals would mean the dispatch table is
+mis-initialised (the .auth_drain slot defaulted to NULL because the
+designated-initialiser forgot it), which is the exact bug
+port_require_or_abort cannot catch.
+
+idempotency: the drain is idempotent on both kernels (Linux is a no-op
+and stays a no-op; Hurd's drain runs until the bucket is empty, then
+returns 0 with MACH_RCV_TIMED_OUT internally absorbed).  the test
+calls the binding twice to confirm the second call also returns t."
+  (interactive)
+  (let ((result 'fail))
+    (cond
+     ((not (fboundp 'pid1-auth-drain))
+      (setq result (cons 'skip "pid1-auth-drain unbound (module not loaded)")))
+     (t
+      (condition-case err
+          (let ((rv1 (pid1-auth-drain))
+                (rv2 (pid1-auth-drain)))
+            (setq result
+                  (cond
+                   ((and (eq rv1 t) (eq rv2 t)) 'pass)
+                   (t (format "returned %S then %S, want t / t" rv1 rv2)))))
+        (error
+         (setq result (format "raised: %S" err))))))
+    (freeze-test--port-hurd-record 'port-hurd/auth-drain result)
     result))
 
 (provide 'freeze-test-port-hurd)
