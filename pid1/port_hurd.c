@@ -871,6 +871,13 @@ struct pending_auth_row {
 static struct port_info *auth_port_obj;
 static struct pending_auth_row pending_auth[GEOS_AUTH_PENDING_MAX];
 
+/* hurd_auth_drain forward decl: hurd_get_peer_cred's retry loop kicks
+ * the drain on every iteration; the drain body itself lives below near
+ * the libports publish/demuxer machinery for narrative reasons.
+ * re-entry from the retry site is safe: stack-only buffers, no
+ * per-call statics, mach_msg with timeout=0 returns cleanly. */
+static int hurd_auth_drain(void);
+
 /* peer credentials over AF_UNIX, server side of the v0.8 design-2.2
  * handshake (slice 5 rewrite).  design at
  * docs/v08-hurd-peer-cred-design.md section 3.5.2.
@@ -922,6 +929,11 @@ hurd_get_peer_cred(int fd, const uint8_t nonce[16],
      * function; promoting it would invite callers to rely on the
      * pacing, which is internal to the lookup. */
     for (int attempt = 0; attempt < 5; attempt++) {
+        /* drain on every retry: Fpid1_rpc_poll only kicks auth_drain
+         * once per tick, but our 200ms-per-attempt budget needs a fresh
+         * mach_msg sweep at each step so a late-arriving submit_nonce
+         * gets recorded before we re-scan pending_auth[]. */
+        (void)hurd_auth_drain();
         for (int i = 0; i < GEOS_AUTH_PENDING_MAX; i++) {
             if (pending_auth[i].expiry == 0) continue;
             if (memcmp(pending_auth[i].nonce, nonce,
