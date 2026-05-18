@@ -958,19 +958,169 @@ hurd_client_auth_handshake(int fd)
     return -1;
 }
 
-/* slice 1 ENOSYS placeholder; slice 2 will land the file_set_translator
- * body for /servers/geos-auth.  see docs/v08-hurd-peer-cred-design.md
- * section 3.5.1.  the call site exists today so the supervisor can wire
- * `pid1-publish-auth-port' into startup unconditionally; until the real
- * translator goes in, the elisp side gets ENOSYS back and treats it the
- * same way it treats every other not-yet-implemented Hurd surface: log
- * once, continue, do not panic.  no Mach state is allocated here, so
- * there is nothing to deallocate on the error path. */
+/* slice 2 of v0.8 design 2.2: publish the supervisor's long-lived auth
+ * port as an active translator at /servers/geos-auth.  see
+ * docs/v08-hurd-peer-cred-design.md section 3.5.1 (Option A picked) and
+ * section 3.5.4 (slice 3 will drain it via a non-blocking mach_msg
+ * inside Fpid1_rpc_poll).
+ *
+ * the chosen mechanism is the "active translator" variant of
+ * file_set_translator: we hand it a SEND right and the filesystem
+ * records that send right as the live translator.  any client doing
+ * file_name_lookup("/servers/geos-auth", 0, 0) gets a fresh send right
+ * to that same port routed back via fsys_getroot.  this is exactly the
+ * shape /hurd/auth itself uses to expose the auth server.
+ *
+ * mechanics, in order:
+ *
+ *   1. mach_port_allocate(MACH_PORT_RIGHT_RECEIVE) for the receive
+ *      right the supervisor will mach_msg-drain from on the next tick
+ *      (slice 3).  stashed in a file-static slot so the drain code can
+ *      reach it without re-allocating.
+ *   2. mach_port_insert_right(MAKE_SEND) bumps the user-ref count for
+ *      the send side; without this we cannot hand out send rights to
+ *      clients later (file_set_translator copies one for the fs record
+ *      but a clean MAKE_SEND keeps the supervisor's own send ref for
+ *      diagnostics and for any future direct-publish path).
+ *   3. open("/servers/geos-auth", O_CREAT|O_WRONLY, 0600) + close to
+ *      guarantee the file exists.  /servers/ is part of the stock
+ *      Debian Hurd boot tree; a missing /servers/ would be a wildly
+ *      broken system and we surface that as ENOENT rather than try to
+ *      mkdir it ourselves.
+ *   4. file_name_lookup("/servers/geos-auth", O_NOTRANS, 0) gets us a
+ *      file port to the underlying node (NOT to any translator already
+ *      sitting there: O_NOTRANS gives us the bare file).
+ *   5. file_set_translator(file, 0, FS_TRANS_SET|FS_TRANS_FORCE, 0,
+ *                          NULL, 0, send_right, COPY_SEND) installs
+ *      our send right as the active translator.  passive_flags=0 +
+ *      passive=NULL means "do not also write a passive translator
+ *      record to disk"; if the supervisor exits the active translator
+ *      goes with it, which is exactly what we want (a stale send
+ *      right pointing at a dead supervisor would be worse than no
+ *      translator at all; the next supervisor reinstalls fresh).
+ *
+ * the static slot hurd_auth_port:
+ *
+ *   slice 3 (see design 3.5.4) reads this from inside Fpid1_rpc_poll
+ *   via mach_msg(MACH_RCV_MSG|MACH_RCV_TIMEOUT, timeout=0, ...).  the
+ *   slot stays MACH_PORT_NULL until the publish succeeds; on success
+ *   it holds the RECEIVE right (not a send right -- send rights are
+ *   what file_set_translator vended to the kernel and what clients
+ *   will hold).
+ *
+ * idempotency: if hurd_auth_port is already non-NULL on entry we return
+ * -1/EBUSY.  the supervisor calls this exactly once at startup; a
+ * second call indicates a wiring bug we want to surface, not to paper
+ * over by silently reusing the existing port (which would also leak
+ * the new allocation if we got that far).
+ *
+ * error translation: kern_return_t values from mach_port_* and
+ * file_set_translator do NOT escape this function as errno.  same
+ * convention the rest of this file uses; see hurd_mount and
+ * hurd_reboot_cmd for the same pattern. */
+
+static mach_port_t hurd_auth_port = MACH_PORT_NULL;
+
 static int
 hurd_publish_auth_port(void)
 {
-    errno = ENOSYS;
-    return -1;
+    if (hurd_auth_port != MACH_PORT_NULL) {
+        errno = EBUSY;
+        return -1;
+    }
+
+    /* step 1: allocate the receive right that slice 3 will drain. */
+    mach_port_t recv = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(),
+                                          MACH_PORT_RIGHT_RECEIVE,
+                                          &recv);
+    if (kr != KERN_SUCCESS) {
+        errno = (kr == KERN_RESOURCE_SHORTAGE) ? ENOMEM : EIO;
+        return -1;
+    }
+
+    /* step 2: mint a send right against the same name.  COPY_SEND on
+     * file_set_translator below would also vend the kernel a send right,
+     * but having our own send-right user-ref keeps the supervisor able
+     * to mint additional send rights without re-running this dance. */
+    kr = mach_port_insert_right(mach_task_self(), recv, recv,
+                                MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        /* drop the receive right we just allocated; do NOT leak. */
+        (void)mach_port_mod_refs(mach_task_self(), recv,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
+        errno = EIO;
+        return -1;
+    }
+
+    /* step 3: ensure /servers/geos-auth exists as a bare file node.
+     * an existing file is fine (O_CREAT without O_EXCL); a missing
+     * /servers/ directory surfaces as ENOENT from open(2) which we
+     * propagate, since fabricating /servers/ ourselves would mask a
+     * broken bootstrap.  mode 0600: only root reads/writes the node;
+     * the actual translator publishing happens regardless of the
+     * file mode (the filesystem keys the translator on the node, not
+     * on its permissions), so 0600 is purely "no point exposing the
+     * empty file to other users". */
+    int fd = open("/servers/geos-auth", O_CREAT | O_WRONLY, 0600);
+    if (fd < 0) {
+        int saved = errno;
+        (void)mach_port_deallocate(mach_task_self(), recv);
+        (void)mach_port_mod_refs(mach_task_self(), recv,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
+        errno = saved;
+        return -1;
+    }
+    (void)close(fd);
+
+    /* step 4: get a file port to the bare node (O_NOTRANS so we do not
+     * chain behind any pre-existing translator).  any pre-existing
+     * translator gets FS_TRANS_FORCE-replaced in step 5. */
+    file_t node = file_name_lookup("/servers/geos-auth", O_NOTRANS, 0);
+    if (node == MACH_PORT_NULL) {
+        int saved = errno;
+        (void)mach_port_deallocate(mach_task_self(), recv);
+        (void)mach_port_mod_refs(mach_task_self(), recv,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
+        errno = saved ? saved : EIO;
+        return -1;
+    }
+
+    /* step 5: install the send right as the active translator.  passive
+     * fields zeroed so no on-disk passive record is written (the
+     * supervisor is the only source of truth; if it dies the next boot
+     * republishes).  COPY_SEND on the active port disposition: the
+     * kernel takes its own ref, ours stays valid through the call. */
+    kr = file_set_translator(node,
+                             0,                          /* passive_flags */
+                             FS_TRANS_SET | FS_TRANS_FORCE, /* active_flags */
+                             0,                          /* oldtrans_flags */
+                             NULL, 0,                    /* passive argz */
+                             recv,                       /* active port */
+                             MACH_MSG_TYPE_COPY_SEND);
+    (void)mach_port_deallocate(mach_task_self(), node);
+
+    if (kr != KERN_SUCCESS) {
+        /* unwind the receive + send rights; nothing got published, so
+         * the supervisor's state stays at "no auth port" for the next
+         * call.  mapping mirrors hurd_mount's error switch. */
+        (void)mach_port_deallocate(mach_task_self(), recv);
+        (void)mach_port_mod_refs(mach_task_self(), recv,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
+        switch (kr) {
+        case KERN_INVALID_ARGUMENT:    errno = EINVAL; break;
+        case KERN_NO_ACCESS:           errno = EACCES; break;
+        case KERN_PROTECTION_FAILURE:  errno = EACCES; break;
+        case MACH_SEND_INVALID_DEST:   errno = ENOENT; break;
+        case EOPNOTSUPP:               errno = EOPNOTSUPP; break;
+        default:                       errno = EIO; break;
+        }
+        return -1;
+    }
+
+    /* commit: slot reflects "published".  slice 3 reads this. */
+    hurd_auth_port = recv;
+    return 0;
 }
 
 /* the table.  same shape as port_linux_impl, every slot populated.
