@@ -313,6 +313,212 @@ Linux it routes through the existing
 length + payload.  No ABI change for Linux clients, no risk of
 regressing the v0.6 RPC verbs.
 
+### 3.5 2.2 implementation outline (added 2026-05-18)
+
+What the auth dance works against is settled: the side-channel
+probe at `tests/hurd-mach-sidechannel.c` reached `KERN_SUCCESS`
+on both halves and the auth server returned the calling task's
+euid (receipt:
+`docs/runlogs/2026-05-18-hurd-mach-sidechannel-auth.md`).  The
+only remaining question is *how the rendezvous port travels from
+the client task to the supervisor task*, since pflocal SCM_RIGHTS
+is out and the probe ran intra-process.
+
+#### 3.5.1 How the supervisor publishes its auth port
+
+Two viable transports, both standard Mach IPC; the hurd-porter
+spike picks one in the first slice.
+
+**Option A: passive translator at `/servers/geos-auth`.**  pid1
+calls `file_set_translator` on `/servers/geos-auth` at supervisor
+startup; the supervisor itself responds to the `fsys_getroot` /
+`io_identity` RPCs by returning a send right to a long-lived auth
+receive port.  Clients call `file_name_lookup("/servers/geos-auth",
+0, 0)` and get a send right wired straight to the supervisor.
+
+Pros: Hurd-canonical, survives `exec(2)` for free, no special
+parent-child coupling needed.  Cons: bootstrap-order question
+(the translator must be alive before the first client login,
+which is fine since pid1 is also the first translator setter on
+the box).
+
+**Option B: parent-inherited send right via
+`task_set_special_port`.**  pid1 already spawns every interactive
+session; before `task_resume` on each child, pid1 calls
+`task_set_special_port(child_task, TASK_BOOTSTRAP_PORT,
+auth_send_right)`.  Children retrieve it via
+`task_get_bootstrap_port` at session-init time.
+
+Pros: zero filesystem state, port travels in-band with task
+creation.  Cons: overwrites the bootstrap port that glibc-hurd
+expects to point at the proc server; libc internals may break in
+non-obvious ways.  Mitigation would be to use a non-standard
+special-port slot, but those are sparse and Mach-version-
+sensitive.
+
+**Pick:** Option A.  The libc-bootstrap risk in Option B is the
+exact class of bug that wastes weeks in QEMU.  Translator
+publication is the conservative choice and matches how the rest
+of GEOS exposes long-lived services (`/run/geos/super.sock` is
+already an AF_UNIX rendezvous; `/servers/geos-auth` is the Mach
+counterpart).  Hurd-porter starts with the translator stub.
+
+#### 3.5.2 Per-connection nonce protocol
+
+The supervisor must match an inbound Mach auth message to the
+AF_UNIX RPC connection it authenticates.  Without a binding the
+auth result could be stolen by a second client racing the first.
+The match-key is a 16-byte random nonce minted by the supervisor.
+
+Connection lifecycle on Hurd:
+
+```
+client                              supervisor
+  |  connect("/run/geos/super.sock") |
+  |--------------------------------->|
+  |  accept(); mint nonce N (16 B)  |
+  |   from /dev/urandom              |
+  |<---------------------------------|
+  |  N (16 raw bytes, NO length     |
+  |  prefix, exactly one read)       |
+  |                                  |
+  |  file_name_lookup(/servers/      |
+  |   geos-auth) -> auth_send         |
+  |  mach_port_allocate(RECEIVE)     |
+  |   -> rendez_rcv;                 |
+  |  mach_port_insert_right(MAKE_    |
+  |   SEND) -> rendez_send           |
+  |  mach_msg send: header carries  |
+  |   N + rendez_send (MOVE_SEND)    |
+  |--------------------------------->|
+  |                                  |  mach_msg recv from
+  |                                  |   /servers/geos-auth queue;
+  |                                  |   match N to pending conn;
+  |                                  |   auth_server_authenticate(
+  |                                  |    getauth(), rendez_recv'd,
+  |                                  |    MOVE_SEND, newport_rcv,
+  |                                  |    MAKE_SEND, &euids, ...)
+  |                                  |  -> store euid/egid on conn
+  |  auth_user_authenticate(         |
+  |   getauth(), rendez_rcv,         |
+  |   MAKE_SEND on send-right name,  |
+  |   &newport_returned)             |
+  |  (matches the server-side dance) |
+  |                                  |
+  |  4-byte BE length + sexp         |
+  |--------------------------------->|
+  |  Fpid1_rpc_poll consumes; uid    |
+  |   from earlier auth step is the  |
+  |   verb's caller identity.        |
+```
+
+Linux path is bit-for-bit unchanged (no nonce, no Mach step,
+SO_PEERCRED at accept).  The nonce step is gated on
+`geos-kernel-hurd-p` both client- and server-side.
+
+#### 3.5.3 Why hand-rolled mach_msg, not MIG
+
+A MIG-generated `geos_auth.defs` would be cleaner but adds a
+fourth toolchain dependency to the pid1 build (MIG itself plus
+the generated `_server.c` / `_user.c` pair) and forces a
+Makefile change on the hurd branch.  The auth-channel RPC is
+exactly one message type carrying `(nonce[16], rendez_send_right)`,
+small enough to write by hand using GNU Mach's legacy inline
+`mach_msg_type_t` descriptor format (the same format the
+side-channel probe used to call `auth_*_authenticate`).  v0.9
+can revisit MIG when a second auth-channel verb shows up; YAGNI
+until then.
+
+#### 3.5.4 Supervisor receive without threads
+
+`Fpid1_rpc_poll` already runs on a 200 ms tick from the emacs
+main loop.  Add a `mach_msg(MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+timeout=0, ...)` on the geos-auth receive port at the top of
+each tick; the call is non-blocking when the queue is empty and
+returns `MACH_RCV_TIMED_OUT` cheaply.  When it returns a message,
+extract the nonce + rendezvous send right, run
+`auth_server_authenticate` (synchronous; sub-millisecond on a
+warm auth server), and update the matching AF_UNIX connection's
+pending-uid slot.  The AF_UNIX side of `Fpid1_rpc_poll` then
+sees the slot populated and proceeds with the sexp read.
+
+Single-threaded; matches hard rule 5.  Worst case: a malicious
+client floods `/servers/geos-auth` with bogus nonces and the
+supervisor spends tick budget on `mach_msg` returns.  Mitigation
+in a later slice: per-tick cap on auth messages drained (e.g.
+16), spillover stays queued for the next tick.
+
+#### 3.5.5 File-by-file change list
+
+  - `pid1/port_layer.h`: add `publish_auth_port(void)` slot to
+    `port_caps`.  Linux returns 0 (no-op); Hurd opens the
+    translator and stashes the auth-receive-port name in a
+    file-static slot.
+  - `pid1/port_linux.c`: `linux_publish_auth_port` = no-op
+    returning 0.
+  - `pid1/port_hurd.c`: rewrite `hurd_get_peer_cred` per 3.5.2
+    (read 16-byte nonce, look up matching pending-auth entry,
+    return cached uid/gid).  Rewrite `hurd_client_auth_handshake`
+    per 3.5.2 (read nonce off fd, `file_name_lookup`
+    `/servers/geos-auth`, allocate rendezvous, `mach_msg` send
+    with the hand-rolled descriptor block, `auth_user_authenticate`,
+    deallocate everything on every exit branch).  Add
+    `hurd_publish_auth_port` that runs `file_set_translator` and
+    spawns the per-tick drain helper.  Add a static pending-auth
+    table keyed by nonce, with TTL eviction (drop entries older
+    than 5 s; an abandoned handshake should never wedge).
+  - `pid1/emacs-init.c`: call `port->publish_auth_port` once at
+    supervisor startup, before the first `Fpid1_rpc_poll` tick.
+    Add a `Fpid1_drain_auth_channel` helper bound from elisp,
+    or fold the drain into `Fpid1_rpc_poll` directly (simpler;
+    do that).
+  - `emacs-init/core/rpc-server.el`: on Hurd, send 16 raw bytes
+    immediately after `pid1-unix-accept` and stash the nonce on
+    the connection state alist; require the pending-auth slot
+    populated before dispatching the sexp.  On Linux,
+    unchanged.
+  - `emacs-init/core/rpc-client.el`: on Hurd, after
+    `pid1-unix-connect`, call `pid1-unix-recv-exactly fd 16`
+    for the nonce, then `pid1-client-auth-handshake fd nonce`.
+    The handshake binding's signature gains a `bytes` arg
+    (currently `int fd -> t`; becomes `int fd, bytes nonce -> t`).
+    On Linux the handshake is the existing no-op.
+
+#### 3.5.6 Slicing
+
+Five commits, in order, each one mergeable on its own:
+
+  1. **port-seam expand**: add `publish_auth_port` slot; Linux
+     no-op + Hurd ENOSYS body.  Bind `pid1-publish-auth-port`
+     from emacs.  No behavior change.
+  2. **translator stub**: `hurd_publish_auth_port` opens the
+     translator at `/servers/geos-auth`, allocates the receive
+     port, returns 0.  Add a freeze-test that asserts
+     `/servers/geos-auth` exists after supervisor startup on
+     Hurd VM.
+  3. **nonce + drain**: extend `Fpid1_rpc_poll` with the
+     per-tick `mach_msg` drain; add the pending-auth table;
+     server-side `rpc-server.el` writes the 16-byte nonce on
+     accept.  Freeze-test: bogus Mach client sends garbage,
+     supervisor does not crash, ticks stay under budget.
+  4. **client handshake**: rewrite `hurd_client_auth_handshake`
+     to read nonce, look up translator, allocate rendezvous,
+     send mach_msg with nonce + rendezvous, run
+     `auth_user_authenticate`.  Update
+     `Fpid1_client_auth_handshake` to take the nonce arg.
+     Freeze-test: real client connects, supervisor populates
+     uid slot, ping verb returns under root and under lambda.
+  5. **end-to-end multi-user**: rewrite `hurd_get_peer_cred` to
+     consult the pending-auth table.  Run the v0.6 multi-user
+     login dance on Hurd VM; capture runlog; flip the
+     HURD_PORT.md matrix rows for `get_peer_cred` and
+     `client_auth_handshake` to YES.
+
+Slice 1 is pure scaffolding (zero behavior change); the rest are
+each a VM-verify cycle.  Estimated effort: 2-3 sessions for
+slices 1-3, then a longer session for slices 4-5 since they
+share a debugging surface.
+
 ## 4. Failure modes and defence in depth
 
   - Client sends the prefix port but the port is not a valid
