@@ -2420,6 +2420,39 @@ Fpid1_rpc_reply(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
+/* (pid1-client-auth-handshake FD) -> t, or signal pid1-error with errno.
+ *
+ * the client-side counterpart of get_peer_cred.  on Linux this is a
+ * single no-op return (no syscalls, no bytes on the wire).  on Hurd
+ * this triggers the rendezvous-port dance against the gnumach auth
+ * server; the supervisor's get_peer_cred body consumes the matching
+ * cmsg.  the design rationale is at docs/v08-hurd-peer-cred-design.md.
+ *
+ * elisp callers in rpc-client.el invoke this once per RPC connection,
+ * right after make-network-process returns and before the first
+ * process-send-string.  the call is unconditional: branching on
+ * geos-kernel is the port_caps's job, not the elisp caller's. */
+static emacs_value
+Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
+                            emacs_value *args, void *data)
+{
+    (void)data;
+    if (nargs != 1)
+        return pid1_signal_errno(env,
+                                 "pid1: client-auth-handshake: nargs",
+                                 EINVAL);
+    intmax_t fd_im = env->extract_integer(env, args[0]);
+    if (fd_im < 0 || fd_im > 0x7fffffff)
+        return pid1_signal_errno(env,
+                                 "pid1: client-auth-handshake: fd out of range",
+                                 EBADF);
+    int fd = (int)fd_im;
+    if (port->client_auth_handshake(fd) < 0)
+        return pid1_signal_errno(env,
+                                 "pid1: client-auth-handshake", errno);
+    return env->intern(env, "t");
+}
+
 /* the reboot and suspend bodies used to live here as raw_reboot /
  * raw_suspend.  they now live in port_linux.c behind port->reboot
  * and port->suspend.  the elisp-facing wrappers below are unchanged
@@ -3177,6 +3210,15 @@ emacs_module_init(struct emacs_runtime *ert)
         "pid1-rpc-poll's :fd slot.  Return t.",
         NULL);
     pid1_defalias(env, "pid1-rpc-reply", rrep);
+
+    emacs_value cah = env->make_function(env, 1, 1,
+        Fpid1_client_auth_handshake,
+        "Run the client-side auth handshake for an open RPC socket FD. "
+        "On Linux this is a no-op (SO_PEERCRED is server-side).  On Hurd "
+        "this performs the rendezvous-port + auth_user_authenticate dance "
+        "against the gnumach auth server.  Return t.",
+        NULL);
+    pid1_defalias(env, "pid1-client-auth-handshake", cah);
 
     /* provide the feature so (require 'pid1-module) works after
      * (module-load ...) without a separate elisp wrapper. */

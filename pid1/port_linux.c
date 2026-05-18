@@ -268,19 +268,37 @@ linux_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
     return 0;
 }
 
+/* client-side auth handshake.  the Linux peer-cred model is entirely
+ * server-side (the supervisor reads SO_PEERCRED), so the client has
+ * literally nothing to do here: no syscalls, no port allocations, no
+ * wire bytes.  the function exists so the elisp rpc-client.el can
+ * unconditionally call `pid1-client-auth-handshake' right after
+ * connect(2) without having to branch on kernel; on Hurd the same
+ * call performs the rendezvous-port dance against the auth server.
+ *
+ * the (void) cast on FD is the standard -Wunused-parameter -Werror
+ * dance for a stub that genuinely ignores its argument. */
+static int
+linux_client_auth_handshake(int fd)
+{
+    (void)fd;
+    return 0;
+}
+
 /* the table.  one assignment per slot, no NULLs.  the Hurd backend
  * will provide a parallel const port_caps port_hurd_impl with the
  * same shape. */
 const port_caps port_linux_impl = {
-    .kernel_name       = "linux",
-    .mount             = linux_mount,
-    .set_hostname      = linux_set_hostname,
-    .bring_up_lo       = linux_bring_up_lo,
-    .set_address       = linux_set_address,
-    .set_route_default = linux_set_route_default,
-    .reboot            = linux_reboot_cmd,
-    .suspend           = linux_suspend,
-    .get_peer_cred     = linux_get_peer_cred,
+    .kernel_name           = "linux",
+    .mount                 = linux_mount,
+    .set_hostname          = linux_set_hostname,
+    .bring_up_lo           = linux_bring_up_lo,
+    .set_address           = linux_set_address,
+    .set_route_default     = linux_set_route_default,
+    .reboot                = linux_reboot_cmd,
+    .suspend               = linux_suspend,
+    .get_peer_cred         = linux_get_peer_cred,
+    .client_auth_handshake = linux_client_auth_handshake,
 };
 
 /* the active pointer.  starts NULL; main() and emacs_module_init()

@@ -128,6 +128,36 @@ typedef struct port_caps {
      * unspecified, and the caller initialises them to a non-root
      * sentinel before the port call as defence in depth. */
     int (*get_peer_cred)(int fd, uint32_t *uid_out, uint32_t *gid_out);
+
+    /* client-side counterpart to get_peer_cred.  the Linux peer-cred
+     * model is server-only: getsockopt(SO_PEERCRED) reads a snapshot
+     * the kernel took at the client's connect() instant, so the client
+     * has nothing to do.  the Hurd model is bidirectional: pflocal has
+     * no SO_PEERCRED, so the client and the server have to perform an
+     * auth_user_authenticate / auth_server_authenticate dance against
+     * the gnumach auth server, joined by a rendezvous Mach port the
+     * client transmits to the server via pflocal's SCM_PORT-equivalent
+     * cmsg.  this slot is what the client side calls right after
+     * connect(2) and before its first send: allocate the rendezvous,
+     * sendmsg it as ancillary data on a single placeholder byte, then
+     * register with the auth server.  the supervisor's get_peer_cred
+     * body consumes that byte (and the attached cmsg) before reading
+     * the 4-byte length prefix.
+     *
+     * Linux backend: returns 0 immediately, no syscalls.  the client
+     * truly has nothing to do; the wire bytes on Linux are bit-
+     * identical to today.
+     *
+     * Hurd backend: returns 0 on a successful handshake, -1 with
+     * errno on failure (ENOSYS until the real body lands in v0.8
+     * step 4; EACCES if the auth server rejects; EAGAIN if the auth
+     * server is unreachable so the caller can retry).
+     *
+     * the full design lives at docs/v08-hurd-peer-cred-design.md;
+     * the seam is intentionally tiny (one slot, one int return) so a
+     * skeptic review can verify "linux is no-op, hurd does N steps"
+     * by reading the two bodies side by side. */
+    int (*client_auth_handshake)(int fd);
 } port_caps;
 
 /* the active backend.  starts NULL.  exactly one assignment per
