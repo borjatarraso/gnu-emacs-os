@@ -134,7 +134,9 @@ typedef struct port_caps {
      * pid1-error and panic-handled.  UID_OUT / GID_OUT are written
      * only on success; on failure their contents are unspecified, and
      * the caller initialises them to a non-root sentinel before the
-     * port call as defence in depth.
+     * port call as defence in depth.  NONCE must be non-NULL; the
+     * Hurd backend returns -1 with errno=EINVAL on NULL, and ENOSYS
+     * if publish_auth_port has not run.
      *
      * slice 5 of v0.8 design 2.2 grew this signature to take the
      * 16-byte NONCE the supervisor wrote to the client on accept.

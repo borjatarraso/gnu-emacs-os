@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/random.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -2355,7 +2356,43 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
      * default would be the worst possible footgun.  -1 is "nobody"
      * on every kernel we target. */
     uint32_t peer_uid = (uint32_t)-1, peer_gid = (uint32_t)-1;
-    if (port->get_peer_cred(conn, &peer_uid, &peer_gid) < 0) {
+    /* slice 5 of v0.8 design 2.2: mint a 16-byte rendezvous NONCE and
+     * write it to the client before any other byte hits the wire.  the
+     * client (rpc-client.el) reads exactly 16 bytes with
+     * pid1-unix-recv-exactly, then passes them to
+     * pid1-client-auth-handshake which uses them as the matching
+     * identifier on the Hurd auth_user_authenticate dance.  on Linux
+     * the bytes are read and discarded by the client; the supervisor's
+     * Linux get_peer_cred backend ignores NONCE and continues to use
+     * SO_PEERCRED.  the NONCE must arrive at the client before our
+     * peer-cred read; the order is mint -> send -> get_peer_cred so the
+     * Hurd backend's pending_auth[] lookup has a chance to find the
+     * row the client has posted via the mach side channel.
+     *
+     * getentropy(2) is glibc-portable (Hurd's glibc ships it) and the
+     * call is bounded to 256 bytes per the manpage, well above our 16.
+     * a getentropy failure here is "the kernel ran out of entropy",
+     * which on Linux is essentially never; treat it as a transient
+     * client error (close the fd, return nil to the poller) rather
+     * than panicking the 200ms tick.
+     *
+     * the send(2) uses MSG_NOSIGNAL so a client that disconnected
+     * between accept and our first write does not raise SIGPIPE on
+     * the supervisor.  short writes on a fresh SOCK_STREAM connection
+     * with 16 bytes of payload should not happen on any sane kernel,
+     * but we still check: a short write is treated as a client error
+     * (close the fd, return nil) for the same reason as getentropy. */
+    uint8_t nonce[16];
+    if (getentropy(nonce, sizeof nonce) < 0) {
+        close(conn);
+        return Qnil;
+    }
+    ssize_t nw = send(conn, nonce, sizeof nonce, MSG_NOSIGNAL);
+    if (nw != (ssize_t)sizeof nonce) {
+        close(conn);
+        return Qnil;
+    }
+    if (port->get_peer_cred(conn, nonce, &peer_uid, &peer_gid) < 0) {
         int err = errno;
         if (err == ENOSYS) {
             /* log the refusal once per boot: the 200ms tick would
@@ -2486,7 +2523,8 @@ Fpid1_rpc_reply(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
-/* (pid1-client-auth-handshake FD NONCE) -> t, or signal pid1-error.
+/* (pid1-client-auth-handshake FD &optional NONCE) -> t, or signal
+ * pid1-error.
  *
  * the client-side counterpart of get_peer_cred.  on Linux this is a
  * single no-op return (no syscalls, no bytes on the wire); NONCE is
@@ -2501,10 +2539,11 @@ Fpid1_rpc_reply(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
  * (rpc-client.el) reads it off the socket with pid1-unix-recv-exactly
  * immediately after connect.  shorter or longer strings get EINVAL.
  *
- * elisp callers in rpc-client.el invoke this once per RPC connection,
- * right after pid1-unix-connect returns and before the first
- * pid1-unix-send.  the call is unconditional: branching on
- * geos-kernel is the port_caps's job, not the elisp caller's. */
+ * precondition on the caller: this binding must be invoked AFTER
+ * pid1-unix-connect returns the fd AND BEFORE the first pid1-unix-send
+ * on that fd, exactly once per RPC connection.  the call is
+ * unconditional across kernels: branching on geos-kernel is the
+ * port_caps's job, not the elisp caller's. */
 static emacs_value
 Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
                             emacs_value *args, void *data)
@@ -2512,10 +2551,10 @@ Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
     (void)data;
     emacs_value Qnil = env->intern(env, "nil");
     /* arity 1 or 2: legacy callers on main pass FD only, slice 4
-     * callers on the hurd branch pass (FD NONCE).  the elisp
-     * rpc-client.el update is part of the SPEC for pid1-engineer; the
-     * binding accepts both during the transition window so neither
-     * branch is broken when the other is mid-rebase. */
+     * callers (rpc-client.el under the v0.8 supervisor wire change)
+     * pass (FD NONCE).  the binding accepts both during the transition
+     * window so a partial rebase between the hurd branch and main does
+     * not strand either caller. */
     if (nargs != 1 && nargs != 2)
         return pid1_signal_errno(env,
                                  "pid1: client-auth-handshake: nargs",
@@ -2580,9 +2619,18 @@ Fpid1_publish_auth_port(emacs_env *env, ptrdiff_t nargs,
         return pid1_signal_errno(env,
                                  "pid1: publish-auth-port: nargs",
                                  EINVAL);
-    if (port->publish_auth_port() < 0)
+    if (port->publish_auth_port() < 0) {
+        /* W2: ENOSYS is "no auth port concept on this kernel" (Linux,
+         * or a future backend that does not need one).  surface it
+         * silently as t, matching the Fpid1_auth_drain convention.
+         * panicking supervisor startup over a missing translator on a
+         * kernel that does not need one is the worst possible failure
+         * mode here. */
+        if (errno == ENOSYS)
+            return env->intern(env, "t");
         return pid1_signal_errno(env,
                                  "pid1: publish-auth-port", errno);
+    }
     return env->intern(env, "t");
 }
 

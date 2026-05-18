@@ -108,7 +108,21 @@ dance."
     (unwind-protect
         (progn
           (setq fd (pid1-unix-connect geos-rpc-socket-path))
-          (pid1-client-auth-handshake fd)
+          ;; slice 5 of v0.8 design 2.2 wire change: the supervisor
+          ;; mints a 16-byte rendezvous NONCE on accept and writes it
+          ;; immediately, before any other byte hits the wire.  read
+          ;; it here with pid1-unix-recv-exactly, then pass it to
+          ;; pid1-client-auth-handshake in the arity-2 form.  on Linux
+          ;; the bytes are read and discarded (SO_PEERCRED is server-
+          ;; side); on Hurd the NONCE is the rendezvous identifier the
+          ;; auth_user_authenticate dance keys off.  the transition
+          ;; window where the arity-1 fallback was allowed (slice 4)
+          ;; is over now that the supervisor side mints + sends; the
+          ;; nonce MUST be consumed before our first pid1-unix-send or
+          ;; the supervisor sees 16 bytes of garbage on top of the
+          ;; length prefix.
+          (let ((nonce (pid1-unix-recv-exactly fd 16 timeout-ms)))
+            (pid1-client-auth-handshake fd nonce))
           ;; pid1-unix-send signals on short write; no need to verify
           ;; the return value.  the C side loops on EINTR and only
           ;; returns on success or a hard error.

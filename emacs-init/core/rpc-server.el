@@ -232,6 +232,37 @@ the RPC server."
         (write-region (concat msg "\n") nil "/dev/console" 'append 'nomsg)
       (error nil))))
 
+(defun rpc-server--publish-auth-port ()
+  "Publish the long-lived auth Mach port (Hurd) before listen.
+on Linux this is a no-op: SO_PEERCRED is server-side, there is no
+out-of-band channel to set up.  on Hurd this allocates the
+supervisor's auth receive port and (slice 2) installs an active
+translator at /servers/geos-auth; slice 3 will add the
+file_name_lookup-reachable transport on top.
+
+if `pid1-publish-auth-port' is unbound (dev-host loads, or a
+build that pre-dates v0.8 design-2.2 slice 1) we log via console
+and move on; the supervisor still binds the AF_UNIX socket, and
+on Hurd the RPC peer-cred lookup will fail with ENOSYS the way
+it did before the seam landed, which is the conservative posture.
+errors signalled by the binding go through panic-handle.
+
+rationale: docs/v08-hurd-peer-cred-design.md section 3.5."
+  (cond
+   ((not (fboundp 'pid1-publish-auth-port))
+    (rpc-server--console-write
+     "rpc-server: pid1-publish-auth-port unbound, auth-port publish skipped"))
+   (t
+    (condition-case err
+        (progn
+          (funcall (symbol-function 'pid1-publish-auth-port))
+          (rpc-server--console-write
+           "rpc-server: auth port published"))
+      (error
+       (rpc-server--console-write
+        (format "rpc-server: auth-port publish failed: %S" err))
+       (panic-handle err 'rpc-server--publish-auth-port))))))
+
 (defun rpc-server-start ()
   "Bind the RPC socket and arm the poll timer.
 called from the supervisor's boot tail; idempotent.  on a dev
@@ -239,7 +270,15 @@ host (where `pid1-rpc-listen' is unbound) this is a no-op so the
 file loads without side effect.  if listen fails the timer is
 still armed but every tick will short-circuit on the unbound
 `pid1-rpc-poll' check; this is intentional so a configuration
-error does not silently disable the whole RPC machinery."
+error does not silently disable the whole RPC machinery.
+
+publishes the auth Mach port via `rpc-server--publish-auth-port'
+before binding the socket so clients connecting in the first
+200ms after listen find the auth channel already alive on Hurd
+(Linux no-op).  publish failures go through panic-handle but do
+not abort the listen: the supervisor still serves the AF_UNIX
+socket; on Hurd the per-connection peer-cred lookup then fails
+with ENOSYS until the transport question (slice 3) resolves."
   (cond
    ((not (fboundp 'pid1-rpc-listen))
     (rpc-server--console-write
@@ -251,6 +290,7 @@ error does not silently disable the whole RPC machinery."
    (t
     (rpc-server--console-write
      (format "rpc-server: starting on %s" rpc-server-socket-path))
+    (rpc-server--publish-auth-port)
     (rpc-server--ensure-socket-dir)
     (condition-case err
         (progn
