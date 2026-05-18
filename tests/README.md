@@ -24,7 +24,10 @@ Mach channel published at `/run/geos/super.auth`).
 
 ### Build (Hurd only)
 
-    gcc -Wall -Wextra -Werror -o hurd-pflocal-cmsg hurd-pflocal-cmsg.c -lmach
+    gcc -Wall -Wextra -Werror -o hurd-pflocal-cmsg hurd-pflocal-cmsg.c
+
+(`-lmach` is NOT needed on Debian GNU/Hurd 0.9: glibc bundles the
+user-side Mach RPC stubs.)
 
 ### Run
 
@@ -43,11 +46,60 @@ no pid1 dependency.
     alternative 2.2 (parallel Mach channel for the auth handshake;
     AF_UNIX retains the sexp byte stream).
 
-### Why this is Hurd-only
+### Verdict on Debian GNU/Hurd 0.9 (2026-05-18)
 
-The probe links against `-lmach`, which only exists on a Hurd glibc
-toolchain.  On a Linux host the build fails at link time and that is
-the intended behavior: no Linux equivalent run makes sense (Linux
-SCM_RIGHTS passes file descriptors, not Mach port rights; the
-question being answered does not apply).  There is no Makefile target
-for this file in the Linux build of `pid1/`.
+`FAIL: sendmsg returned -1 (errno=1073741833 Bad file descriptor)`
+on every socket type.  pflocal's SCM_RIGHTS handler treats payload
+integers as file descriptors (looking them up in the sender's
+`io_t` table) rather than as bare Mach port names.  v0.8 design
+pivoted to alternative 2.2.  Full receipt:
+`docs/runlogs/2026-05-18-hurd-pflocal-cmsg-fail.md`.
+
+## hurd-mach-sidechannel.c
+
+Answers: does the auth dance (`auth_user_authenticate` on the
+client side, `auth_server_authenticate` on the supervisor side)
+complete cleanly on this Hurd build when both sides share a Mach
+rendezvous port?
+
+This is the load-bearing question for design 2.2 (the alternative
+the project pivoted to after `hurd-pflocal-cmsg.c` failed).  The
+inter-task transport (sending the rendezvous port from one task
+to another via a parallel Mach channel) is standard Hurd IPC and
+not what this probe targets; the probe isolates the
+"does the auth-server rendezvous protocol even work" question by
+running both sides in the same task across two pthreads.
+
+### Build (Hurd only)
+
+    gcc -Wall -Wextra -Werror -pthread -o hurd-mach-sidechannel \
+        hurd-mach-sidechannel.c
+
+### Run
+
+Any user works; root will see `euid=0`.
+
+    ./hurd-mach-sidechannel
+
+### Interpreting the output
+
+  - `OK auth euid=N (neuids=M)`, exit 0: the auth dance returns
+    KERN_SUCCESS on both sides and the server reads back the
+    expected effective uid set.  Design 2.2 stands; only the
+    inter-task transport remains to wire up.
+  - `FAIL: ...`, exit 1: the auth dance does not complete on this
+    Hurd; the design needs another pivot (likely a libports-based
+    /servers/geos-auth translator, much heavier).
+
+### Verdict on Debian GNU/Hurd 0.9 (2026-05-18)
+
+`OK auth euid=0 (neuids=1)`.  Design 2.2 viable.  Full receipt:
+`docs/runlogs/2026-05-18-hurd-mach-sidechannel-auth.md`.
+
+### Why these probes are Hurd-only
+
+Both probes use `<mach.h>` and `<hurd.h>`, which only exist on a
+Hurd glibc toolchain.  On a Linux host the build fails at the
+preprocessor and that is the intended behavior: no Linux
+equivalent makes sense.  Neither probe has a Makefile target in
+the Linux build of `pid1/`.
