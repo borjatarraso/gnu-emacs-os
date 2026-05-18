@@ -23,14 +23,16 @@
 ;; "Linux". that is correct behavior: the kernel IS Linux. GEOS is
 ;; the OS that runs ON Linux. only the user-facing CLI is rebranded.
 ;;
-;; on hurd the /proc/sys/kernel/* nodes do not exist: hurd's procfs
-;; translator only exposes /proc/<pid>/* and a handful of summary
-;; nodes.  the four reads below would silently return "" for every
-;; field, and the user would see a uname line of bare hostnames.  the
-;; port seam in core/port.el carries the branch: on hurd we synthesize
-;; the four UTS fields from Emacs built-ins (system-name,
-;; emacs-build-time, system-configuration) so eshell/uname still has
-;; something to print.  the branch lives at the data-source layer
+;; on hurd the /proc/sys/kernel/* nodes MAY exist (the hurd procfs
+;; translator exposes them, with hurd-native values like "GNU" for
+;; ostype and "0.9" for osrelease) or MAY return "" if the translator
+;; is not mounted or the node is stripped.  the port seam in
+;; core/port.el carries the branch: on hurd we try the same four
+;; /proc reads first, and fall back PER FIELD to Emacs built-ins
+;; (system-name, emacs-build-time, literal "GNU") for any node that
+;; returns "".  per-field, not all-or-nothing: a half-populated
+;; procfs gets stitched together with synthesized defaults for the
+;; missing columns.  the branch lives at the data-source layer
 ;; (geos--uname), the eshell entry point geos/uname is unchanged.
 
 (require 'panic)
@@ -68,52 +70,54 @@ which is what coreutils uname does too on a stripped /proc."
 
 (defun geos--uname-hurd ()
   "Hurd backend for `geos--uname'.
-The /proc/sys/kernel/* nodes do not exist on hurd's procfs translator,
-so we synthesize the four UTS fields from Emacs built-ins:
+Try the same /proc/sys/kernel/* paths Linux uses; the hurd procfs
+translator exposes them when mounted, with hurd-native values
+(ostype likely \"GNU\" or \"Hurd\", osrelease likely something like
+\"0.9\").  For any field that comes back \"\" (node absent, translator
+not mounted, stripped recovery boot) we substitute a synthesized
+default per-field:
 
-  :kernel  literal \"GNU\"  (mach + hurd servers, no kernel string
-                              file to read; matches what `uname -s'
-                              prints on a real hurd box)
-  :release placeholder \"0.9\".  hurd has no userland-readable
-                              equivalent of /proc/sys/kernel/osrelease;
-                              the side-branch port will substitute the
-                              real release once a Mach-RPC source lands.
-  :version `emacs-build-time' formatted as a coreutils-style date.
-                              correct enough for an audit of WHEN this
-                              userland was built; not the kernel's
-                              build date, but no userland source for
-                              that either.
-  :host    `(system-name)', which on a booted GEOS is what
+  :kernel  default \"GNU\"  (mach + hurd servers; matches `uname -s'
+                              on a real hurd box if the node is missing)
+  :release default \"unknown\".  i used to hard-code \"0.9\" here but
+                              that was guessing; if procfs cannot tell
+                              us, we say so.
+  :version default `GEOS-userland built <emacs-build-time>'.  not the
+                              kernel build date, but no userland
+                              source for that exists either; render
+                              what we DO know honestly.
+  :host    default `(system-name)', which on a booted GEOS is what
                               /etc/hostname applied via pid1's
                               sethostname(2) call.
 
-No shelling-out, no /proc reads.  the eshell uname rebrand prefers
-something over nothing here."
-  (list :kernel  "GNU"
-        ;; TODO(hurd): replace literal "0.9" once pid1 exports the
-        ;; gnumach release string through the port table.  the
-        ;; placeholder is grep-able so the deferred-work flag is
-        ;; visible to anyone scanning git blame for this column.
-        :release "0.9"
-        ;; prefix with "GEOS-userland built " so the column does not
-        ;; impersonate a kernel-build-date field on real-hurd output.
-        ;; uname -v on linux prints the kernel's own build date; we
-        ;; cannot read gnumach's build date today, so we render what
-        ;; we DO know (this userland's build time) honestly.
-        :version (concat "GEOS-userland built "
-                         (format-time-string "%a %b %e %H:%M:%S %Y"
-                                             (or emacs-build-time
-                                                 (current-time))))
-        :host    (or (system-name) "")))
+Per-field fallback, not all-or-nothing: a half-populated procfs
+gets stitched together with synthesized defaults for the missing
+columns.  no shelling-out, no special parsing beyond reading the
+node and trusting its trimmed contents."
+  (let ((proc-kernel  (geos--uts-field "/proc/sys/kernel/ostype"))
+        (proc-release (geos--uts-field "/proc/sys/kernel/osrelease"))
+        (proc-version (geos--uts-field "/proc/sys/kernel/version"))
+        (proc-host    (geos--uts-field "/proc/sys/kernel/hostname"))
+        (synth-version (concat "GEOS-userland built "
+                               (format-time-string
+                                "%a %b %e %H:%M:%S %Y"
+                                (or emacs-build-time (current-time))))))
+    (list :kernel  (if (string-empty-p proc-kernel)  "GNU"          proc-kernel)
+          :release (if (string-empty-p proc-release) "unknown"      proc-release)
+          :version (if (string-empty-p proc-version) synth-version  proc-version)
+          :host    (if (string-empty-p proc-host)
+                       (or (system-name) "")
+                     proc-host))))
 
 (defun geos--uname ()
   "Return the four UTS fields as a plist, dispatching on `geos-kernel'.
 Plist shape: (:kernel STRING :release STRING :version STRING :host
-STRING).  Linux arm reads /proc/sys/kernel/*; hurd arm synthesizes
-from Emacs built-ins.  the branch lives here (data-source layer),
-not in `eshell/uname' (render layer); that file builds output
-strings out of whatever this returns and never asks which kernel
-it is on."
+STRING).  Linux arm reads /proc/sys/kernel/*; hurd arm reads the
+same paths (hurd procfs translator) and falls back per-field to
+Emacs built-ins for any node that returns \"\".  the branch lives
+here (data-source layer), not in `eshell/uname' (render layer);
+that file builds output strings out of whatever this returns and
+never asks which kernel it is on."
   (cond
    ((geos-kernel-linux-p) (geos--uname-linux))
    ((geos-kernel-hurd-p)  (geos--uname-hurd))

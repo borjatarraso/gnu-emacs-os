@@ -190,8 +190,8 @@ The verification levels in the last column:
 | `geos-kernel` elisp defvar (reads `GEOS_KERNEL` env) | runs everywhere | YES on Linux |
 | GEOS_KERNEL env splice (`port->kernel_name` → execve envp → per-user emacs) | implemented (`a53304b`) | YES on Linux |
 | `core/network.el` Linux/Hurd dispatch | implemented | YES on Linux, NO on Hurd |
-| `core/state.el` Linux/Hurd dispatch | implemented | YES on Linux, NO on Hurd |
-| `core/uname.el` Linux/Hurd dispatch | implemented | YES on Linux, NO on Hurd |
+| `core/state.el` Linux/Hurd dispatch | implemented | YES on 2026-05-18 (v0.9.1; reads Hurd procfs /proc/mounts with writable-probe fallback) |
+| `core/uname.el` Linux/Hurd dispatch | implemented | YES on 2026-05-18 (v0.9.1; reads Hurd /proc/sys/kernel/* with per-field synthesis fallback) |
 | `buffers/disks.el` Hurd not-implemented banner | implemented | YES on Linux, NO on Hurd |
 | `install/disk.el` Hurd not-implemented banner | implemented | YES on Linux, NO on Hurd |
 | `services/journal-tail.el` Hurd no-op | implemented | YES on Linux, NO on Hurd |
