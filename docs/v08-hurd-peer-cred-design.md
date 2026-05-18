@@ -267,7 +267,8 @@ during the blocking recv.  Today's `geos-rpc--read-bytes` loop
 already does no redisplay, and the kernel-level `SO_RCVTIMEO`
 gives the same hard ceiling as the elisp-side deadline.  The
 recv becomes uninterruptible by `C-g`, but the single-thread
-reality is already a documented constraint (rule 5 of the rules file).
+reality is already a documented project constraint (hard rule 5,
+"the single-thread reality of Emacs is acknowledged").
 
 ### 3.4 What about the Linux path?
 
