@@ -68,43 +68,71 @@ which is what coreutils uname does too on a stripped /proc."
         :version (geos--uts-field "/proc/sys/kernel/version")
         :host    (geos--uts-field "/proc/sys/kernel/hostname")))
 
+(defun geos--parse-proc-version-hurd (raw)
+  "Parse Hurd's /proc/version into a (RELEASE . VERSION) cons.
+On Debian Hurd 0.9 the file is of the form
+  Linux version 2.6.1 (GNU 0.9 GNU-Mach ... x86_64)
+the leading \"Linux version 2.6.1\" is a Linux-compat preamble;
+the parenthesised payload is what we actually want.  RELEASE comes
+from the \"GNU <release>\" prefix inside the parens (\"0.9\" here);
+VERSION is the rest of the parenthesised payload (the Mach build
+string plus arch).  returns nil if RAW does not match the expected
+shape so callers fall back to the synthesized defaults."
+  (when (stringp raw)
+    (let ((trimmed (string-trim raw)))
+      (when (string-match
+             "(GNU \\([^ )]+\\) +\\(.*\\))[^()]*\\'"
+             trimmed)
+        (cons (match-string 1 trimmed)
+              (string-trim (match-string 2 trimmed)))))))
+
 (defun geos--uname-hurd ()
   "Hurd backend for `geos--uname'.
 Try the same /proc/sys/kernel/* paths Linux uses; the hurd procfs
-translator exposes them when mounted, with hurd-native values
-(ostype likely \"GNU\" or \"Hurd\", osrelease likely something like
-\"0.9\").  For any field that comes back \"\" (node absent, translator
-not mounted, stripped recovery boot) we substitute a synthesized
-default per-field:
+translator exposes them when configured with sysctl emulation,
+with hurd-native values (ostype likely \"GNU\" or \"Hurd\",
+osrelease likely something like \"0.9\").  Stock Debian Hurd 0.9
+does NOT publish /proc/sys/, so the per-field reads fall through
+to a secondary source: /proc/version, which is exposed unconditionally
+and carries a (GNU <release> GNU-Mach <version> ...) payload we can
+parse for :release and :version.  if even /proc/version is absent
+we substitute synthesized defaults per-field:
 
   :kernel  default \"GNU\"  (mach + hurd servers; matches `uname -s'
-                              on a real hurd box if the node is missing)
-  :release default \"unknown\".  i used to hard-code \"0.9\" here but
-                              that was guessing; if procfs cannot tell
-                              us, we say so.
-  :version default `GEOS-userland built <emacs-build-time>'.  not the
-                              kernel build date, but no userland
-                              source for that exists either; render
-                              what we DO know honestly.
+                              on a real hurd box)
+  :release default \"unknown\".  /proc/version parse gives \"0.9\"
+                              on debian hurd 0.9 when the sysctl
+                              tree is missing.
+  :version default `GEOS-userland built <emacs-build-time>'.
+                              /proc/version parse gives the GNU-Mach
+                              build string when the sysctl tree is
+                              missing; honest fallback otherwise.
   :host    default `(system-name)', which on a booted GEOS is what
                               /etc/hostname applied via pid1's
                               sethostname(2) call.
 
 Per-field fallback, not all-or-nothing: a half-populated procfs
-gets stitched together with synthesized defaults for the missing
-columns.  no shelling-out, no special parsing beyond reading the
-node and trusting its trimmed contents."
-  (let ((proc-kernel  (geos--uts-field "/proc/sys/kernel/ostype"))
-        (proc-release (geos--uts-field "/proc/sys/kernel/osrelease"))
-        (proc-version (geos--uts-field "/proc/sys/kernel/version"))
-        (proc-host    (geos--uts-field "/proc/sys/kernel/hostname"))
-        (synth-version (concat "GEOS-userland built "
-                               (format-time-string
-                                "%a %b %e %H:%M:%S %Y"
-                                (or emacs-build-time (current-time))))))
+gets stitched together with /proc/version data or synthesized
+defaults for the missing columns.  no shelling-out."
+  (let* ((proc-kernel  (geos--uts-field "/proc/sys/kernel/ostype"))
+         (proc-release (geos--uts-field "/proc/sys/kernel/osrelease"))
+         (proc-version (geos--uts-field "/proc/sys/kernel/version"))
+         (proc-host    (geos--uts-field "/proc/sys/kernel/hostname"))
+         (procv-raw    (geos--uts-field "/proc/version"))
+         (procv-pair   (geos--parse-proc-version-hurd procv-raw))
+         (procv-release (car-safe procv-pair))
+         (procv-version (cdr-safe procv-pair))
+         (synth-version (concat "GEOS-userland built "
+                                (format-time-string
+                                 "%a %b %e %H:%M:%S %Y"
+                                 (or emacs-build-time (current-time))))))
     (list :kernel  (if (string-empty-p proc-kernel)  "GNU"          proc-kernel)
-          :release (if (string-empty-p proc-release) "unknown"      proc-release)
-          :version (if (string-empty-p proc-version) synth-version  proc-version)
+          :release (cond ((not (string-empty-p proc-release)) proc-release)
+                         (procv-release procv-release)
+                         (t "unknown"))
+          :version (cond ((not (string-empty-p proc-version)) proc-version)
+                         (procv-version procv-version)
+                         (t synth-version))
           :host    (if (string-empty-p proc-host)
                        (or (system-name) "")
                      proc-host))))
