@@ -255,10 +255,18 @@ linux_suspend(const char *state)
 /* peer credentials over AF_UNIX; SO_PEERCRED returns the kernel's
  * recorded ucred snapshot from the peer's connect() instant.  the
  * full contract lives in port_layer.h; see there for Hurd semantics
- * and the supervisor's ENOSYS handling. */
+ * and the supervisor's ENOSYS handling.
+ *
+ * slice 5 of v0.8 design 2.2 grew this signature to take the 16-byte
+ * NONCE the supervisor wrote to the client on accept.  the Linux body
+ * ignores it; SO_PEERCRED is a server-side query that does not need
+ * any client cooperation.  (void)nonce keeps -Wunused-parameter
+ * -Werror quiet. */
 static int
-linux_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
+linux_get_peer_cred(int fd, const uint8_t nonce[16],
+                    uint32_t *uid_out, uint32_t *gid_out)
 {
+    (void)nonce;
     struct ucred peer;
     socklen_t plen = sizeof peer;
     if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &plen) < 0)
@@ -304,12 +312,7 @@ linux_publish_auth_port(void)
 }
 
 /* slice 3 of v0.8 design-2.2: drain pending messages on the auth port.
- * Linux has no auth port; the only thing to do here is return 0.  the
- * supervisor still calls port->auth_drain unconditionally at the top
- * of every Fpid1_rpc_poll tick; keeping the Linux body a single
- * `return 0' means that call is one indirect-branch + immediate-return,
- * cheap enough that branching on geos-kernel up in elisp would cost
- * more than the no-op itself. */
+ * Linux has no auth port; no-op. */
 static int
 linux_auth_drain(void)
 {
