@@ -119,11 +119,26 @@ rollback.
     emacs-exwm / dhcpcd / alsa / install wizard, console-only)
     and `iso-build/hurd-smoke-test.sh` (thin mirror of
     `smoke-test.sh`, gates on `geos: emacs userland up`).
-  - boot to multi-user on Hurd: not yet. Blocked on a Hurd cross-
-    toolchain or a Hurd guix-shell to even build the binary; not
-    available on Linux dev hosts via `guix build hurd-headers`.
+  - boot to multi-user on Hurd: not yet. Single-user PID-1 boot
+    plus emacs spawn plus host_reboot RPC all verified on real
+    Debian GNU/Hurd 0.9 on 2026-05-18 (see runlogs).  Multi-user
+    is blocked on `port->get_peer_cred`: Hurd's pflocal has no
+    `SO_PEERCRED` analogue, so the auth-port handshake that
+    would let the supervisor identify a connecting client is
+    still ENOSYS on the Hurd backend; v0.8 design item.  The
+    Hurd cross-toolchain question is closed: the build runs
+    natively on the Hurd VM (`make PORT=hurd` against Debian
+    GNU/Hurd 0.9's gcc + libhurd-dev).
   - CI gate: host-side text checks only, see above. KVM-gated
     boot smoke is v0.8.
+  - service supervision after host_reboot: pid1 only supervises
+    emacs.  Debian's sysvinit-spawned services (sshd, syslogd)
+    do NOT come back after a `(pid1-reboot)` because /sbin/init
+    is now emacs-init, not sysvinit.  v0.8 design item: a
+    GEOS-side service supervisor on the Hurd side that reads
+    /etc/geos/services.d/*.scm the way the Linux side will
+    once `core/supervise.el` learns to read disk-backed service
+    definitions.
 
 For the spike's design notes see `docs/v04-item11-hurd-spike.md`.
 For the boot recipe (what a Hurd-VM operator runs to verify
@@ -150,7 +165,7 @@ The verification levels in the last column:
 | Surface | Code status | Verified on Hurd? |
 |---|---|---|
 | `port->kernel_name` | both backends populated | n/a, identity slot |
-| `port->mount` (Hurd: `fshelp_start_translator` + `file_set_translator`) | rewritten 2026-05-17 (hurd branch `e3fd411`) to fork the translator via libfshelp before binding it; the prior body passed `MACH_PORT_NULL` as the active port and was a silent no-op | YES on 2026-05-17 (`/hurd/tmpfs 256M` round-trip: showtrans, df, write, settrans -g) |
+| `port->mount` (Hurd: `fshelp_start_translator` + `file_set_translator`) | rewritten 2026-05-17 (hurd branch `e3fd411`) to fork the translator via libfshelp before binding it; the prior body passed `MACH_PORT_NULL` as the active port and was a silent no-op. argv assembly fixed 2026-05-18 (hurd branch `3b77e06`): linux-style `-o mode=0755` opts were being forwarded to `/hurd/tmpfs` as positional words, which the translator rejected with "too many arguments"; opts are now dropped on the floor when `type == "tmpfs"` because the Hurd translator takes only a numeric size | YES on 2026-05-17 (`/hurd/tmpfs 256M` round-trip: showtrans, df, write, settrans -g); argv-fix path verified by the PID-1 boot transcript on 2026-05-18 where the pre-fix run logged "tmpfs: too many arguments" |
 | `port->set_hostname` (Hurd: POSIX) | written | YES on 2026-05-17 (`pid1-set-hostname "geos-hurd"` returned `t`, hostname changed) |
 | `port->bring_up_lo` (Hurd: pfinet SIOCSIFFLAGS) | written | YES on 2026-05-17 (lo came up UP/LOOPBACK/RUNNING) |
 | `port->set_address` (Hurd: pfinet SIOCSIFADDR+) | normalizes bare ifnames (hurd branch `b031db5`); `"eth0"` -> `"/dev/eth0"` before the ioctl, `"lo"` passes through | YES on 2026-05-17 (`pid1-set-address "eth0" "10.0.2.15" 24` returned `t` after the normalization fix; bare `"eth0"` had returned ENODEV before) |
@@ -276,3 +291,49 @@ gnumach rejects for `host_reboot`; the fix uses
 `get_privileged_ports(&host_priv, NULL)` from `<hurd.h>` to
 fetch the proc-server-cached privileged port.  Live on the hurd
 branch as `72f86f6`.
+
+## 2026-05-18 bootstrap-order fix round
+
+The first-boot transcript surfaced three issues on the pid1 /
+Hurd-bootstrap seam: read-only root at init time, tmpfs argv
+shape, and the absent-default-pager line.  All three landed
+the same day:
+
+  - **tmpfs argv** (hurd branch `3b77e06`).  `/hurd/tmpfs`
+    treats positional words past its size argument as additional
+    sizes and dies with "too many arguments" the moment we
+    forward Linux's `-o mode=0755` opts.  Fix in `hurd_mount`:
+    when `type == "tmpfs"`, drop opts on the floor entirely.
+    Other types still forward opts unchanged.
+  - **mkdir EROFS noise** (main `031d933`).  On a read-only
+    rootfs, `mkdir` on a directory that already exists returns
+    EROFS, NOT EEXIST, so the existing EEXIST guard never fires
+    and the boot log fills with one line per standard
+    directory.  Fix in `do_mount` and `mount_var`: `access(F_OK)`
+    pre-check skips `mkdir` entirely when the directory exists.
+    Behavior on Linux is unchanged (the access path is fast).
+  - **sethostname EROFS** (main `b5e00e2`).  glibc-hurd's
+    `sethostname` wrapper persists to `/etc/hostname` after the
+    proc-server RPC, hitting EROFS against the read-only root
+    at init time.  The C side now stays a single
+    log-and-continue; `core/hostname.el`'s `hostname-apply`
+    already runs at supervisor load time and re-calls
+    `pid1-set-hostname` through the same `port->set_hostname`
+    slot, so the proc-server picks up the right name once the
+    rootfs is remounted rw.
+
+The "/hurd/tmpfs: No default pager (memory manager) is running
+/ Started it" line that scrolled past during the first boot
+turned out to be self-healing: gnumach's `/hurd/proxy-defpager`
+starts on demand, and the next translator request succeeds.
+No code change needed; left as an informational log line.
+
+Verification of the post-fix state on a fresh Hurd boot is the
+next runlog (`docs/runlogs/2026-05-1X-hurd-pid1-bootstrap-
+post-fix.md`).  Expected delta against
+`2026-05-18-hurd-pid1-boot-result.md`: the "mkdir ... failed:
+Read-only file system" lines disappear; the "tmpfs: too many
+arguments" line disappears; the "sethostname failed: Read-only
+file system" line still appears once at C-level, then a second
+attempt from `hostname-apply` either succeeds silently or logs
+a structured `*panic*` frame.
