@@ -259,7 +259,10 @@ fsys_getroot (fsys_t fsys,
     if (auth_port_obj == NULL) {
         *file = MACH_PORT_NULL;
         *filePoly = MACH_MSG_TYPE_COPY_SEND;
-        *do_retry = FS_RETRY_NONE;
+        /* Debian Hurd 0.9 enum retry_type defines NORMAL/REAUTH/MAGICAL
+         * only; FS_RETRY_NONE does not exist.  the "no further dir_lookup
+         * needed" idiom in fs.defs is FS_RETRY_NORMAL with empty name. */
+        *do_retry = FS_RETRY_NORMAL;
         retry_name[0] = '\0';
         return EOPNOTSUPP;
     }
