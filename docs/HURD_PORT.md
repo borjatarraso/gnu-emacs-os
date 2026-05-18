@@ -119,18 +119,26 @@ rollback.
     emacs-exwm / dhcpcd / alsa / install wizard, console-only)
     and `iso-build/hurd-smoke-test.sh` (thin mirror of
     `smoke-test.sh`, gates on `geos: emacs userland up`).
-  - boot to multi-user on Hurd: not yet. Single-user PID-1 boot
-    plus emacs spawn plus host_reboot RPC all verified on real
-    Debian GNU/Hurd 0.9 on 2026-05-18 (see runlogs).  Multi-user
-    is blocked on `port->get_peer_cred`: Hurd's pflocal has no
-    `SO_PEERCRED` analogue, so the auth-port handshake that
-    would let the supervisor identify a connecting client is
-    still ENOSYS on the Hurd backend; v0.8 design item, the
-    rendezvous-port handshake is sketched in
+  - boot to multi-user on Hurd: code-complete, VM verification
+    pending.  Single-user PID-1 boot plus emacs spawn plus
+    host_reboot RPC all verified on real Debian GNU/Hurd 0.9
+    on 2026-05-18 (see runlogs).  The peer-cred dance that gates
+    multi-user is implemented on both sides as of v0.8:
+    `port->client_auth_handshake` on the client (Linux no-op,
+    Hurd rendezvous-port + `auth_user_authenticate`),
+    `port->get_peer_cred` on the server (Linux `SO_PEERCRED`,
+    Hurd cmsg + `auth_server_authenticate`).  rpc-client.el
+    bypasses `make-network-process` via five new AF_UNIX
+    Femacs bindings (`pid1-unix-connect/send/recv/recv-exactly/
+    close`) so pid1 owns the fd from `socket()` to `close()`.
+    The full design is in
     [v08-hurd-peer-cred-design.md](v08-hurd-peer-cred-design.md).
-    The Hurd cross-toolchain question is closed: the build runs
-    natively on the Hurd VM (`make PORT=hurd` against Debian
-    GNU/Hurd 0.9's gcc + libhurd-dev).
+    Remaining gate: a pflocal cmsg coverage probe
+    (`tests/hurd-pflocal-cmsg.c`) and a multi-user smoke test
+    on the Hurd VM.  The Hurd cross-toolchain question is
+    closed: the build runs natively on the Hurd VM
+    (`make PORT=hurd` against Debian GNU/Hurd 0.9's gcc +
+    libhurd-dev).
   - CI gate: host-side text checks only, see above. KVM-gated
     boot smoke is v0.8.
   - service supervision after host_reboot: pid1 only supervises
@@ -174,7 +182,9 @@ The verification levels in the last column:
 | `port->set_route_default` (Hurd: pfinet SIOCADDRT) | rewritten 2026-05-17 to use Hurd's `ifrtreq_t`; ifname normalization shared with `set_address` (hurd branch `b031db5`) | YES on 2026-05-17 (`pid1-set-route-default "10.0.2.2" "eth0"` returned `t`, NAT gateway stayed reachable) |
 | `port->reboot` (Hurd: `host_reboot` Mach RPC) | rewritten to use `get_privileged_ports` instead of `mach_host_self` (hurd branch `72f86f6`); the unprivileged host name port was rejected with KERN_INVALID_HOST | **YES on 2026-05-18** (`(pid1-reboot)` from emacs --batch dropped the SSH session and GRUB came back; emacs respawned on the fresh boot) |
 | `port->suspend` (Hurd: ENOSYS forever) | written | n/a, design |
-| `port->get_peer_cred` (Hurd: ENOSYS, supervisor RPC poll soft-fails) | written; surrounding rpc-poll tolerates `SO_RCVTIMEO`/`SO_SNDTIMEO` returning ENOPROTOOPT on Hurd's pflocal (`ffe6150` on main, `e4f72de` on hurd) | YES on 2026-05-17 (AF_UNIX client connect + `pid1-rpc-poll` returned `nil`, stderr logged "peer cred unsupported on this kernel" once; second poll returned `nil` without re-logging, confirming the `warned_enosys` gate) |
+| `port->get_peer_cred` (Hurd: cmsg + `auth_server_authenticate`) | v0.8 body shipped on hurd branch (`81f3add`); reads the SCM_RIGHTS cmsg attached by the client, extracts the rendezvous port, calls `auth_server_authenticate(getauth(), rendez, ...)` and returns the euid/egid; deallocates rendez and the four uid/gid arrays on every exit | ENOSYS path: YES on 2026-05-17.  v0.8 dance: not yet, pending the pflocal cmsg probe and a multi-user smoke on the VM |
+| `port->client_auth_handshake` (Hurd: rendezvous + `auth_user_authenticate`) | v0.8 body shipped on hurd branch (`d9645a3`); allocates a fresh Mach receive port, builds a send right, `sendmsg`s a 1-byte placeholder + SCM_RIGHTS cmsg carrying the port, calls `auth_user_authenticate(getauth(), rendez, ...)`; every exit branch deallocates rendez | Linux no-op: YES on Linux (Fpid1_client_auth_handshake binding lives on main `c5a7ed4`, rpc-client.el calls it per connection at `5201055`).  Hurd dance: not yet, pending VM smoke |
+| `pid1-unix-*` AF_UNIX bindings (own the rpc-client fd) | five Femacs bindings on main (`c5a7ed4`): `pid1-unix-connect/send/recv/recv-exactly/close`.  geos-rpc rewritten on top (`5201055`) so pid1 owns the fd from `socket()` through `close()`; the Hurd peer-cred cmsg now travels on a fd this process controls | YES on Linux (rpc-client.el rewrite passes byte-compile clean; freeze-tests for the rpc verbs shadow `geos-rpc` via cl-letf and do not exercise the wire) |
 | `geos-kernel` elisp defvar (reads `GEOS_KERNEL` env) | runs everywhere | YES on Linux |
 | GEOS_KERNEL env splice (`port->kernel_name` → execve envp → per-user emacs) | implemented (`a53304b`) | YES on Linux |
 | `core/network.el` Linux/Hurd dispatch | implemented | YES on Linux, NO on Hurd |
