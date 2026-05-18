@@ -190,6 +190,23 @@ current candidates are:
   - `kmsg-tail` RPC verb to lift `/dev/kmsg` user-side without
     touching the existing `journal-tail` shape.
   - Real install media on a non-virtualized x86_64 laptop.
-  - Hurd port: boot to multi-user on the side branch.
+  - Hurd port progress (single-user PID-1 boot, emacs spawn,
+    and `host_reboot` Mach RPC all landed on the side branch
+    on 2026-05-18; see runlogs and `HURD_PORT.md`).  Next gates
+    toward multi-user on Hurd:
+      * `port->get_peer_cred` Mach auth-port handshake (replace
+        the current ENOSYS stub; pflocal has no SO_PEERCRED so
+        the supervisor needs `auth_server_authenticate` against
+        a rendezvous port the client transmits over the AF_UNIX
+        RPC channel).
+      * GEOS-side service supervisor that survives `host_reboot`
+        (pid1 today only supervises emacs; Debian's sysvinit
+        services do not come back because /sbin/init is now
+        emacs-init, not sysvinit).
+      * Second PID-1 boot runlog after the 2026-05-18 bootstrap-
+        order fix round (tmpfs argv `3b77e06`, mkdir EROFS
+        access-gate `031d933`, sethostname EROFS rationale
+        `b5e00e2`) to confirm the EROFS noise and "too many
+        arguments" lines are gone from the transcript.
   - Bluetooth, Wayland, microphone capture, and webcam stay
     punted; the reasons listed above still apply.
