@@ -519,6 +519,75 @@ each a VM-verify cycle.  Estimated effort: 2-3 sessions for
 slices 1-3, then a longer session for slices 4-5 since they
 share a debugging surface.
 
+#### 3.5.7 Slice 2 transport finding and slice 3 pivot (added 2026-05-18)
+
+Slice 2 landed at hurd branch `d6716cc` and the standalone
+verification harness `tests/hurd-publish-auth-port.c` does
+allocate a fresh receive port, insert a send right, create the
+empty `/servers/geos-auth` file node, and call
+`file_set_translator(passive_flags=0, active_flags=FS_TRANS_SET
+| FS_TRANS_FORCE, 0, NULL, 0, recv, MACH_MSG_TYPE_COPY_SEND)`
+with `KERN_SUCCESS`.  Idempotency works (second call returns
+`-1/EBUSY`).  Receipt: `docs/runlogs/2026-05-18-hurd-publish-
+auth-port.md`.
+
+The gotcha: a subsequent `file_name_lookup("/servers/geos-auth",
+0, 0)` (and even `O_NOTRANS`) returns the bare file-node port,
+not a send right routed through our active translator.  Both
+lookups yield identical port names, which proves the active
+translator is silently bypassed by the lookup path.  The cause is
+not a bug in `file_set_translator`; it is the Hurd model.  A
+translator is a *server process* that owns a port and answers the
+`fsys` protocol; `file_set_translator` records that a translator
+exists, but lookup only routes to it if the kernel can talk to a
+process at the other end of the recorded port.  We installed a
+bare receive port with no demuxer behind it, so libdiskfs falls
+through to returning the file node directly.
+
+This invalidates the slice 3 plan as originally written.  The
+"per-tick mach_msg drain" cannot be a drain on the receive port
+slice 2 created; the port is unreachable from
+`file_name_lookup`-using clients.
+
+**Slice 3 pivot**: implement a minimal libports-based fsys
+server.  This is the canonical Hurd publication mechanism; every
+translator under `/hurd/` (auth, proc, exec, pflocal, pfinet)
+does this.  Concrete shape:
+
+  - `hurd_publish_auth_port` allocates a `ports_bucket_t`, creates
+    a port class for the auth receive right, and creates a single
+    port object in that bucket.  Drop the bare
+    `mach_port_allocate` + `file_set_translator` pair: libports
+    owns the receive right now.
+  - Bind the translator at `/servers/geos-auth` via the same
+    `file_set_translator` call but pass the libports-owned send
+    right as the active port.  libdiskfs will route
+    `file_name_lookup` traffic to this port because libports keeps
+    a demuxer running.
+  - Add a `Fpid1_rpc_poll` hook that calls
+    `ports_manage_port_operations_one_thread` with a non-blocking
+    receive timeout (or, since the supervisor is single-threaded,
+    a single `mach_msg(MACH_RCV_TIMEOUT=0)` followed by manual
+    dispatch into the libports demuxer).  Two messages to drain
+    per tick: `fsys_getroot` from libdiskfs (return the auth send
+    right) and our own `geos_auth_submit_nonce` (read the 16-byte
+    nonce + rendezvous port from the client).
+  - Per-connection nonce table is unchanged from §3.5.2; only the
+    delivery path moves from "bare receive port" to "libports
+    bucket".
+
+The rejected alternative was wrapping `settrans -aP /servers/
+geos-auth /hurd/geos-auth-server` from the supervisor.  That
+would shell out (forbidden by hard rule 1, no shell except
+eshell) and would also require a separate
+`/hurd/geos-auth-server` binary, which defeats the "supervisor
+is the auth server" simplicity that 2.2 was chosen for in the
+first place.
+
+Link deps on Hurd grow by one: `-lports` after `-lhurduser
+-lhurd -lmach`.  Update `pid1/Makefile` and the pid1 owner-doc
+when slice 3 lands.
+
 ## 4. Failure modes and defence in depth
 
   - Client sends the prefix port but the port is not a valid
