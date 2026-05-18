@@ -65,6 +65,7 @@
  * preprocess time with "No such file or directory" against the first
  * one of these, which is the loud-failure we want. */
 #include <hurd.h>
+#include <hurd/auth.h>
 #include <hurd/fshelp.h>
 #include <hurd/fsys.h>
 #include <hurd/process.h>
@@ -788,27 +789,87 @@ hurd_suspend(const char *state)
     return -1;
 }
 
-/* peer credentials over AF_UNIX.  Hurd has no SO_PEERCRED: pflocal
- * (the AF_UNIX/AF_LOCAL translator) does not implement a getsockopt
- * verb that exposes the connecting task's uid/gid.  the native Hurd
- * idiom is "the client passes an auth port via mach_msg and the
- * server interrogates it through auth_user_authenticate"; that is a
- * separate handshake the supervisor RPC channel does not perform
- * yet.  until it does, this stub returns ENOSYS so the supervisor
- * side (Fpid1_rpc_poll) closes the connection and returns nil to
- * the 200ms poll timer; that path is what keeps the poller alive on
- * a kernel that cannot satisfy the call.  the full contract lives
- * in port_layer.h; see there for the supervisor-side behaviour.
- *
- * (void) casts on the unused parameters keep -Wunused-parameter
- * -Werror clean, same shape as hurd_suspend above. */
+/* peer credentials over AF_UNIX, server side of the v0.8 handshake.
+ * design at docs/v08-hurd-peer-cred-design.md section 3.2: client
+ * sends a 1-byte placeholder with the rendezvous send right attached
+ * as SCM_RIGHTS cmsg; we recv that, hand the rendezvous to the auth
+ * server, and extract the client's effective uid/gid.  empty cred
+ * set, missing cmsg, or auth rejection all map to EACCES; auth
+ * server unreachable maps to EAGAIN so the poller can retry. */
 static int
 hurd_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
 {
-    (void)fd;
-    (void)uid_out;
-    (void)gid_out;
-    errno = ENOSYS;
+    char placeholder = 0;
+    struct iovec iov = { .iov_base = &placeholder, .iov_len = 1 };
+    char cbuf[CMSG_SPACE(sizeof(mach_port_t))];
+    memset(cbuf, 0, sizeof cbuf);
+    struct msghdr msg;
+    memset(&msg, 0, sizeof msg);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cbuf;
+    msg.msg_controllen = sizeof cbuf;
+
+    ssize_t got = recvmsg(fd, &msg, 0);
+    if (got < 0) return -1;  /* errno set by recvmsg */
+
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+    if (!cm) { errno = EACCES; return -1; }
+    if (cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS ||
+        cm->cmsg_len != CMSG_LEN(sizeof(mach_port_t))) {
+        errno = EACCES; return -1;
+    }
+    /* exactly one port: a second cmsg or a trailing port would mean a
+     * malformed client we do not want to trust. */
+    if (CMSG_NXTHDR(&msg, cm) != NULL) { errno = EACCES; return -1; }
+
+    mach_port_t rendez = MACH_PORT_NULL;
+    memcpy(&rendez, CMSG_DATA(cm), sizeof rendez);
+    if (rendez == MACH_PORT_NULL) { errno = EACCES; return -1; }
+
+    uid_t *euid_buf = NULL, *auid_buf = NULL;
+    gid_t *egid_buf = NULL, *agid_buf = NULL;
+    mach_msg_type_number_t n_euid = 0, n_auid = 0, n_egid = 0, n_agid = 0;
+
+    error_t rc = auth_server_authenticate(getauth(),
+                                          rendez, MACH_MSG_TYPE_COPY_SEND,
+                                          &euid_buf, &n_euid,
+                                          &auid_buf, &n_auid,
+                                          &egid_buf, &n_egid,
+                                          &agid_buf, &n_agid);
+    /* the rendezvous send right has done its job; drop our ref on every
+     * exit path regardless of the auth outcome. */
+    mach_port_deallocate(mach_task_self(), rendez);
+
+    if (rc == KERN_SUCCESS) {
+        int ret;
+        if (n_euid >= 1 && n_egid >= 1) {
+            *uid_out = (uint32_t)euid_buf[0];
+            *gid_out = (uint32_t)egid_buf[0];
+            ret = 0;
+        } else {
+            errno = EACCES;
+            ret = -1;
+        }
+        /* the four arrays are out-of-line vm allocations the stub made
+         * on our behalf; only present on KERN_SUCCESS, and the kernel
+         * will leak them into our address space if we forget. */
+        vm_deallocate(mach_task_self(), (vm_address_t)euid_buf,
+                      n_euid * sizeof(*euid_buf));
+        vm_deallocate(mach_task_self(), (vm_address_t)auid_buf,
+                      n_auid * sizeof(*auid_buf));
+        vm_deallocate(mach_task_self(), (vm_address_t)egid_buf,
+                      n_egid * sizeof(*egid_buf));
+        vm_deallocate(mach_task_self(), (vm_address_t)agid_buf,
+                      n_agid * sizeof(*agid_buf));
+        return ret;
+    }
+
+    if (rc == MACH_SEND_INVALID_DEST) {
+        errno = EAGAIN;
+        return -1;
+    }
+    errno = EACCES;
     return -1;
 }
 
