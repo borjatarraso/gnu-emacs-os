@@ -812,19 +812,64 @@ hurd_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
     return -1;
 }
 
+/* client-side auth handshake.  the Hurd peer-cred model is
+ * bidirectional: pflocal does not expose a SO_PEERCRED-equivalent, so
+ * the client and the supervisor have to co-operate against the gnumach
+ * auth server before the supervisor knows who the client is.  the
+ * client side of that dance lives here, and the full design is at
+ * docs/v08-hurd-peer-cred-design.md (sections 3.2 and 3.3).
+ *
+ * the real body, due in v0.8 step 4 of the implementation order, will
+ * do three things on every connection:
+ *
+ *   1. allocate a fresh rendezvous Mach port (mach_port_allocate with
+ *      MACH_PORT_RIGHT_RECEIVE, then extract a send right).  this port
+ *      is the shared secret that ties this client to this server
+ *      handshake; only the two ends will ever hold a send right to it,
+ *      so neither side can be spoofed.
+ *   2. sendmsg(fd, ...) a 1-byte placeholder payload with the
+ *      rendezvous send right attached as ancillary data via pflocal's
+ *      SCM_PORT-equivalent cmsg.  the supervisor's get_peer_cred body
+ *      consumes the placeholder byte and the cmsg before it reads the
+ *      4-byte length prefix that opens the existing wire format.
+ *   3. call auth_user_authenticate(getauth(), rendez,
+ *      MACH_MSG_TYPE_MOVE_SEND, ...) on the gnumach auth server to
+ *      register the client side of the dance.  the supervisor's
+ *      matching auth_server_authenticate call rendezvous-matches us and
+ *      gets back our effective uid/gid.
+ *
+ * every exit path will mach_port_deallocate(mach_task_self(), rendez)
+ * to keep PID-1-adjacent processes from leaking a port per RPC
+ * connection.  until the real body lands the slot returns ENOSYS so
+ * the supervisor-side rpc-poll path keeps soft-failing the same way
+ * it does for hurd_get_peer_cred today; the elisp dispatcher in
+ * rpc-client.el sees the ENOSYS and falls back to its no-auth-prefix
+ * code path (which the supervisor will also reject, just consistently).
+ *
+ * (void)fd cast keeps -Wunused-parameter -Werror clean, same shape as
+ * hurd_get_peer_cred above and hurd_suspend before that. */
+static int
+hurd_client_auth_handshake(int fd)
+{
+    (void)fd;
+    errno = ENOSYS;
+    return -1;
+}
+
 /* the table.  same shape as port_linux_impl, every slot populated.
  * the symmetry is what lets emacs-init.c pick one or the other at
  * compile time without touching the call sites. */
 const port_caps port_hurd_impl = {
-    .kernel_name       = "hurd",
-    .mount             = hurd_mount,
-    .set_hostname      = hurd_set_hostname,
-    .bring_up_lo       = hurd_bring_up_lo,
-    .set_address       = hurd_set_address,
-    .set_route_default = hurd_set_route_default,
-    .reboot            = hurd_reboot_cmd,
-    .suspend           = hurd_suspend,
-    .get_peer_cred     = hurd_get_peer_cred,
+    .kernel_name           = "hurd",
+    .mount                 = hurd_mount,
+    .set_hostname          = hurd_set_hostname,
+    .bring_up_lo           = hurd_bring_up_lo,
+    .set_address           = hurd_set_address,
+    .set_route_default     = hurd_set_route_default,
+    .reboot                = hurd_reboot_cmd,
+    .suspend               = hurd_suspend,
+    .get_peer_cred         = hurd_get_peer_cred,
+    .client_auth_handshake = hurd_client_auth_handshake,
 };
 
 /* the active pointer + the require-or-abort helper live in
