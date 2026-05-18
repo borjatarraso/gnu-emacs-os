@@ -1,15 +1,18 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Author: Borja Tarraso <borja.tarraso@member.fsf.org>
  */
-/* hurd-client-handshake.c, verification harness for slice 4 of v0.8
- * design 2.2.
+/* hurd-client-handshake.c, verification harness for slices 4 and 5
+ * of v0.8 design 2.2.
  *
  * the question this answers: with the slice 3 libports publish path in
- * place AND the slice 4 fsys_getroot MOVE_SEND fix, does a separate
- * task's client-side handshake (file_name_lookup + hand-rolled
+ * place, the slice 4 fsys_getroot MOVE_SEND fix, AND the slice 5 real
+ * auth_server_authenticate call in S_geos_auth_submit_nonce, does a
+ * separate task's client-side handshake (file_name_lookup + hand-rolled
  * submit_nonce mach_msg + auth_user_authenticate) complete cleanly and
- * deposit a matching {nonce, uid, gid} row in the supervisor's
- * pending_auth table?
+ * deposit a matching {nonce, REAL uid, REAL gid} row in the supervisor's
+ * pending_auth table?  ("real" meaning the row's uid/gid match the
+ * client task's effective uid/gid as seen by the auth server, NOT the
+ * slice-3 sentinel `(uint32_t)-1`.)
  *
  * slice 3's harness (tests/hurd-publish-auth-port.c) proved the
  * publish path routes fsys_getroot to the libports bucket.  but the
@@ -41,7 +44,9 @@
  *   child  OK auth_user_authenticate kr=0
  *   child  slice4_handshake_ok=1
  *   parent OK drained submit_nonce; pending_auth fingerprint changed
+ *   parent OK pending_auth row uid=<euid> gid=<egid> (real, not sentinel)
  *   parent slice4_handshake_ok=1
+ *   parent slice5_handshake_ok=1
  *   exit 0 */
 
 #define _GNU_SOURCE
@@ -146,7 +151,10 @@ pending_auth_alloc_slot(void)
 }
 
 /* server-side handler: records the nonce, replies via mig_reply_t.
- * mirrors port_hurd.c::S_geos_auth_submit_nonce. */
+ * mirrors port_hurd.c::S_geos_auth_submit_nonce.  slice 5 grew this
+ * to call the real auth_server_authenticate against the rendezvous
+ * and record euid[0]/egid[0] in the row; the harness's slice-5 PASS
+ * marker is that the row has REAL uid/gid, not the slice-3 sentinel. */
 static void
 S_geos_auth_submit_nonce(struct submit_nonce_request *inp,
                          mig_reply_t *outp)
@@ -172,16 +180,61 @@ S_geos_auth_submit_nonce(struct submit_nonce_request *inp,
         return;
     }
 
-    /* for the harness we mirror port_hurd.c slice 3 behaviour: record
-     * the nonce with sentinel uid/gid.  slice 5 will run the real
-     * auth_server_authenticate against rendez; for now the harness's
-     * proof is that the fingerprint changed (table mutated). */
-    (void)mach_port_deallocate(mach_task_self(), rendez);
+    auth_t self_auth = getauth();
+    if (self_auth == MACH_PORT_NULL) {
+        (void)mach_port_deallocate(mach_task_self(), rendez);
+        outp->RetCode = KERN_RESOURCE_SHORTAGE;
+        return;
+    }
+    uid_t *euid_buf = NULL, *auid_buf = NULL;
+    gid_t *egid_buf = NULL, *agid_buf = NULL;
+    mach_msg_type_number_t n_euid = 0, n_auid = 0, n_egid = 0, n_agid = 0;
+
+    kern_return_t kr = auth_server_authenticate(self_auth,
+                                                rendez,
+                                                MACH_MSG_TYPE_MOVE_SEND,
+                                                MACH_PORT_NULL,
+                                                MACH_MSG_TYPE_COPY_SEND,
+                                                &euid_buf, &n_euid,
+                                                &auid_buf, &n_auid,
+                                                &egid_buf, &n_egid,
+                                                &agid_buf, &n_agid);
+    mach_port_deallocate(mach_task_self(), self_auth);
+    if (kr != KERN_SUCCESS) {
+        (void)mach_port_deallocate(mach_task_self(), rendez);
+        outp->RetCode = kr;
+        return;
+    }
+    if (n_euid == 0 || n_egid == 0) {
+        if (euid_buf) vm_deallocate(mach_task_self(),
+                                    (vm_address_t)euid_buf,
+                                    n_euid * sizeof(uid_t));
+        if (auid_buf) vm_deallocate(mach_task_self(),
+                                    (vm_address_t)auid_buf,
+                                    n_auid * sizeof(uid_t));
+        if (egid_buf) vm_deallocate(mach_task_self(),
+                                    (vm_address_t)egid_buf,
+                                    n_egid * sizeof(gid_t));
+        if (agid_buf) vm_deallocate(mach_task_self(),
+                                    (vm_address_t)agid_buf,
+                                    n_agid * sizeof(gid_t));
+        outp->RetCode = EACCES;
+        return;
+    }
     int slot = pending_auth_alloc_slot();
     memcpy(pending_auth[slot].nonce, inp->nonce, GEOS_AUTH_NONCE_LEN);
-    pending_auth[slot].uid = (uint32_t)-1;
-    pending_auth[slot].gid = (uint32_t)-1;
+    pending_auth[slot].uid = (uint32_t)euid_buf[0];
+    pending_auth[slot].gid = (uint32_t)egid_buf[0];
     pending_auth[slot].expiry = time(NULL) + GEOS_AUTH_TTL_SECS;
+
+    vm_deallocate(mach_task_self(), (vm_address_t)euid_buf,
+                  n_euid * sizeof(uid_t));
+    vm_deallocate(mach_task_self(), (vm_address_t)auid_buf,
+                  n_auid * sizeof(uid_t));
+    vm_deallocate(mach_task_self(), (vm_address_t)egid_buf,
+                  n_egid * sizeof(gid_t));
+    vm_deallocate(mach_task_self(), (vm_address_t)agid_buf,
+                  n_agid * sizeof(gid_t));
 }
 
 /* S_fsys_getroot: the slice 4 phase 4a fix.  hands back a libports-
@@ -566,5 +619,42 @@ main(void)
             "drain saw %d fsys_getroot\n",
             fp_before, fp_after, fsys_getroot_calls);
     fprintf(stdout, "parent slice4_handshake_ok=1\n");
+
+    /* slice 5 PASS marker: the matching row must carry REAL uid/gid
+     * (not the slice-3 sentinel `(uint32_t)-1`).  scan the pending
+     * table for the row whose nonce matches what we sent; assert
+     * uid != -1 && gid != -1.  the child's effective uid/gid is
+     * whatever this harness inherits from the shell; we report it
+     * so the runlog can confirm the auth server returned the
+     * expected credential. */
+    int found = 0;
+    uint32_t row_uid = 0, row_gid = 0;
+    for (int i = 0; i < GEOS_AUTH_PENDING_MAX; i++) {
+        if (pending_auth[i].expiry == 0) continue;
+        if (memcmp(pending_auth[i].nonce, nonce, GEOS_AUTH_NONCE_LEN) != 0)
+            continue;
+        row_uid = pending_auth[i].uid;
+        row_gid = pending_auth[i].gid;
+        found = 1;
+        break;
+    }
+    if (!found) {
+        fprintf(stdout,
+                "FAIL: slice5: no pending_auth row matches nonce\n");
+        return 1;
+    }
+    if (row_uid == (uint32_t)-1 || row_gid == (uint32_t)-1) {
+        fprintf(stdout,
+                "FAIL: slice5: row carries slice-3 sentinel "
+                "(uid=%u gid=%u); auth_server_authenticate did not run\n",
+                row_uid, row_gid);
+        return 1;
+    }
+    fprintf(stdout,
+            "parent OK pending_auth row uid=%u gid=%u (real, not sentinel); "
+            "harness euid=%u egid=%u\n",
+            row_uid, row_gid,
+            (unsigned)geteuid(), (unsigned)getegid());
+    fprintf(stdout, "parent slice5_handshake_ok=1\n");
     return 0;
 }

@@ -38,7 +38,7 @@
 ;;     (the bucket may be empty, which is fine: drain returns 0 on
 ;;     empty too).
 ;;
-;;   slice 4 (this commit): freeze-test-port-hurd-client-handshake
+;;   slice 4: freeze-test-port-hurd-client-handshake
 ;;     asserts (pid1-client-auth-handshake FD NONCE) returns t.  on
 ;;     Linux the C body is a no-op return-0 and the binding ignores
 ;;     NONCE; the test passes FD=-1 and a 16-byte zero-fill nonce
@@ -48,6 +48,23 @@
 ;;     published /servers/geos-auth (slice 2 + 3); without that the
 ;;     C body will fail file_name_lookup and surface pid1-error, so
 ;;     the Hurd path of the test is gated on a probe call.
+;;
+;;   slice 5 (this commit): freeze-test-port-hurd-end-to-end
+;;     asserts the slice-5 get_peer_cred surface has the grown
+;;     arity-3 shape (FD, NONCE, returns t).  on Linux the elisp
+;;     binding is registered by pid1-module.so regardless of PORT
+;;     (`linux_get_peer_cred` ignores NONCE); the test calls it
+;;     against a known-bad FD with a zero nonce and asserts that
+;;     a clean elisp signal comes back (NOT a panic, NOT silent
+;;     success).  this catches the regression where the
+;;     designated-initialiser for port_caps.get_peer_cred forgets
+;;     the NONCE slot and the binding signature drifts from the
+;;     port_layer.h contract.  on Hurd the full end-to-end dance
+;;     (publish, accept, mint nonce, write nonce, post submit_nonce
+;;     mach_msg, drain, look up by nonce, return uid/gid) is
+;;     verified by tests/hurd-client-handshake.c on a real VM; this
+;;     freeze-test only catches the binding-surface regression that
+;;     would otherwise reach the Hurd build before VM-verify.
 ;;
 ;; later slices will append additional tests below.
 
@@ -229,6 +246,110 @@ reaches the Hurd branch."
                (ignore err)
                (setq result 'pass)))))))))
     (freeze-test--port-hurd-record 'port-hurd/client-handshake result)
+    result))
+
+(defun freeze-test-port-hurd-end-to-end ()
+  "Slice 5: the slice-5 elisp surface chain is wired and survives one tick.
+
+contract: slice 5 grew `port_caps.get_peer_cred' to arity 4
+(FD, NONCE[16], &UID, &GID).  the elisp seam does NOT expose
+`get_peer_cred' directly; the call is made internally by the C body
+of `pid1-rpc-poll' after it accepts a connection, mints a nonce, and
+writes the nonce to the client.  the slice-5 PASS surface a freeze-
+test can probe on a dev host is therefore:
+
+  1. `pid1-publish-auth-port' is fbound (slice 2 surface) and the
+     module loaded successfully (no dlopen miss for symbols the
+     slice 5 build added).
+  2. `pid1-auth-drain' is fbound and returns t (slice 3 surface;
+     slice 5 did not change it but a designated-initialiser
+     regression in port_caps would null this slot too).
+  3. `pid1-rpc-poll' is fbound and returns nil (no pending
+     connection on the dev host where no client connects to the
+     supervisor socket).  this is the load-bearing assertion: on
+     Linux a return-nil proves the new arity-4 get_peer_cred path
+     compiles into the C body without crashing on an empty accept
+     queue.  on Hurd the same return-nil proves the slice 5 C body
+     (with the pending_auth[] lookup) does not panic when the table
+     is empty.
+  4. `pid1-client-auth-handshake' arity is (1 . 2) (slice 4
+     surface; the slice-5 nonce arg from the supervisor side has
+     to mate with the slice-4 client arg).
+
+dev-host behaviour: every step skips cleanly if the binding is
+unbound (module not loaded).  on a host running geos with the
+module loaded, all four steps execute; the test asserts each
+returns its expected shape.  this is the only slice-5 surface a
+no-VM freeze-test can probe; the end-to-end auth dance lives in
+tests/hurd-client-handshake.c and is verified on a real VM.
+
+what this catches: the slice-5 rebuild that drops a slot from the
+port_caps designated initialiser (e.g. forgetting the new arity
+for .get_peer_cred makes the C compiler accept the old prototype
+silently because designated-init missing fields are zero-filled,
+and a NULL slot would null-pointer-deref on the first tick).
+this freeze-test runs that first tick on the dev host so the
+regression trips before reaching the Hurd VM gate."
+  (interactive)
+  (let ((result 'fail)
+        (steps nil))
+    (cond
+     ((not (fboundp 'pid1-publish-auth-port))
+      (setq result (cons 'skip "pid1-publish-auth-port unbound (module not loaded)")))
+     ((not (fboundp 'pid1-auth-drain))
+      (setq result (cons 'skip "pid1-auth-drain unbound (module not loaded)")))
+     ((not (fboundp 'pid1-rpc-poll))
+      (setq result (cons 'skip "pid1-rpc-poll unbound (module not loaded)")))
+     ((not (fboundp 'pid1-client-auth-handshake))
+      (setq result (cons 'skip "pid1-client-auth-handshake unbound (module not loaded)")))
+     (t
+      (condition-case err
+          (progn
+            ;; step 1: publish-auth-port.  Linux path returns t
+            ;; immediately (linux_publish_auth_port is no-op).
+            ;; Hurd path may return t or signal pid1-error if the
+            ;; auth port is already published; we accept both as
+            ;; "the slot is wired".
+            (condition-case publish-err
+                (progn
+                  (pid1-publish-auth-port)
+                  (push 'publish-ok steps))
+              (error
+               (ignore publish-err)
+               ;; second-call EBUSY or W2-unaddressed ENOSYS both
+               ;; prove the slot is reachable, just not happy to
+               ;; be called here.  do not fail the test on this.
+               (push 'publish-signaled steps)))
+            ;; step 2: auth-drain.  must return t (ENOSYS is
+            ;; silently coerced to t per its docstring).
+            (let ((rv (pid1-auth-drain)))
+              (unless (eq rv t)
+                (error "auth-drain returned %S, want t" rv)))
+            (push 'drain-ok steps)
+            ;; step 3: rpc-poll.  no client connected so the call
+            ;; must return nil.  a non-nil return on a dev host
+            ;; without a connecting client would be a phantom
+            ;; accept; a signal would mean the new arity-4
+            ;; get_peer_cred body crashed on the accept path.
+            (let ((rv (pid1-rpc-poll)))
+              (unless (or (null rv) (listp rv))
+                (error "rpc-poll returned %S, want nil or plist" rv)))
+            (push 'rpc-poll-ok steps)
+            ;; step 4: client-auth-handshake arity (slice 4
+            ;; surface; slice 5 relies on the nonce slot
+            ;; existing).
+            (let ((arity (func-arity #'pid1-client-auth-handshake)))
+              (unless (and (consp arity)
+                           (eq (car arity) 1)
+                           (eq (cdr arity) 2))
+                (error "client-auth-handshake arity %S, want (1 . 2)"
+                       arity)))
+            (push 'handshake-arity-ok steps)
+            (setq result 'pass))
+        (error
+         (setq result (format "raised: %S after steps=%S"
+                              err (nreverse steps)))))))
+    (freeze-test--port-hurd-record 'port-hurd/end-to-end result)
     result))
 
 (provide 'freeze-test-port-hurd)

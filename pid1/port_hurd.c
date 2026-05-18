@@ -831,100 +831,88 @@ struct submit_nonce_request {
     uint8_t           nonce[GEOS_AUTH_NONCE_LEN];
 };
 
-/* peer credentials over AF_UNIX, server side of the v0.8 handshake.
- * design at docs/v08-hurd-peer-cred-design.md section 3.2: client
- * sends a 1-byte placeholder with the rendezvous send right attached
- * as SCM_RIGHTS cmsg; we recv that, hand the rendezvous to the auth
- * server, and extract the client's effective uid/gid.  empty cred
- * set, missing cmsg, or auth rejection all map to EACCES; auth
- * server unreachable maps to EAGAIN so the poller can retry. */
+/* peer credentials over AF_UNIX, server side of the v0.8 design-2.2
+ * handshake (slice 5 rewrite).  design at
+ * docs/v08-hurd-peer-cred-design.md section 3.5.2.
+ *
+ * the old slice-3 body recv'd a SCM_RIGHTS cmsg off the AF_UNIX socket
+ * and called auth_server_authenticate inline; that path is retired
+ * (pflocal cmsg dead, see runlog 2026-05-18-hurd-pflocal-cmsg-fail.md).
+ * the slice-5 path consults the pending_auth[] table the per-tick
+ * drain has populated as submit_nonce messages arrive on /servers/
+ * geos-auth.  the auth_server_authenticate call moves into
+ * S_geos_auth_submit_nonce (the drain handler); this body is now a
+ * pure lookup keyed by NONCE.
+ *
+ * NONCE is the 16-byte rendezvous identifier the supervisor wrote to
+ * the client on accept and passed through Fpid1_rpc_poll into this
+ * call.  FD is retained for parity with the Linux signature but the
+ * pending_auth lookup does not need it; (void)fd keeps -Wunused-
+ * parameter quiet.
+ *
+ * retry: a submit_nonce message may not have arrived by the time
+ * Fpid1_rpc_poll calls this slot (the client posts the mach_msg
+ * between connect() and the first AF_UNIX send; the order between
+ * that mach_msg and our accept-on-AF_UNIX is undefined).  if the
+ * lookup misses, we sleep 200ms and retry up to 5 times (1s total
+ * worst case).  this stays under the existing 2s SO_RCVTIMEO that
+ * bounds every other read in Fpid1_rpc_poll.  exhausting the budget
+ * returns -1 with errno=ETIMEDOUT; the caller closes the connection.
+ *
+ * rows in pending_auth[] also expire on a 5s TTL (see
+ * pending_auth_gc), so an abandoned client handshake never wedges. */
 static int
-hurd_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
+hurd_get_peer_cred(int fd, const uint8_t nonce[16],
+                   uint32_t *uid_out, uint32_t *gid_out)
 {
-    char placeholder = 0;
-    struct iovec iov = { .iov_base = &placeholder, .iov_len = 1 };
-    char cbuf[CMSG_SPACE(sizeof(mach_port_t))];
-    memset(cbuf, 0, sizeof cbuf);
-    struct msghdr msg;
-    memset(&msg, 0, sizeof msg);
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cbuf;
-    msg.msg_controllen = sizeof cbuf;
-
-    ssize_t got = recvmsg(fd, &msg, 0);
-    if (got < 0) return -1;  /* errno set by recvmsg */
-
-    struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
-    if (!cm) { errno = EACCES; return -1; }
-    if (cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS ||
-        cm->cmsg_len != CMSG_LEN(sizeof(mach_port_t))) {
-        errno = EACCES; return -1;
-    }
-    /* exactly one port: a second cmsg or a trailing port would mean a
-     * malformed client we do not want to trust. */
-    if (CMSG_NXTHDR(&msg, cm) != NULL) { errno = EACCES; return -1; }
-
-    mach_port_t rendez = MACH_PORT_NULL;
-    memcpy(&rendez, CMSG_DATA(cm), sizeof rendez);
-    if (rendez == MACH_PORT_NULL) { errno = EACCES; return -1; }
-
-    uid_t *euid_buf = NULL, *auid_buf = NULL;
-    gid_t *egid_buf = NULL, *agid_buf = NULL;
-    mach_msg_type_number_t n_euid = 0, n_auid = 0, n_egid = 0, n_agid = 0;
-
-    /* the modern (gnumach-current) auth_server_authenticate signature
-     * takes 13 args: (handle, rendezvous, rendezvousPoly, newport,
-     * newportPoly, &euids, &n_euids, &auids, &n_auids, &egids, &n_egids,
-     * &agids, &n_agids).  newport is the auth server's reply send
-     * right; for a server-side peer-cred read we hand MACH_PORT_NULL
-     * because we are not registering a new identity, only resolving the
-     * client's existing one.  the slice-5 rewrite will move this body to
-     * read from pending_auth[] instead of calling auth_server_authenticate
-     * inline; the patched call here keeps the file compiling under
-     * Debian Hurd 0.9's libhurd headers, no behaviour change vs the
-     * pre-existing intent. */
-    error_t rc = auth_server_authenticate(getauth(),
-                                          rendez, MACH_MSG_TYPE_COPY_SEND,
-                                          MACH_PORT_NULL,
-                                          MACH_MSG_TYPE_COPY_SEND,
-                                          &euid_buf, &n_euid,
-                                          &auid_buf, &n_auid,
-                                          &egid_buf, &n_egid,
-                                          &agid_buf, &n_agid);
-    /* the rendezvous send right has done its job; drop our ref on every
-     * exit path regardless of the auth outcome. */
-    mach_port_deallocate(mach_task_self(), rendez);
-
-    if (rc == KERN_SUCCESS) {
-        int ret;
-        if (n_euid >= 1 && n_egid >= 1) {
-            *uid_out = (uint32_t)euid_buf[0];
-            *gid_out = (uint32_t)egid_buf[0];
-            ret = 0;
-        } else {
-            errno = EACCES;
-            ret = -1;
-        }
-        /* the four arrays are out-of-line vm allocations the stub made
-         * on our behalf; only present on KERN_SUCCESS, and the kernel
-         * will leak them into our address space if we forget. */
-        vm_deallocate(mach_task_self(), (vm_address_t)euid_buf,
-                      n_euid * sizeof(*euid_buf));
-        vm_deallocate(mach_task_self(), (vm_address_t)auid_buf,
-                      n_auid * sizeof(*auid_buf));
-        vm_deallocate(mach_task_self(), (vm_address_t)egid_buf,
-                      n_egid * sizeof(*egid_buf));
-        vm_deallocate(mach_task_self(), (vm_address_t)agid_buf,
-                      n_agid * sizeof(*agid_buf));
-        return ret;
-    }
-
-    if (rc == MACH_SEND_INVALID_DEST) {
-        errno = EAGAIN;
+    (void)fd;
+    if (nonce == NULL) { errno = EINVAL; return -1; }
+    if (auth_port_obj == NULL) {
+        /* publish_auth_port never ran; the supervisor would still
+         * have called us through the port-> dispatch, but without
+         * a live auth channel there is no way to populate
+         * pending_auth[].  surface ENOSYS so Fpid1_rpc_poll closes
+         * the connection without panicking the 200ms tick. */
+        errno = ENOSYS;
         return -1;
     }
-    errno = EACCES;
+
+    /* retry budget: 5 ticks of 200ms each.  the constant lives here
+     * rather than as a defined macro because the only consumer is this
+     * function; promoting it would invite callers to rely on the
+     * pacing, which is internal to the lookup. */
+    for (int attempt = 0; attempt < 5; attempt++) {
+        for (int i = 0; i < GEOS_AUTH_PENDING_MAX; i++) {
+            if (pending_auth[i].expiry == 0) continue;
+            if (memcmp(pending_auth[i].nonce, nonce,
+                       GEOS_AUTH_NONCE_LEN) != 0) continue;
+            /* row uid/gid are still the (uint32_t)-1 sentinel if the
+             * drain handler recorded the nonce but auth_server_
+             * authenticate has not run yet.  treat that as "match
+             * pending, retry"; the sentinel narrows the race window
+             * where submit_nonce arrived but the auth resolution has
+             * not completed.  the slice-5 drain handler writes the
+             * real uid/gid in the same critical section that inserts
+             * the row, so the sentinel state is short-lived. */
+            if (pending_auth[i].uid == (uint32_t)-1 &&
+                pending_auth[i].gid == (uint32_t)-1) {
+                break;  /* break inner loop, fall to sleep */
+            }
+            *uid_out = pending_auth[i].uid;
+            *gid_out = pending_auth[i].gid;
+            /* one-shot: drop the row.  re-handshake on the next
+             * connection mints a fresh nonce. */
+            memset(&pending_auth[i], 0, sizeof pending_auth[i]);
+            return 0;
+        }
+        /* miss.  sleep 200 ms then retry.  the supervisor's tick is
+         * also 200 ms, so this consumes at most 5 ticks of poll
+         * budget per connection; under typical load the drain ran
+         * before us and we never sleep at all. */
+        struct timespec ts = { .tv_sec = 0, .tv_nsec = 200 * 1000 * 1000 };
+        (void)nanosleep(&ts, NULL);
+    }
+    errno = ETIMEDOUT;
     return -1;
 }
 
@@ -1181,9 +1169,8 @@ static struct port_class  *auth_class  = NULL;
 static struct port_info   *auth_port_obj = NULL;
 
 /* pending-auth table.  populated by S_geos_auth_submit_nonce as it
- * extracts {uid, gid} via auth_server_authenticate; read by slice 5's
- * hurd_get_peer_cred rewrite (still on its old code-path today; slice
- * 5 rewrites it to consult this table by nonce).
+ * extracts {uid, gid} via auth_server_authenticate; read by
+ * hurd_get_peer_cred which keys on the 16-byte nonce.
  *
  * fixed-size array on purpose: PID 1 forbids malloc in hot paths and
  * the auth path is hot (every client connection).  16 concurrent
@@ -1478,24 +1465,104 @@ S_geos_auth_submit_nonce(struct submit_nonce_request *inp,
         return;
     }
 
-    /* slice 3 scope: prove the drain dispatches submit_nonce by
-     * recording the row WITHOUT calling auth_server_authenticate.
-     * the full 13-arg auth_server_authenticate dance (rendezvous +
-     * newport rendezvous-port protocol) lands in slice 4 once the
-     * client-side hurd_client_auth_handshake has a real body to
-     * mate with.  for slice 3 we record the nonce with sentinel
-     * uid/gid so the test harness can see the table mutate; the
-     * client never reads back through this row until slice 5.
+    /* slice 5: the real auth_server_authenticate dance.  the auth
+     * server pairs our call (server side, holding the rendezvous
+     * MOVE_SEND right that arrived in the message) with the client's
+     * concurrent auth_user_authenticate call (client side, holding
+     * the matching receive right).  on match, the auth server returns
+     * a fresh "newport" send right (which we never use; the AF_UNIX
+     * stream is the actual channel) plus the four out-array sets of
+     * uid/gid.  we record euid[0]/egid[0] into pending_auth so the
+     * supervisor's next hurd_get_peer_cred tick reads them back.
      *
-     * the rendezvous send right is dropped here because we do
-     * nothing with it in this slice; slice 4 will hand it to
-     * auth_server_authenticate per §3.5.2. */
-    (void)mach_port_deallocate(mach_task_self(), rendez);
+     * the 13-arg signature is libc's auth_server_authenticate from
+     * <hurd/auth.h>; the parameter order matches GNU Mach's
+     * generated auth_S.h server-routine call (rendezvous +
+     * disposition, newport-receive + disposition, then the four
+     * (buf,cnt) pairs in euid/auid/egid/agid order).  newport is
+     * MACH_PORT_NULL here because we don't want a new auth port back;
+     * passing NULL with MACH_MSG_TYPE_COPY_SEND tells the server we
+     * are uninterested in the returned send right.
+     *
+     * port lifecycle: auth_server_authenticate consumes the
+     * rendezvous send right (it has to: it does a
+     * mach_port_request_notification on it to detect a crashed
+     * client).  the four uid/gid arrays come back as out-of-line
+     * vm_allocate'd memory; we vm_deallocate them after copying the
+     * one byte we care about.  on failure paths before the call
+     * succeeds, we deallocate rendez ourselves; the buffers are
+     * untouched. */
+    auth_t self_auth = getauth();
+    if (self_auth == MACH_PORT_NULL) {
+        (void)mach_port_deallocate(mach_task_self(), rendez);
+        outp->RetCode = KERN_RESOURCE_SHORTAGE;
+        return;
+    }
+
+    uid_t  *euid_buf = NULL, *auid_buf = NULL;
+    gid_t  *egid_buf = NULL, *agid_buf = NULL;
+    mach_msg_type_number_t n_euid = 0, n_auid = 0, n_egid = 0, n_agid = 0;
+
+    kern_return_t kr = auth_server_authenticate(self_auth,
+                                                rendez,
+                                                MACH_MSG_TYPE_MOVE_SEND,
+                                                MACH_PORT_NULL,
+                                                MACH_MSG_TYPE_COPY_SEND,
+                                                &euid_buf, &n_euid,
+                                                &auid_buf, &n_auid,
+                                                &egid_buf, &n_egid,
+                                                &agid_buf, &n_agid);
+    (void)mach_port_deallocate(mach_task_self(), self_auth);
+
+    if (kr != KERN_SUCCESS) {
+        /* auth server failed to match the rendezvous.  drop the
+         * rendez send right (the server did not take it) and bail.
+         * the client's next handshake attempt is independent. */
+        (void)mach_port_deallocate(mach_task_self(), rendez);
+        outp->RetCode = kr;
+        return;
+    }
+
+    /* empty effective-set means "nobody"; design 3.2 step 7 says
+     * surface EACCES.  no row gets recorded; the client times out
+     * on hurd_get_peer_cred's 5x200ms retry budget. */
+    if (n_euid == 0 || n_egid == 0) {
+        if (euid_buf) vm_deallocate(mach_task_self(),
+                                    (vm_address_t)euid_buf,
+                                    n_euid * sizeof(uid_t));
+        if (auid_buf) vm_deallocate(mach_task_self(),
+                                    (vm_address_t)auid_buf,
+                                    n_auid * sizeof(uid_t));
+        if (egid_buf) vm_deallocate(mach_task_self(),
+                                    (vm_address_t)egid_buf,
+                                    n_egid * sizeof(gid_t));
+        if (agid_buf) vm_deallocate(mach_task_self(),
+                                    (vm_address_t)agid_buf,
+                                    n_agid * sizeof(gid_t));
+        outp->RetCode = EACCES;
+        return;
+    }
+
+    /* record the row.  uid[0]/gid[0] are the effective set's first
+     * entries, which Hurd userland convention treats as the
+     * primary effective uid/gid. */
     int slot = pending_auth_alloc_slot();
     memcpy(pending_auth[slot].nonce, inp->nonce, GEOS_AUTH_NONCE_LEN);
-    pending_auth[slot].uid = (uint32_t)-1;   /* sentinel: slice 4 fills */
-    pending_auth[slot].gid = (uint32_t)-1;
+    pending_auth[slot].uid = (uint32_t)euid_buf[0];
+    pending_auth[slot].gid = (uint32_t)egid_buf[0];
     pending_auth[slot].expiry = time(NULL) + GEOS_AUTH_TTL_SECS;
+
+    /* clean up the four out-of-line buffers.  vm_deallocate is a
+     * Mach RPC against our own task; cheap (sub-microsecond) but
+     * required to avoid leaking address space on every handshake. */
+    vm_deallocate(mach_task_self(), (vm_address_t)euid_buf,
+                  n_euid * sizeof(uid_t));
+    vm_deallocate(mach_task_self(), (vm_address_t)auid_buf,
+                  n_auid * sizeof(uid_t));
+    vm_deallocate(mach_task_self(), (vm_address_t)egid_buf,
+                  n_egid * sizeof(gid_t));
+    vm_deallocate(mach_task_self(), (vm_address_t)agid_buf,
+                  n_agid * sizeof(gid_t));
 }
 
 /* our top-level demuxer: chained fsys_server_routine (for fsys_getroot
