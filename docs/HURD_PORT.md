@@ -125,8 +125,10 @@ rollback.
     is blocked on `port->get_peer_cred`: Hurd's pflocal has no
     `SO_PEERCRED` analogue, so the auth-port handshake that
     would let the supervisor identify a connecting client is
-    still ENOSYS on the Hurd backend; v0.8 design item.  The
-    Hurd cross-toolchain question is closed: the build runs
+    still ENOSYS on the Hurd backend; v0.8 design item, the
+    rendezvous-port handshake is sketched in
+    [v08-hurd-peer-cred-design.md](v08-hurd-peer-cred-design.md).
+    The Hurd cross-toolchain question is closed: the build runs
     natively on the Hurd VM (`make PORT=hurd` against Debian
     GNU/Hurd 0.9's gcc + libhurd-dev).
   - CI gate: host-side text checks only, see above. KVM-gated

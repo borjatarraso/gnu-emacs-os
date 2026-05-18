@@ -198,7 +198,8 @@ current candidates are:
         the current ENOSYS stub; pflocal has no SO_PEERCRED so
         the supervisor needs `auth_server_authenticate` against
         a rendezvous port the client transmits over the AF_UNIX
-        RPC channel).
+        RPC channel).  Design: see
+        [v08-hurd-peer-cred-design.md](v08-hurd-peer-cred-design.md).
       * GEOS-side service supervisor that survives `host_reboot`
         (pid1 today only supervises emacs; Debian's sysvinit
         services do not come back because /sbin/init is now
