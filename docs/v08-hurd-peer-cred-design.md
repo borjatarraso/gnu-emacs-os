@@ -238,26 +238,36 @@ audit-pass can read it as one block:
   - **Femacs binding:** `pid1-client-auth-handshake fd -> t`.
     Trivial wrapper that calls `port->client_auth_handshake(fd)`
     and signals `pid1-error` with errno on failure.
-  - **rpc-client.el dispatch:** the existing
-    `make-network-process` path stays for the byte transport.
-    Right after connect, before the first
-    `process-send-string`, the elisp side calls
-    `(pid1-client-auth-handshake (pid1-process-fd proc))` — a
-    new helper that exposes emacs's underlying fd for the
-    network process.  On Linux this is a single port_layer
-    no-op call; on Hurd this triggers the full rendezvous
-    dance and the supervisor's matching `auth_server_
-    authenticate` consumes the 1-byte placeholder before
-    reading the 4-byte length prefix.  The wire format
-    visible to userland code is unchanged on both kernels;
-    only the kernel-mediated cmsg attachment is new.
+  - **rpc-client.el dispatch:** an earlier draft of this
+    section assumed a `pid1-process-fd` helper could pull the
+    fd out of an emacs network-process.  It cannot: the public
+    emacs module API (`emacs-module.h`) treats elisp values as
+    opaque `emacs_value`, and `XPROCESS(proc)->infd` is not
+    module-reachable.  /proc/self/fd walking is fragile on
+    Linux and unavailable on GNU Mach.  Re-opening a second
+    socket fails on Hurd because the auth server pairs
+    credentials with the connection (a different `connect(2)`
+    is a different identity from the auth server's view).
+    Decision: bypass `make-network-process` entirely.  Add five
+    Femacs bindings (`pid1-unix-connect path -> fd`,
+    `pid1-unix-send fd bytes -> n`, `pid1-unix-recv fd nmax
+    timeout-ms -> bytes`, `pid1-unix-recv-exactly` thin
+    wrapper, `pid1-unix-close fd -> t`) that wrap
+    `socket(AF_UNIX, SOCK_STREAM)` / `connect` / `send` /
+    `recv` / `close`.  Rewrite `geos-rpc` to use them; the
+    handshake then runs on a fd pid1 owns from `socket()` to
+    `close()`.  Net code reduction in `rpc-client.el` (the
+    `recv-buf` machinery, `accept-process-output` loop, and
+    sentinel all go away); blast radius is contained because
+    `geos-rpc` is the single chokepoint every RPC verb routes
+    through.
 
-Trade-off accepted: `pid1-process-fd` is a small new helper
-(opens the abstraction emacs deliberately hides), but the
-alternative — re-implementing connect+send+recv+close as a
-single C primitive — would have meant rewriting every existing
-caller of `geos-rpc` in this file.  The fd-extraction approach
-keeps the diff in `rpc-client.el` to one new line.
+Trade-off accepted: lose `accept-process-output` integration
+during the blocking recv.  Today's `geos-rpc--read-bytes` loop
+already does no redisplay, and the kernel-level `SO_RCVTIMEO`
+gives the same hard ceiling as the elisp-side deadline.  The
+recv becomes uninterruptible by `C-g`, but the single-thread
+reality is already a documented constraint (rule 5 of the rules file).
 
 ### 3.4 What about the Linux path?
 
@@ -360,10 +370,8 @@ closes the multi-user gate on Hurd.
    `client_auth_handshake` slot to `port_caps`, Linux backend
    returns 0 (no-op), Hurd backend returns ENOSYS.  Add the
    `Fpid1_client_auth_handshake` Femacs binding (calls
-   through `port->client_auth_handshake`).  Add the
-   `pid1-process-fd` helper that exposes the underlying fd
-   for an emacs network process.  No behavior change in
-   `rpc-client.el` yet; this is pure scaffolding.
+   through `port->client_auth_handshake`).  No behavior change
+   in `rpc-client.el` yet; this is pure scaffolding.
 2. **pflocal cmsg test:** write `tests/hurd-pflocal-cmsg.c`,
    run on the Hurd VM, confirm port rights round-trip through
    pflocal cleanly.  If they do not, this design fails and we
@@ -375,11 +383,15 @@ closes the multi-user gate on Hurd.
    rendezvous port, `sendmsg` with 1-byte placeholder + cmsg
    port, `auth_user_authenticate`, deallocate on every exit.
    Hurd-only; the Linux no-op stays.
-5. **rpc-client.el wiring:** add the single
-   `(pid1-client-auth-handshake (pid1-process-fd proc))` call
-   after `make-network-process` and before the first
-   `process-send-string`.  Linux: cheap no-op.  Hurd: real
-   handshake.
+5. **rpc-client.el wiring:** add five Femacs bindings
+   (`pid1-unix-connect`, `pid1-unix-send`, `pid1-unix-recv`,
+   `pid1-unix-recv-exactly`, `pid1-unix-close`) that own the
+   AF_UNIX fd lifecycle.  Rewrite `geos-rpc` to use them
+   instead of `make-network-process`; the handshake call
+   slots in after `pid1-unix-connect` and before the first
+   `pid1-unix-send`.  Linux: cheap no-op handshake.  Hurd:
+   real rendezvous dance.  Wire format on the bytes unchanged
+   on both kernels.
 6. **End-to-end smoke:** boot the Hurd VM, run the
    multi-user login dance, capture runlog.
 7. **HURD_PORT.md matrix update:** `get_peer_cred` row flips
