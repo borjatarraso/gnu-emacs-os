@@ -144,9 +144,43 @@ Weaknesses:
 Rejected: too far outside our control and gets the wrong
 semantic.
 
-## 3. Recommended design: 2.1 with explicit failure paths
+## 3. Recommended design: 2.2 (parallel Mach channel)
 
-### 3.1 Wire change
+### 3.0 Verdict (added 2026-05-18)
+
+The 2.1 SCM_RIGHTS-cmsg design described in 3.1-3.4 below is
+**retired**.  The probe at `tests/hurd-pflocal-cmsg.c` ran on
+Debian GNU/Hurd 0.9 and returned EBADF (`0x40000009`) on every
+`sendmsg` with an SCM_RIGHTS cmsg, on every socket type.  Reason:
+pflocal's SCM_RIGHTS handler treats payload integers as file
+descriptors (looking them up in the sender's `io_t` table) rather
+than as bare Mach port names.  A freshly-allocated rendezvous
+port has no fd backing, so the lookup fails.  Full receipt:
+`docs/runlogs/2026-05-18-hurd-pflocal-cmsg-fail.md`.
+
+Active design is alternative 2.2 from section 2: a parallel Mach
+channel for the auth handshake, separate from the AF_UNIX RPC
+socket.  Mechanics:
+
+  - Supervisor at startup publishes a long-lived service Mach
+    port via the file-system rendezvous convention (a translator
+    at `/servers/geos-auth` or an on-disk dump of the port via
+    `file_set_translator`).  Linux backend has no equivalent
+    plumbing; the slot is hurd-only.
+  - Client allocates a rendezvous port locally, sends its name
+    to the supervisor *through that long-lived Mach channel*
+    (one Mach RPC, not through pflocal), then issues the
+    AF_UNIX RPC for the verb.  The supervisor matches the two
+    by a per-connection nonce in the first AF_UNIX payload.
+  - `auth_server_authenticate` / `auth_user_authenticate` run
+    on the rendezvous port exactly as in 3.1; only the *hand-off*
+    of the rendezvous port name moves.
+
+Sections 3.1-3.4 are kept verbatim below as the historical
+record of the 2.1 attempt and the questions it answered.  They
+should not be read as a current implementation contract.
+
+### 3.1 Wire change (historical, 2.1)
 
 Today (Linux and the ENOSYS-Hurd path):
 
@@ -175,7 +209,7 @@ no concept of an inbound cmsg.  `rpc-client.el` branches on
 `geos-kernel-hurd-p` and only sends the prefix on Hurd; on Linux
 the byte stream is bit-identical to today's traffic.
 
-### 3.2 Server side
+### 3.2 Server side (historical, 2.1)
 
 New `port_hurd.c::hurd_get_peer_cred(fd, &uid, &gid)`:
 
@@ -215,7 +249,7 @@ connection (a client opens, sends, closes), so caching at this
 layer adds no value today.  Leave it out; a future
 keepalive-connection design can revisit.
 
-### 3.3 Client side
+### 3.3 Client side (historical, 2.1)
 
 Earlier drafts of this doc proposed three separate Femacs
 bindings (`pid1-make-rendezvous-port`, `pid1-sendmsg-with-port`,
@@ -270,7 +304,7 @@ recv becomes uninterruptible by `C-g`, but the single-thread
 reality is already a documented project constraint (hard rule 5,
 "the single-thread reality of Emacs is acknowledged").
 
-### 3.4 What about the Linux path?
+### 3.4 What about the Linux path? (historical, 2.1; still accurate)
 
 Untouched.  `rpc-client.el`'s top-level send sees a Hurd kernel
 and routes through `rpc-client--send-with-auth-prefix-hurd`; on
