@@ -158,6 +158,32 @@ typedef struct port_caps {
      * skeptic review can verify "linux is no-op, hurd does N steps"
      * by reading the two bodies side by side. */
     int (*client_auth_handshake)(int fd);
+
+    /* publish the long-lived auth Mach port the design-2.2 handshake
+     * needs.  the supervisor calls this exactly once at startup, before
+     * the first Fpid1_rpc_poll tick.
+     *
+     * Linux backend: returns 0 immediately, no syscalls.  there is no
+     * out-of-band Mach channel on Linux; SO_PEERCRED is server-side
+     * and snapshots the credential at the client's connect() instant.
+     *
+     * Hurd backend: opens a translator at /servers/geos-auth that
+     * publishes a send right to a long-lived auth receive port owned
+     * by the supervisor.  clients call file_name_lookup("/servers/
+     * geos-auth", 0, 0) to acquire the send right, then mach_msg the
+     * (16-byte nonce, rendezvous send right) tuple through it.  the
+     * supervisor's per-tick drain inside Fpid1_rpc_poll reads matching
+     * pending-auth entries and runs auth_server_authenticate against
+     * the rendezvous to extract the caller's uid/gid.  returns 0 on
+     * success, -1 with errno (ENOSYS until slice 2 of v0.8 design-2.2
+     * lands the translator body; EACCES if the translator setup
+     * rejects; EAGAIN if the auth server is unreachable).
+     *
+     * the call is idempotent only in the trivial sense that the Linux
+     * backend does nothing twice as cheaply as once; the Hurd backend
+     * will reject a second call with EBUSY (a translator is a singleton
+     * per fs path).  callers should treat it as one-shot. */
+    int (*publish_auth_port)(void);
 } port_caps;
 
 /* the active backend.  starts NULL.  exactly one assignment per

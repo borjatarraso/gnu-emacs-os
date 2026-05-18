@@ -285,6 +285,19 @@ linux_client_auth_handshake(int fd)
     return 0;
 }
 
+/* publish the long-lived auth Mach port the design-2.2 handshake
+ * needs.  Linux is a no-op: SO_PEERCRED is server-side and the
+ * supervisor reads it directly off the AF_UNIX fd at accept(),
+ * no out-of-band channel to set up.  the slot exists so the
+ * elisp side can call `pid1-publish-auth-port' unconditionally
+ * at supervisor startup; the Hurd backend opens a translator at
+ * /servers/geos-auth (see port_layer.h docstring). */
+static int
+linux_publish_auth_port(void)
+{
+    return 0;
+}
+
 /* the table.  one assignment per slot, no NULLs.  the Hurd backend
  * will provide a parallel const port_caps port_hurd_impl with the
  * same shape. */
@@ -299,6 +312,7 @@ const port_caps port_linux_impl = {
     .suspend               = linux_suspend,
     .get_peer_cred         = linux_get_peer_cred,
     .client_auth_handshake = linux_client_auth_handshake,
+    .publish_auth_port     = linux_publish_auth_port,
 };
 
 /* the active pointer.  starts NULL; main() and emacs_module_init()

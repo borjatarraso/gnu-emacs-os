@@ -2456,6 +2456,34 @@ Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
     return env->intern(env, "t");
 }
 
+/* (pid1-publish-auth-port) -> t, or signal pid1-error with errno.
+ *
+ * one-shot.  the supervisor calls this once at startup, before the
+ * first pid1-rpc-poll tick, to publish the long-lived auth Mach
+ * port the design-2.2 handshake depends on.  Linux is a no-op
+ * (SO_PEERCRED is server-side, no out-of-band channel to set up);
+ * the Hurd backend opens a translator at /servers/geos-auth.  the
+ * full design rationale lives at docs/v08-hurd-peer-cred-design.md
+ * section 3.5.
+ *
+ * not yet wired into elisp callers; slice 2 of the v0.8 design-2.2
+ * rollout lands the Hurd translator body, slice 3 wires the
+ * supervisor's startup path to invoke this. */
+static emacs_value
+Fpid1_publish_auth_port(emacs_env *env, ptrdiff_t nargs,
+                        emacs_value *args, void *data)
+{
+    (void)data; (void)args;
+    if (nargs != 0)
+        return pid1_signal_errno(env,
+                                 "pid1: publish-auth-port: nargs",
+                                 EINVAL);
+    if (port->publish_auth_port() < 0)
+        return pid1_signal_errno(env,
+                                 "pid1: publish-auth-port", errno);
+    return env->intern(env, "t");
+}
+
 /* AF_UNIX client-side IO bindings for the v0.8 rpc-client rewrite.
  * the elisp side used to lean on make-network-process, which hides
  * the fd behind a process object so we cannot run the Hurd peer-cred
@@ -3466,6 +3494,14 @@ emacs_module_init(struct emacs_runtime *ert)
         "against the gnumach auth server.  Return t.",
         NULL);
     pid1_defalias(env, "pid1-client-auth-handshake", cah);
+
+    emacs_value pap = env->make_function(env, 0, 0,
+        Fpid1_publish_auth_port,
+        "Publish the supervisor's long-lived auth Mach port (one-shot, "
+        "call from supervisor startup before the first pid1-rpc-poll). "
+        "Linux no-op.  Hurd opens a translator at /servers/geos-auth.",
+        NULL);
+    pid1_defalias(env, "pid1-publish-auth-port", pap);
 
     emacs_value uc = env->make_function(env, 1, 1, Fpid1_unix_connect,
         "Open an AF_UNIX SOCK_STREAM and connect to PATH.  Return FD.",
