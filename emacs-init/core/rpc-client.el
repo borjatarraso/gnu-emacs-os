@@ -1,18 +1,27 @@
 ;;; rpc-client.el --- user side of the user/supervisor RPC -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;; v0.6 item 3.  the user-emacs uses this file to ask the supervisor
-;; to do privileged things on its behalf.  see rpc-server.el for the
-;; matching supervisor side and the wire format.
+;; v0.6 item 3, rewired in v0.8 step 5.  the user-emacs uses this
+;; file to ask the supervisor to do privileged things on its behalf.
+;; see rpc-server.el for the matching supervisor side and the wire
+;; format.
 ;;
-;; one-shot client: each call opens a fresh AF_UNIX connection,
-;; sends the request, blocks until reply, closes.  emacs's
-;; `make-network-process' supports `:family local' for unix-domain
-;; sockets so this needs no C primitive on the client side.
+;; one-shot client: each call opens a fresh AF_UNIX connection via
+;; `pid1-unix-connect', runs the auth handshake, sends the request,
+;; blocks until reply, closes via `pid1-unix-close'.  the fd is
+;; owned by pid1 (the dynamic module) from socket() to close(); the
+;; module API does not expose the underlying fd of a
+;; `make-network-process' object, so to keep the cmsg-bearing prefix
+;; on a fd we own we bypass emacs's network-process layer entirely.
 ;;
-;; authentication is implicit: the kernel records the connecting
-;; process's uid/gid at connect() time and the supervisor reads it
-;; via SO_PEERCRED.  the user-emacs cannot lie about its uid.
+;; authentication runs once per connection right after connect via
+;; `pid1-client-auth-handshake'.  on Linux that is a no-op: the
+;; supervisor reads peer uid/gid via SO_PEERCRED snapshotted at the
+;; client's connect() instant, and the wire bytes are bit-identical
+;; to the pre-v0.8 traffic.  on Hurd the handshake performs the
+;; rendezvous-port + auth_user_authenticate dance (see
+;; docs/v08-hurd-peer-cred-design.md section 3); the cmsg with the
+;; rendezvous port travels on the fd this process owns.
 ;;
 ;; wire format mirrors rpc-server.el:
 ;;   request:  4-byte big-endian length, then LEN bytes of (verb arg1 ...)
@@ -41,6 +50,13 @@ outs, no large data), so 5s is generous.  raise for the future
 package-install verb which streams output."
   :type 'number)
 
+(defconst geos-rpc--reply-max-bytes (* 64 1024)
+  "Hard cap on a single reply body.
+mirrors `PID1_UNIX_RECV_MAX' on the C side; a length-prefix
+larger than this is treated as a wire-format violation and
+aborts the call.  intentionally not a defcustom: this is a
+wire-level constant matched in C, not a user-tunable surface.")
+
 (defun geos-rpc--encode-length (n)
   "Return a 4-byte big-endian unibyte string encoding N."
   (unibyte-string (logand (ash n -24) #xff)
@@ -54,21 +70,6 @@ package-install verb which streams output."
           (ash (aref s (+ offset 1)) 16)
           (ash (aref s (+ offset 2))  8)
           (aref s (+ offset 3))))
-
-(defun geos-rpc--read-bytes (proc buf n deadline)
-  "Block until BUF (process buffer of PROC) holds >= N bytes.
-returns t on success, nil on deadline or process death.
-DEADLINE is an absolute `float-time' value.  the loop calls
-`accept-process-output' with short timeouts so a slow supervisor
-yields control predictably (the user-emacs is still single-
-threaded; UI redisplay does not happen during this loop but a
-500ms wedge on a privileged operation is acceptable)."
-  (with-current-buffer buf
-    (while (and (< (buffer-size) n)
-                (< (float-time) deadline)
-                (process-live-p proc))
-      (accept-process-output proc 0.1))
-    (>= (buffer-size) n)))
 
 (defun geos-rpc (verb &rest args)
   "Send (VERB . ARGS) to the supervisor, return the reply payload.
@@ -88,57 +89,46 @@ failure modes:
   - timeout: signals `error'.
   - malformed reply: signals `error' (does NOT eval).
 
-uses a process-attached buffer (not `with-temp-buffer') because
-the network process needs a live buffer to collect bytes into."
+the AF_UNIX fd is owned by pid1 (the dynamic module) from
+`pid1-unix-connect' through `pid1-unix-close'; emacs's
+`make-network-process' layer is bypassed so the cmsg-bearing auth
+prefix the Hurd backend needs travels on a fd this process owns
+from socket() to close().  `pid1-client-auth-handshake' runs once
+per connection right after connect; on Linux it is a no-op, on
+Hurd it performs the rendezvous-port + auth_user_authenticate
+dance."
   (unless (stringp verb)
     (error "geos-rpc: verb must be a string, got %S" verb))
-  (let* ((sexp     (cons verb args))
-         (payload  (prin1-to-string sexp))
-         (plen     (string-bytes payload))
-         (lenbuf   (geos-rpc--encode-length plen))
-         (deadline (+ (float-time) geos-rpc-timeout))
-         (recv-buf (generate-new-buffer " *geos-rpc-recv*"))
-         (proc nil)
-         result)
+  (let* ((sexp        (cons verb args))
+         (payload     (prin1-to-string sexp))
+         (plen        (string-bytes payload))
+         (lenbuf      (geos-rpc--encode-length plen))
+         (timeout-ms  (truncate (* geos-rpc-timeout 1000)))
+         (fd          nil))
     (unwind-protect
         (progn
-          (with-current-buffer recv-buf
-            (set-buffer-multibyte nil))
-          (setq proc (make-network-process
-                      :name "geos-rpc"
-                      :family 'local
-                      :service geos-rpc-socket-path
-                      :coding 'binary
-                      :buffer recv-buf
-                      :sentinel #'ignore
-                      :noquery t))
-          (process-send-string proc lenbuf)
-          (process-send-string proc payload)
-          ;; read 4-byte reply length
-          (unless (geos-rpc--read-bytes proc recv-buf 4 deadline)
-            (error "geos-rpc: no reply length within %ss"
-                   geos-rpc-timeout))
-          (let* ((header (with-current-buffer recv-buf
-                           (buffer-substring-no-properties 1 5)))
-                 (rlen   (geos-rpc--decode-length header 0))
-                 (total  (+ 4 rlen)))
-            (when (or (< rlen 1) (> rlen (* 64 1024)))
+          (setq fd (pid1-unix-connect geos-rpc-socket-path))
+          (pid1-client-auth-handshake fd)
+          ;; pid1-unix-send signals on short write; no need to verify
+          ;; the return value.  the C side loops on EINTR and only
+          ;; returns on success or a hard error.
+          (pid1-unix-send fd lenbuf)
+          (pid1-unix-send fd payload)
+          (let* ((header (pid1-unix-recv-exactly fd 4 timeout-ms))
+                 (rlen   (geos-rpc--decode-length header 0)))
+            (when (or (< rlen 1) (> rlen geos-rpc--reply-max-bytes))
               (error "geos-rpc: bad reply length %d" rlen))
-            (unless (geos-rpc--read-bytes proc recv-buf total deadline)
-              (error "geos-rpc: short reply (%d/%d bytes)"
-                     (with-current-buffer recv-buf (buffer-size))
-                     total))
-            (let* ((body (with-current-buffer recv-buf
-                           (buffer-substring-no-properties 5 (+ 5 rlen))))
+            (let* ((body   (pid1-unix-recv-exactly fd rlen timeout-ms))
                    (parsed (condition-case e
                                (read-from-string body)
-                             (error (error "geos-rpc: parse error %S" e))))
-                   (reply (car parsed)))
+                             (error
+                              (error "geos-rpc: parse error %S" e))))
+                   (reply  (car parsed)))
               (unless (and (listp reply)
                            (eq (plist-get reply :status) 'ok)
                            (plist-member reply :payload))
-                (let ((status (and (listp reply)
-                                   (plist-get reply :status)))
+                (let ((status  (and (listp reply)
+                                    (plist-get reply :status)))
                       (payload (and (listp reply)
                                     (plist-get reply :payload))))
                   (cond
@@ -148,12 +138,9 @@ the network process needs a live buffer to collect bytes into."
                              (format "%S" payload))))
                    (t
                     (error "geos-rpc: protocol violation: %S" reply)))))
-              (setq result (plist-get reply :payload)))))
-      (when proc
-        (delete-process proc))
-      (when (buffer-live-p recv-buf)
-        (kill-buffer recv-buf)))
-    result))
+              (plist-get reply :payload))))
+      (when fd
+        (ignore-errors (pid1-unix-close fd))))))
 
 ;; --------------------------------------------------------------------
 ;; convenience wrappers
