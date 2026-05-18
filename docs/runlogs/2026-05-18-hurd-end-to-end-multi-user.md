@@ -10,17 +10,20 @@ deliverables.
 
 ## Result
 
-**PARTIAL SHIP, VM-VERIFY DEFERRED.** All code lives on the hurd
-branch; the main-side pid1/ edits are spec'd below and handed to
-pid1-engineer for the standard skeptic review. Linux build clean, no
-new warnings, freeze-tests pass. The end-to-end multi-user dance on a
-real Hurd VM is blocked locally: no Hurd qcow2 is staged on this dev
-host (`~/.cache/geos-hurd-vm/` absent, `/var/lib/libvirt/images/`
-not readable, the `iso-build/hurd-smoke-test.sh` builder has not run
-on this checkout). The Hurd-side verification runs against the test
-harness `tests/hurd-client-handshake.c` as soon as the VM gate
-clears; the harness now carries a slice-5 PASS marker so the receipt
-when it does run is unambiguous.
+**PASS (later, after VM-verify).** Originally shipped as PARTIAL on
+2026-05-18: code on the hurd branch with VM verification deferred.
+The end-to-end harness was run on a Debian Hurd 0.9 VM later the same
+day and surfaced two production bugs in `port_hurd.c` (the demuxer
+calling the MIG routine pointer instead of the boolean wrapper, and a
+wire-layout mistake in the submit_nonce port descriptor); both fixed
+on the hurd branch, harness now passes all three markers. Full
+receipt with PASS markers verbatim at
+`docs/runlogs/2026-05-18-hurd-end-to-end-vm.md`. Two new entries in
+the agent-state hurd-gotchas catalog cover the failure modes.
+
+The historical PARTIAL note kept below for the spec it carries; the
+spec for pid1-engineer is still valid (the main-side pid1/ edits did
+not change).
 
 ## SPEC for pid1-engineer (verbatim)
 
