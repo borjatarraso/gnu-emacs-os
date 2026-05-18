@@ -70,6 +70,18 @@
 
 #include "fsys_S.h"
 
+/* fsys_server is the MIG-generated boolean wrapper around the
+ * fsys_server_routines[] table.  fsys_S.h only declares the table
+ * lookup helper fsys_server_routine; the boolean wrapper that does
+ * the reply-header setup (msgh_remote_port = InP->msgh_reply_port,
+ * msgh_size = sizeof reply, msgh_bits = ...) is emitted in
+ * fsysServer.c but not exported in the header.  declare it ourselves
+ * so the demuxer can call it; calling the routine pointer directly
+ * skips the reply-header setup and leaves msgh_remote_port = NULL,
+ * which silently drops the reply and wedges the client. */
+extern boolean_t fsys_server(mach_msg_header_t *InHeadP,
+                             mach_msg_header_t *OutHeadP);
+
 /* mirror of port_hurd.c's auth slots and the wire-level constants.
  * intentionally a copy so the harness can run without linking
  * port_hurd.c; if these drift from production, the runlog has to
@@ -95,13 +107,20 @@ static struct pending_auth_row pending_auth[GEOS_AUTH_PENDING_MAX];
 /* wire struct: client-side message layout.  must match
  * pid1/port_hurd.c's `struct submit_nonce_request` exactly; if the
  * field order or msgt_* descriptor settings differ, the server's
- * cast-to-struct read picks up garbage. */
+ * cast-to-struct read picks up garbage.
+ *
+ * the port slot is mach_port_name_inlined_t (8 bytes on 64-bit) and
+ * the type descriptor's msgt_size is 64.  MIG-generated request
+ * structures use this shape for every port descriptor; declaring the
+ * slot as the 4-byte mach_port_t leaves four bytes of trailing
+ * padding that the kernel reads as the next 32 bits of port name and
+ * the send fails with MACH_SEND_INVALID_DEST. */
 struct submit_nonce_request {
-    mach_msg_header_t Head;
-    mach_msg_type_t   rendez_type;
-    mach_port_t       rendez;
-    mach_msg_type_t   nonce_type;
-    uint8_t           nonce[GEOS_AUTH_NONCE_LEN];
+    mach_msg_header_t        Head;
+    mach_msg_type_t          rendez_type;
+    mach_port_name_inlined_t rendez;
+    mach_msg_type_t          nonce_type;
+    uint8_t                  nonce[GEOS_AUTH_NONCE_LEN];
 };
 
 typedef struct {
@@ -174,7 +193,7 @@ S_geos_auth_submit_nonce(struct submit_nonce_request *inp,
         outp->RetCode = MIG_BAD_ARGUMENTS;
         return;
     }
-    mach_port_t rendez = inp->rendez;
+    mach_port_t rendez = inp->rendez.name;
     if (rendez == MACH_PORT_NULL || !MACH_PORT_VALID(rendez)) {
         outp->RetCode = MIG_BAD_ARGUMENTS;
         return;
@@ -283,9 +302,13 @@ geos_auth_demuxer(mach_msg_header_t *inp, mach_msg_header_t *outp)
                                  (mig_reply_t *)outp);
         return 1;
     }
-    mig_routine_t fr = fsys_server_routine(inp);
-    if (fr != 0) {
-        (*fr)(inp, outp);
+    if (fsys_server_routine(inp) != 0) {
+        /* call the boolean wrapper, not the routine pointer directly:
+         * the wrapper fills in OutP's msgh_bits/size/remote_port/local_port/
+         * seqno/id from InP before invoking the routine.  the routine
+         * alone only sets RetCode + any polymorphic data fields, leaving
+         * msgh_remote_port = 0 from our memset and the reply unsent. */
+        (void)fsys_server(inp, outp);
         return 1;
     }
     if (ports_notify_server(inp, outp))
@@ -438,13 +461,13 @@ client_handshake(const uint8_t nonce[GEOS_AUTH_NONCE_LEN], int status_fd)
     msg.Head.msgh_id          = GEOS_AUTH_SUBMIT_NONCE_MSGID;
 
     msg.rendez_type.msgt_name       = MACH_MSG_TYPE_MOVE_SEND;
-    msg.rendez_type.msgt_size       = 8 * (unsigned)sizeof(mach_port_t);
+    msg.rendez_type.msgt_size       = 64;  /* port-slot width on Hurd */
     msg.rendez_type.msgt_number     = 1;
     msg.rendez_type.msgt_inline     = 1;
     msg.rendez_type.msgt_longform   = 0;
     msg.rendez_type.msgt_deallocate = 0;
     msg.rendez_type.msgt_unused     = 0;
-    msg.rendez = rendez_rcv;  /* user-ref minted by insert_right above */
+    msg.rendez.name = rendez_rcv;  /* user-ref minted by insert_right above */
 
     msg.nonce_type.msgt_name       = MACH_MSG_TYPE_BYTE;
     msg.nonce_type.msgt_size       = 8;

@@ -96,6 +96,21 @@
  * hand-rolling our own GEOS_AUTH_SUBMIT_NONCE verb. */
 #include "fsys_S.h"
 
+/* fsys_server is the MIG-emitted boolean wrapper around the
+ * fsys_server_routines[] table.  fsys_S.h declares only the table
+ * lookup helper fsys_server_routine (a static __inline that returns
+ * the routine pointer for a given msgh_id); the boolean wrapper that
+ * actually fills in the reply-header fields (msgh_bits with
+ * REPLY-as-REMOTE, msgh_size to the reply struct, msgh_remote_port
+ * to InP->msgh_reply_port, msgh_local_port to NULL, msgh_seqno to 0,
+ * msgh_id to InP->msgh_id + 100) is emitted in fsysServer.c but not
+ * exported in the header.  declare it here so geos_auth_demuxer can
+ * call it; the bare routine pointer alone only sets RetCode plus
+ * data fields and leaves msgh_remote_port at its memset-zero value,
+ * which silently swallows the reply and wedges the client. */
+extern boolean_t fsys_server(mach_msg_header_t *InHeadP,
+                             mach_msg_header_t *OutHeadP);
+
 /* mount(2) becomes "bind a translator" on Hurd.
  *
  * the Hurd does not have a single mount(2) syscall.  a "mount" is
@@ -823,12 +838,20 @@ hurd_suspend(const char *state)
  * disturbing that ordering. */
 #define GEOS_AUTH_NONCE_LEN          16
 #define GEOS_AUTH_SUBMIT_NONCE_MSGID 90001
+/* the port slot is mach_port_name_inlined_t (an 8-byte union holding
+ * a 4-byte name + 4 bytes padding) and the matching type descriptor's
+ * msgt_size is 64.  MIG-generated request structs use this shape for
+ * every port descriptor on 64-bit Hurd; declaring the slot as the
+ * bare 4-byte mach_port_t leaves four bytes of trailing padding the
+ * kernel reads as the next 32 bits of port name, and the send fails
+ * with MACH_SEND_INVALID_DEST.  hurd-gotchas.md catalogues the
+ * 2026-05-18 slice-5 trace where this was first caught. */
 struct submit_nonce_request {
-    mach_msg_header_t Head;
-    mach_msg_type_t   rendez_type;
-    mach_port_t       rendez;
-    mach_msg_type_t   nonce_type;
-    uint8_t           nonce[GEOS_AUTH_NONCE_LEN];
+    mach_msg_header_t        Head;
+    mach_msg_type_t          rendez_type;
+    mach_port_name_inlined_t rendez;
+    mach_msg_type_t          nonce_type;
+    uint8_t                  nonce[GEOS_AUTH_NONCE_LEN];
 };
 
 /* publish/pending state hoisted for hurd_get_peer_cred.  the canonical
@@ -1038,15 +1061,18 @@ hurd_client_auth_handshake(int fd, const uint8_t nonce[GEOS_AUTH_NONCE_LEN])
     msg.Head.msgh_seqno       = 0;
     msg.Head.msgh_id          = GEOS_AUTH_SUBMIT_NONCE_MSGID;
 
-    /* rendezvous port descriptor: one MOVE_SEND, in-line, short form. */
+    /* rendezvous port descriptor: one MOVE_SEND, in-line, short form.
+     * msgt_size is 64 (bits) to match the mach_port_name_inlined_t
+     * port-slot width that gnumach reads; see the struct definition's
+     * comment for why the bare mach_port_t spelling silently breaks. */
     msg.rendez_type.msgt_name       = MACH_MSG_TYPE_MOVE_SEND;
-    msg.rendez_type.msgt_size       = 8 * (unsigned)sizeof(mach_port_t);
+    msg.rendez_type.msgt_size       = 64;
     msg.rendez_type.msgt_number     = 1;
     msg.rendez_type.msgt_inline     = 1;
     msg.rendez_type.msgt_longform   = 0;
     msg.rendez_type.msgt_deallocate = 0;
     msg.rendez_type.msgt_unused     = 0;
-    msg.rendez = rendez_send;
+    msg.rendez.name = rendez_send;
 
     /* nonce descriptor: 16 inline bytes, msgt_size measured in bits. */
     msg.nonce_type.msgt_name       = MACH_MSG_TYPE_BYTE;
@@ -1475,7 +1501,7 @@ S_geos_auth_submit_nonce(struct submit_nonce_request *inp,
     }
     /* dispose of the rendezvous regardless of outcome; the auth
      * server takes its own ref when authenticate succeeds. */
-    mach_port_t rendez = inp->rendez;
+    mach_port_t rendez = inp->rendez.name;
     if (rendez == MACH_PORT_NULL || !MACH_PORT_VALID(rendez)) {
         outp->RetCode = MIG_BAD_ARGUMENTS;
         return;
@@ -1589,12 +1615,17 @@ S_geos_auth_submit_nonce(struct submit_nonce_request *inp,
  * hand-rolling one message is cheaper than carrying MIG just for it
  * (§3.5.3).
  *
- * MIG's user-facing demuxer API on this libmig build is the table
- * lookup helper fsys_server_routine(InHeadP): it returns a
- * mig_routine_t (function pointer) if the msgh_id falls inside the
- * fsys subsystem range (22000-22011), NULL otherwise.  the boolean
- * fsys_server() that some older MIG vintages emit is absent here, so
- * we drive the routine pointer ourselves. */
+ * MIG's user-facing demuxer API on this libmig build has two layers:
+ * fsys_server_routine(InHeadP) returns a mig_routine_t pointer if the
+ * msgh_id falls inside the fsys subsystem range (22000-22011), NULL
+ * otherwise; the boolean fsys_server(InHeadP, OutHeadP) wrapper IS
+ * emitted in fsysServer.c (despite the slice-3-era comment that said
+ * otherwise) and is the one that fills the reply-header fields before
+ * invoking the routine.  call the wrapper, not the routine: the inner
+ * routine writes RetCode + data only and leaves msgh_remote_port at
+ * the caller's zero, which silently drops the reply on the floor and
+ * wedges the client (hurd-gotchas.md captures the slice-5 trace that
+ * caught this). */
 static int
 geos_auth_demuxer(mach_msg_header_t *inp, mach_msg_header_t *outp)
 {
@@ -1603,9 +1634,8 @@ geos_auth_demuxer(mach_msg_header_t *inp, mach_msg_header_t *outp)
                                  (mig_reply_t *)outp);
         return 1;
     }
-    mig_routine_t fr = fsys_server_routine(inp);
-    if (fr != 0) {
-        (*fr)(inp, outp);
+    if (fsys_server_routine(inp) != 0) {
+        (void)fsys_server(inp, outp);
         return 1;
     }
     if (ports_notify_server(inp, outp))
