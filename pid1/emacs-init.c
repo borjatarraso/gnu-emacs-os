@@ -2240,6 +2240,19 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
     emacs_value Qnil = env->intern(env, "nil");
     if (rpc_listen_fd < 0)
         return pid1_signal_errno(env, "pid1: rpc-poll: not listening", EBADF);
+    /* slice 3 of v0.8 design-2.2: drain the design-2.2 auth port before
+     * accepting any AF_UNIX connection.  on Linux the call is a one-line
+     * return-0; on Hurd it pulls up to 16 mach messages off the libports
+     * bucket bound to /servers/geos-auth, dispatching fsys_getroot and
+     * geos_auth_submit_nonce.  ENOSYS means publish_auth_port has not
+     * succeeded yet (or never will, on a backend that does not need a
+     * separate channel); we silently skip in that case, same shape as
+     * get_peer_cred's ENOSYS branch below.  any other errno is a real
+     * failure on a backend that normally implements the drain, so still
+     * surfaced via pid1_signal_errno. */
+    if (port->auth_drain() < 0 && errno != ENOSYS) {
+        return pid1_signal_errno(env, "pid1: rpc-poll: auth_drain", errno);
+    }
     int conn = accept4(rpc_listen_fd, NULL, NULL, SOCK_CLOEXEC);
     if (conn < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -2481,6 +2494,38 @@ Fpid1_publish_auth_port(emacs_env *env, ptrdiff_t nargs,
     if (port->publish_auth_port() < 0)
         return pid1_signal_errno(env,
                                  "pid1: publish-auth-port", errno);
+    return env->intern(env, "t");
+}
+
+/* (pid1-auth-drain) -> t, or signal pid1-error with errno.
+ *
+ * slice 3 of v0.8 design-2.2.  drain pending Mach messages on the auth
+ * port.  Linux is a no-op (no auth port to drain).  Hurd pulls up to a
+ * small batch of messages off the libports bucket attached to
+ * /servers/geos-auth and dispatches them via the chained fsys_server
+ * + ports_notify_server + private geos_auth_submit_nonce demuxer.
+ *
+ * the supervisor's own pid1-rpc-poll calls port->auth_drain() at the
+ * top of every tick; this elisp binding exists so a test harness or
+ * an out-of-band drain can run the same code path explicitly without
+ * waiting for the 200ms tick.  ENOSYS surfaces as t (silently skip),
+ * matching the rpc-poll convention; every other errno is forwarded
+ * as pid1-error so the freeze-tests can distinguish "no drain yet"
+ * from "drain failed". */
+static emacs_value
+Fpid1_auth_drain(emacs_env *env, ptrdiff_t nargs,
+                 emacs_value *args, void *data)
+{
+    (void)data; (void)args;
+    if (nargs != 0)
+        return pid1_signal_errno(env,
+                                 "pid1: auth-drain: nargs",
+                                 EINVAL);
+    if (port->auth_drain() < 0) {
+        if (errno == ENOSYS)
+            return env->intern(env, "t");
+        return pid1_signal_errno(env, "pid1: auth-drain", errno);
+    }
     return env->intern(env, "t");
 }
 
@@ -3502,6 +3547,15 @@ emacs_module_init(struct emacs_runtime *ert)
         "Linux no-op.  Hurd opens a translator at /servers/geos-auth.",
         NULL);
     pid1_defalias(env, "pid1-publish-auth-port", pap);
+
+    emacs_value ad = env->make_function(env, 0, 0,
+        Fpid1_auth_drain,
+        "Drain pending Mach messages on the design-2.2 auth port.  "
+        "Linux no-op.  Hurd dispatches fsys_getroot and "
+        "geos_auth_submit_nonce off the libports bucket attached to "
+        "/servers/geos-auth.  Return t.",
+        NULL);
+    pid1_defalias(env, "pid1-auth-drain", ad);
 
     emacs_value uc = env->make_function(env, 1, 1, Fpid1_unix_connect,
         "Open an AF_UNIX SOCK_STREAM and connect to PATH.  Return FD.",

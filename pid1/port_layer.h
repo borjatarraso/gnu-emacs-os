@@ -184,6 +184,35 @@ typedef struct port_caps {
      * will reject a second call with EBUSY (a translator is a singleton
      * per fs path).  callers should treat it as one-shot. */
     int (*publish_auth_port)(void);
+
+    /* drain pending messages on the design-2.2 auth port.  the
+     * supervisor calls this at the top of every Fpid1_rpc_poll tick,
+     * before accept(); the body is bounded so a flood cannot starve
+     * the AF_UNIX accept path.  added in slice 3 of v0.8 design-2.2
+     * (see docs/v08-hurd-peer-cred-design.md section 3.5.7).
+     *
+     * Linux backend: returns 0 immediately, no syscalls.  there is no
+     * auth port to drain.
+     *
+     * Hurd backend: pulls up to a small batch of Mach messages
+     * (currently 16) off the libports bucket associated with
+     * /servers/geos-auth via mach_msg(MACH_RCV_TIMEOUT=0) and
+     * dispatches each one into a hand-rolled demuxer that handles
+     * fsys_getroot (returning the auth send right so libdiskfs can
+     * route file_name_lookup traffic to our process) and our private
+     * geos_auth_submit_nonce verb (extracting the client's
+     * effective uid/gid via auth_server_authenticate, inserting a
+     * {nonce -> uid, gid, expiry} row into the pending-auth table
+     * that slice 5's hurd_get_peer_cred consults).  the drain is
+     * fully non-blocking; MACH_RCV_TIMED_OUT after the first empty
+     * read is the steady-state return.  the function returns 0 even
+     * when it processes zero messages; a real failure (mach_msg
+     * returning something other than KERN_SUCCESS or
+     * MACH_RCV_TIMED_OUT) surfaces as -1 with errno=EIO.  ENOSYS
+     * is returned only if publish_auth_port has not yet succeeded;
+     * the supervisor uses that to skip the drain until the auth
+     * channel is live. */
+    int (*auth_drain)(void);
 } port_caps;
 
 /* the active backend.  starts NULL.  exactly one assignment per
