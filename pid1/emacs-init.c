@@ -2456,6 +2456,250 @@ Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
     return env->intern(env, "t");
 }
 
+/* AF_UNIX client-side IO bindings for the v0.8 rpc-client rewrite.
+ * the elisp side used to lean on make-network-process, which hides
+ * the fd behind a process object so we cannot run the Hurd peer-cred
+ * handshake against the same fd we will then send/recv on.  these
+ * bindings give elisp the raw fd from socket() to close(), so the
+ * existing pid1-client-auth-handshake (above) runs on a fd we own.
+ *
+ * the recv cap matches geos-rpc's 64 KiB sexp ceiling at
+ * core/rpc-client.el; bumping one without the other lets the elisp
+ * loop ask for more than C can hand back and the wire format breaks.
+ * stack-allocated buffers only; the dynamic module shares the no-
+ * malloc-in-hot-paths rule with the standalone PID 1 binary. */
+#define PID1_UNIX_RECV_MAX (64 * 1024)
+
+/* (pid1-unix-connect PATH) -> FD or signal pid1-error.
+ * invariant: returns an open AF_UNIX SOCK_STREAM fd connected to PATH;
+ * on any failure the fd, if it was opened, is closed before signalling. */
+static emacs_value
+Fpid1_unix_connect(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                   void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 1)
+        return pid1_signal_errno(env, "pid1: unix-connect needs 1 arg",
+                                 EINVAL);
+    /* size probe + size-bounded copy; sun_path is 108 on Linux, the
+     * usable slot is 107 chars + NUL, which extract_cstring_into
+     * enforces via its bufsize check. */
+    char path[sizeof ((struct sockaddr_un *)0)->sun_path];
+    if (extract_cstring_into(env, args[0], path, sizeof path) < 0)
+        return Qnil;
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return pid1_signal_errno(env, "pid1: unix-connect: socket", errno);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    /* path is NUL-terminated and at most sizeof addr.sun_path - 1 long
+     * because extract_cstring_into capped at sizeof path which equals
+     * sizeof addr.sun_path; the terminator stays inside sun_path. */
+    memcpy(addr.sun_path, path, strlen(path));
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+        int err = errno;
+        close(fd);
+        return pid1_signal_errno(env, "pid1: unix-connect: connect", err);
+    }
+    return env->make_integer(env, fd);
+}
+
+/* (pid1-unix-send FD BYTES) -> N-written or signal pid1-error.
+ * invariant: loops send(MSG_NOSIGNAL) until BYTES is drained or any
+ * non-EINTR errno surfaces; MSG_NOSIGNAL is load-bearing because the
+ * user-emacs has no SIGPIPE handler and a peer-closed socket would
+ * otherwise kill the process. */
+static emacs_value
+Fpid1_unix_send(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 2)
+        return pid1_signal_errno(env, "pid1: unix-send needs 2 args",
+                                 EINVAL);
+    intmax_t fd_im = env->extract_integer(env, args[0]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (fd_im < 0 || fd_im > 0x7fffffff)
+        return pid1_signal_errno(env, "pid1: unix-send: fd out of range",
+                                 EBADF);
+    int fd = (int)fd_im;
+    ptrdiff_t need = 0;
+    if (!env->copy_string_contents(env, args[1], NULL, &need))
+        return Qnil;
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    /* copy_string_contents reports N+1 to include the trailing NUL.
+     * the wire payload excludes the NUL; the elisp caller pre-encodes
+     * binary bytes into a unibyte string and we ship those bytes raw. */
+    if (need < 1)
+        return pid1_signal_errno(env, "pid1: unix-send: empty payload",
+                                 EINVAL);
+    size_t plen = (size_t)(need - 1);
+    if (plen > PID1_UNIX_RECV_MAX)
+        return pid1_signal_errno(env, "pid1: unix-send: payload too big",
+                                 EMSGSIZE);
+    char payload[PID1_UNIX_RECV_MAX + 1];
+    if (!env->copy_string_contents(env, args[1], payload, &need))
+        return Qnil;
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    size_t sent = 0;
+    while (sent < plen) {
+        ssize_t w = send(fd, payload + sent, plen - sent, MSG_NOSIGNAL);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return pid1_signal_errno(env, "pid1: unix-send: send", errno);
+        }
+        sent += (size_t)w;
+    }
+    return env->make_integer(env, (intmax_t)sent);
+}
+
+/* (pid1-unix-recv FD NMAX TIMEOUT-MS) -> unibyte-string or signal.
+ * invariant: one recv() call (looped on EINTR) bounded by SO_RCVTIMEO;
+ * a 0-byte return is the wire-format-poisoning EOF and surfaces as
+ * ECONNRESET so the elisp side does not silently treat an empty
+ * payload as a valid reply. */
+static emacs_value
+Fpid1_unix_recv(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 3)
+        return pid1_signal_errno(env, "pid1: unix-recv needs 3 args",
+                                 EINVAL);
+    intmax_t fd_im = env->extract_integer(env, args[0]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (fd_im < 0 || fd_im > 0x7fffffff)
+        return pid1_signal_errno(env, "pid1: unix-recv: fd out of range",
+                                 EBADF);
+    int fd = (int)fd_im;
+    intmax_t nmax_im = env->extract_integer(env, args[1]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (nmax_im < 1 || nmax_im > PID1_UNIX_RECV_MAX)
+        return pid1_signal_errno(env, "pid1: unix-recv: nmax out of range",
+                                 EINVAL);
+    intmax_t to_im = env->extract_integer(env, args[2]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (to_im < 0 || to_im > 3600000)
+        return pid1_signal_errno(env, "pid1: unix-recv: timeout out of range",
+                                 EINVAL);
+    struct timeval tv;
+    tv.tv_sec  = (time_t)(to_im / 1000);
+    tv.tv_usec = (suseconds_t)((to_im % 1000) * 1000);
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0
+        && errno != ENOPROTOOPT)
+        return pid1_signal_errno(env, "pid1: unix-recv: SO_RCVTIMEO",
+                                 errno);
+    char buf[PID1_UNIX_RECV_MAX];
+    ssize_t r;
+    do {
+        r = recv(fd, buf, (size_t)nmax_im, 0);
+    } while (r < 0 && errno == EINTR);
+    if (r < 0)
+        return pid1_signal_errno(env, "pid1: unix-recv: recv", errno);
+    if (r == 0)
+        return pid1_signal_errno(env, "pid1: unix-recv: peer closed",
+                                 ECONNRESET);
+    return env->make_unibyte_string(env, buf, (ptrdiff_t)r);
+}
+
+/* (pid1-unix-recv-exactly FD N TIMEOUT-MS) -> unibyte-string or signal.
+ * invariant: loops recv() until N bytes are buffered or the socket
+ * dies; saves the elisp side from reimplementing a partial-read loop
+ * around the 4-byte length prefix + sexp body that geos-rpc reads. */
+static emacs_value
+Fpid1_unix_recv_exactly(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                        void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 3)
+        return pid1_signal_errno(env, "pid1: unix-recv-exactly needs 3 args",
+                                 EINVAL);
+    intmax_t fd_im = env->extract_integer(env, args[0]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (fd_im < 0 || fd_im > 0x7fffffff)
+        return pid1_signal_errno(env,
+                                 "pid1: unix-recv-exactly: fd out of range",
+                                 EBADF);
+    int fd = (int)fd_im;
+    intmax_t n_im = env->extract_integer(env, args[1]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (n_im < 1 || n_im > PID1_UNIX_RECV_MAX)
+        return pid1_signal_errno(env,
+                                 "pid1: unix-recv-exactly: n out of range",
+                                 EINVAL);
+    intmax_t to_im = env->extract_integer(env, args[2]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (to_im < 0 || to_im > 3600000)
+        return pid1_signal_errno(env,
+                                 "pid1: unix-recv-exactly: timeout out of range",
+                                 EINVAL);
+    struct timeval tv;
+    tv.tv_sec  = (time_t)(to_im / 1000);
+    tv.tv_usec = (suseconds_t)((to_im % 1000) * 1000);
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0
+        && errno != ENOPROTOOPT)
+        return pid1_signal_errno(env,
+                                 "pid1: unix-recv-exactly: SO_RCVTIMEO",
+                                 errno);
+    char buf[PID1_UNIX_RECV_MAX];
+    size_t want = (size_t)n_im;
+    size_t got  = 0;
+    while (got < want) {
+        ssize_t r = recv(fd, buf + got, want - got, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return pid1_signal_errno(env,
+                                     "pid1: unix-recv-exactly: recv",
+                                     errno);
+        }
+        if (r == 0)
+            return pid1_signal_errno(env,
+                                     "pid1: unix-recv-exactly: peer closed",
+                                     ECONNRESET);
+        got += (size_t)r;
+    }
+    return env->make_unibyte_string(env, buf, (ptrdiff_t)got);
+}
+
+/* (pid1-unix-close FD) -> t or signal pid1-error.
+ * invariant: a -1 from close means EBADF (caller bug, signal loud)
+ * or EIO on a dirty close of a buffered socket; both indicate the fd
+ * lifecycle is wrong and should not be swallowed. */
+static emacs_value
+Fpid1_unix_close(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                 void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 1)
+        return pid1_signal_errno(env, "pid1: unix-close needs 1 arg",
+                                 EINVAL);
+    intmax_t fd_im = env->extract_integer(env, args[0]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
+    if (fd_im < 0 || fd_im > 0x7fffffff)
+        return pid1_signal_errno(env, "pid1: unix-close: fd out of range",
+                                 EBADF);
+    int fd = (int)fd_im;
+    if (close(fd) < 0)
+        return pid1_signal_errno(env, "pid1: unix-close: close", errno);
+    return env->intern(env, "t");
+}
+
 /* the reboot and suspend bodies used to live here as raw_reboot /
  * raw_suspend.  they now live in port_linux.c behind port->reboot
  * and port->suspend.  the elisp-facing wrappers below are unchanged
@@ -3222,6 +3466,33 @@ emacs_module_init(struct emacs_runtime *ert)
         "against the gnumach auth server.  Return t.",
         NULL);
     pid1_defalias(env, "pid1-client-auth-handshake", cah);
+
+    emacs_value uc = env->make_function(env, 1, 1, Fpid1_unix_connect,
+        "Open an AF_UNIX SOCK_STREAM and connect to PATH.  Return FD.",
+        NULL);
+    pid1_defalias(env, "pid1-unix-connect", uc);
+
+    emacs_value us = env->make_function(env, 2, 2, Fpid1_unix_send,
+        "Send BYTES on FD with MSG_NOSIGNAL.  Return bytes written.",
+        NULL);
+    pid1_defalias(env, "pid1-unix-send", us);
+
+    emacs_value ur = env->make_function(env, 3, 3, Fpid1_unix_recv,
+        "Recv up to NMAX bytes from FD with SO_RCVTIMEO of TIMEOUT-MS. "
+        "Return a unibyte string.  Peer close signals ECONNRESET.",
+        NULL);
+    pid1_defalias(env, "pid1-unix-recv", ur);
+
+    emacs_value urx = env->make_function(env, 3, 3, Fpid1_unix_recv_exactly,
+        "Recv exactly N bytes from FD with SO_RCVTIMEO of TIMEOUT-MS. "
+        "Return a unibyte string.  Short read signals ECONNRESET.",
+        NULL);
+    pid1_defalias(env, "pid1-unix-recv-exactly", urx);
+
+    emacs_value ucl = env->make_function(env, 1, 1, Fpid1_unix_close,
+        "Close FD.  Return t.  Errors surface so caller bugs are loud.",
+        NULL);
+    pid1_defalias(env, "pid1-unix-close", ucl);
 
     /* provide the feature so (require 'pid1-module) works after
      * (module-load ...) without a separate elisp wrapper. */
