@@ -2486,10 +2486,11 @@ Fpid1_rpc_reply(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
  * (rpc-client.el) reads it off the socket with pid1-unix-recv-exactly
  * immediately after connect.  shorter or longer strings get EINVAL.
  *
- * elisp callers in rpc-client.el invoke this once per RPC connection,
- * right after pid1-unix-connect returns and before the first
- * pid1-unix-send.  the call is unconditional: branching on
- * geos-kernel is the port_caps's job, not the elisp caller's. */
+ * precondition on the caller: this binding must be invoked AFTER
+ * pid1-unix-connect returns the fd AND BEFORE the first pid1-unix-send
+ * on that fd, exactly once per RPC connection.  the call is
+ * unconditional across kernels: branching on geos-kernel is the
+ * port_caps's job, not the elisp caller's. */
 static emacs_value
 Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
                             emacs_value *args, void *data)
@@ -2565,9 +2566,18 @@ Fpid1_publish_auth_port(emacs_env *env, ptrdiff_t nargs,
         return pid1_signal_errno(env,
                                  "pid1: publish-auth-port: nargs",
                                  EINVAL);
-    if (port->publish_auth_port() < 0)
+    if (port->publish_auth_port() < 0) {
+        /* W2: ENOSYS is "no auth port concept on this kernel" (Linux,
+         * or a future backend that does not need one).  surface it
+         * silently as t, matching the Fpid1_auth_drain convention.
+         * panicking supervisor startup over a missing translator on a
+         * kernel that does not need one is the worst possible failure
+         * mode here. */
+        if (errno == ENOSYS)
+            return env->intern(env, "t");
         return pid1_signal_errno(env,
                                  "pid1: publish-auth-port", errno);
+    }
     return env->intern(env, "t");
 }
 
