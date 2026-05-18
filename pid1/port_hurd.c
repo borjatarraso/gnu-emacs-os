@@ -958,6 +958,21 @@ hurd_client_auth_handshake(int fd)
     return -1;
 }
 
+/* slice 1 ENOSYS placeholder; slice 2 will land the file_set_translator
+ * body for /servers/geos-auth.  see docs/v08-hurd-peer-cred-design.md
+ * section 3.5.1.  the call site exists today so the supervisor can wire
+ * `pid1-publish-auth-port' into startup unconditionally; until the real
+ * translator goes in, the elisp side gets ENOSYS back and treats it the
+ * same way it treats every other not-yet-implemented Hurd surface: log
+ * once, continue, do not panic.  no Mach state is allocated here, so
+ * there is nothing to deallocate on the error path. */
+static int
+hurd_publish_auth_port(void)
+{
+    errno = ENOSYS;
+    return -1;
+}
+
 /* the table.  same shape as port_linux_impl, every slot populated.
  * the symmetry is what lets emacs-init.c pick one or the other at
  * compile time without touching the call sites. */
@@ -972,6 +987,7 @@ const port_caps port_hurd_impl = {
     .suspend               = hurd_suspend,
     .get_peer_cred         = hurd_get_peer_cred,
     .client_auth_handshake = hurd_client_auth_handshake,
+    .publish_auth_port     = hurd_publish_auth_port,
 };
 
 /* the active pointer + the require-or-abort helper live in
