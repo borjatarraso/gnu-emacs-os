@@ -33,6 +33,7 @@
 #include <grp.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -2149,6 +2150,7 @@ Fpid1_chown(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
 
 #define RPC_PAYLOAD_MAX (64 * 1024)
 #define RPC_TIMEOUT_SEC 2
+#define RPC_HANDSHAKE_TIMEOUT_MS 1000
 
 static int rpc_listen_fd = -1;
 
@@ -2384,6 +2386,17 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
      * (close the fd, return nil) for the same reason as getentropy. */
     uint8_t nonce[16];
     if (getentropy(nonce, sizeof nonce) < 0) {
+        close(conn);
+        return Qnil;
+    }
+    /* gate the send: pflocal has no SO_SNDTIMEO, so a peer that never
+     * read()s would block us for the full tick without this poll. */
+    struct pollfd pfd = { .fd = conn, .events = POLLOUT };
+    int pr = poll(&pfd, 1, RPC_HANDSHAKE_TIMEOUT_MS);
+    if (pr <= 0 || !(pfd.revents & POLLOUT)) {
+        static const char m[] =
+            "pid1: rpc-poll: handshake poll timeout, dropping client\n";
+        ssize_t r = write(2, m, sizeof m - 1); (void)r;
         close(conn);
         return Qnil;
     }
