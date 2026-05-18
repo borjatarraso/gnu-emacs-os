@@ -2486,17 +2486,24 @@ Fpid1_rpc_reply(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->intern(env, "t");
 }
 
-/* (pid1-client-auth-handshake FD) -> t, or signal pid1-error with errno.
+/* (pid1-client-auth-handshake FD NONCE) -> t, or signal pid1-error.
  *
  * the client-side counterpart of get_peer_cred.  on Linux this is a
- * single no-op return (no syscalls, no bytes on the wire).  on Hurd
- * this triggers the rendezvous-port dance against the gnumach auth
- * server; the supervisor's get_peer_cred body consumes the matching
- * cmsg.  the design rationale is at docs/v08-hurd-peer-cred-design.md.
+ * single no-op return (no syscalls, no bytes on the wire); NONCE is
+ * ignored.  on Hurd this triggers the rendezvous-port dance against
+ * the gnumach auth server; the supervisor's drain reads the matching
+ * submit_nonce message off /servers/geos-auth and uses NONCE to bind
+ * the auth result to the right AF_UNIX connection.  the design
+ * rationale is at docs/v08-hurd-peer-cred-design.md.
+ *
+ * slice 4 of v0.8 design-2.2 grew the binding to take NONCE as a
+ * second arg.  it must be a 16-byte unibyte string; the elisp side
+ * (rpc-client.el) reads it off the socket with pid1-unix-recv-exactly
+ * immediately after connect.  shorter or longer strings get EINVAL.
  *
  * elisp callers in rpc-client.el invoke this once per RPC connection,
- * right after make-network-process returns and before the first
- * process-send-string.  the call is unconditional: branching on
+ * right after pid1-unix-connect returns and before the first
+ * pid1-unix-send.  the call is unconditional: branching on
  * geos-kernel is the port_caps's job, not the elisp caller's. */
 static emacs_value
 Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
@@ -2504,7 +2511,12 @@ Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
 {
     (void)data;
     emacs_value Qnil = env->intern(env, "nil");
-    if (nargs != 1)
+    /* arity 1 or 2: legacy callers on main pass FD only, slice 4
+     * callers on the hurd branch pass (FD NONCE).  the elisp
+     * rpc-client.el update is part of the SPEC for pid1-engineer; the
+     * binding accepts both during the transition window so neither
+     * branch is broken when the other is mid-rebase. */
+    if (nargs != 1 && nargs != 2)
         return pid1_signal_errno(env,
                                  "pid1: client-auth-handshake: nargs",
                                  EINVAL);
@@ -2516,7 +2528,31 @@ Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
                                  "pid1: client-auth-handshake: fd out of range",
                                  EINVAL);
     int fd = (int)fd_im;
-    if (port->client_auth_handshake(fd) < 0)
+
+    /* NONCE: unibyte string of exactly 16 bytes.  default is all-zero
+     * when the caller did not supply one (legacy arity-1 path) since
+     * Linux ignores it and Hurd does not yet have a multi-user caller
+     * outside the freeze-test on the side branch. */
+    uint8_t nbuf[16];
+    memset(nbuf, 0, sizeof nbuf);
+    if (nargs == 2) {
+        ptrdiff_t need = 0;
+        if (!env->copy_string_contents(env, args[1], NULL, &need))
+            return pid1_signal_errno(env,
+                                     "pid1: client-auth-handshake: nonce probe",
+                                     EINVAL);
+        if (need != 17)  /* 16 bytes + trailing NUL */
+            return pid1_signal_errno(env,
+                                     "pid1: client-auth-handshake: nonce len",
+                                     EINVAL);
+        char tmp[17];
+        if (!env->copy_string_contents(env, args[1], tmp, &need))
+            return pid1_signal_errno(env,
+                                     "pid1: client-auth-handshake: nonce copy",
+                                     EINVAL);
+        memcpy(nbuf, tmp, 16);
+    }
+    if (port->client_auth_handshake(fd, nbuf) < 0)
         return pid1_signal_errno(env,
                                  "pid1: client-auth-handshake", errno);
     return env->intern(env, "t");
@@ -3591,12 +3627,15 @@ emacs_module_init(struct emacs_runtime *ert)
         NULL);
     pid1_defalias(env, "pid1-rpc-reply", rrep);
 
-    emacs_value cah = env->make_function(env, 1, 1,
+    emacs_value cah = env->make_function(env, 1, 2,
         Fpid1_client_auth_handshake,
         "Run the client-side auth handshake for an open RPC socket FD. "
-        "On Linux this is a no-op (SO_PEERCRED is server-side).  On Hurd "
-        "this performs the rendezvous-port + auth_user_authenticate dance "
-        "against the gnumach auth server.  Return t.",
+        "Optional NONCE is a 16-byte unibyte string the elisp side read "
+        "off the socket immediately after connect (required on Hurd "
+        "for multi-user; default all-zero on Linux).  On Linux this is "
+        "a no-op (SO_PEERCRED is server-side; NONCE is ignored).  On "
+        "Hurd this performs the rendezvous-port + auth_user_authenticate "
+        "dance against the gnumach auth server.  Return t.",
         NULL);
     pid1_defalias(env, "pid1-client-auth-handshake", cah);
 

@@ -146,18 +146,34 @@ typedef struct port_caps {
      *
      * Linux backend: returns 0 immediately, no syscalls.  the client
      * truly has nothing to do; the wire bytes on Linux are bit-
-     * identical to today.
+     * identical to today.  the nonce arg is ignored.
      *
      * Hurd backend: returns 0 on a successful handshake, -1 with
-     * errno on failure (ENOSYS until the real body lands in v0.8
-     * step 4; EACCES if the auth server rejects; EAGAIN if the auth
-     * server is unreachable so the caller can retry).
+     * errno on failure (EACCES if the auth server rejects; EAGAIN if
+     * the auth server or the supervisor's auth port is unreachable
+     * so the caller can retry).  the slice 4 body looks up the
+     * supervisor's auth port via file_name_lookup("/servers/geos-auth",
+     * 0, 0), allocates a rendezvous receive right + send-right pair,
+     * hand-rolls a mach_msg(msgh_id=90001, rendezvous MOVE_SEND,
+     * nonce[16]) against the auth port, then runs
+     * auth_user_authenticate against the rendezvous to complete the
+     * dance.  the supervisor's per-tick drain reads the matching
+     * submit_nonce request and the auth server matches the two
+     * halves to extract the client's uid/gid.
+     *
+     * NONCE is the 16-byte rendezvous identifier the elisp client
+     * read off the AF_UNIX socket immediately after connect (the
+     * supervisor writes 16 raw bytes on accept, no length prefix).
+     * the same nonce arrives at the supervisor side via the AF_UNIX
+     * stream (so the supervisor can match the Mach submit_nonce
+     * message to the right AF_UNIX connection).  must be non-NULL;
+     * NULL returns -1 with errno=EINVAL.
      *
      * the full design lives at docs/v08-hurd-peer-cred-design.md;
-     * the seam is intentionally tiny (one slot, one int return) so a
-     * skeptic review can verify "linux is no-op, hurd does N steps"
-     * by reading the two bodies side by side. */
-    int (*client_auth_handshake)(int fd);
+     * the seam is intentionally tiny (one slot, two args, one int
+     * return) so a skeptic review can verify "linux is no-op, hurd
+     * does N steps" by reading the two bodies side by side. */
+    int (*client_auth_handshake)(int fd, const uint8_t nonce[16]);
 
     /* publish the long-lived auth Mach port the design-2.2 handshake
      * needs.  the supervisor calls this exactly once at startup, before

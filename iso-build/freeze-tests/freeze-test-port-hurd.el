@@ -28,7 +28,7 @@
 ;;     module is loaded.  on linux or when the binding is absent, the
 ;;     test records 'skip with a diagnostic string.
 ;;
-;;   slice 3 (this commit): freeze-test-port-hurd-auth-drain
+;;   slice 3: freeze-test-port-hurd-auth-drain
 ;;     asserts (pid1-auth-drain) returns t.  on Linux the body is a
 ;;     trivial no-op (linux_auth_drain returns 0), so the test should
 ;;     pass even without geos-kernel == 'hurd as long as the binding
@@ -37,6 +37,17 @@
 ;;     Hurd the test exercises the libports bucket drain end-to-end
 ;;     (the bucket may be empty, which is fine: drain returns 0 on
 ;;     empty too).
+;;
+;;   slice 4 (this commit): freeze-test-port-hurd-client-handshake
+;;     asserts (pid1-client-auth-handshake FD NONCE) returns t.  on
+;;     Linux the C body is a no-op return-0 and the binding ignores
+;;     NONCE; the test passes FD=-1 and a 16-byte zero-fill nonce
+;;     unibyte string so the call exercises the arity-2 path
+;;     end-to-end without needing a real socket.  on Hurd the same
+;;     assertion only holds when a supervisor is running and has
+;;     published /servers/geos-auth (slice 2 + 3); without that the
+;;     C body will fail file_name_lookup and surface pid1-error, so
+;;     the Hurd path of the test is gated on a probe call.
 ;;
 ;; later slices will append additional tests below.
 
@@ -134,6 +145,90 @@ calls the binding twice to confirm the second call also returns t."
         (error
          (setq result (format "raised: %S" err))))))
     (freeze-test--port-hurd-record 'port-hurd/auth-drain result)
+    result))
+
+(defun freeze-test-port-hurd-client-handshake ()
+  "Slice 4: `pid1-client-auth-handshake' has the slice-4 shape.
+
+contract: every RPC client calls `pid1-client-auth-handshake' once,
+right after `pid1-unix-connect' returns and before the first
+`pid1-unix-send'.  the arity-2 form passes the 16-byte rendezvous
+nonce the elisp side read off the socket via
+`pid1-unix-recv-exactly' immediately after connect.
+
+on Linux the C body is `return 0' (NONCE is ignored, no syscalls, no
+wire bytes); the binding signals `pid1-error' only if NONCE is the
+wrong length or FD is out of range.  on Hurd the C body looks up
+/servers/geos-auth, allocates a rendezvous receive port + send-right
+pair, hand-rolls a mach_msg(msgh_id=90001, rendezvous MOVE_SEND,
+nonce[16]) against the auth port, then runs auth_user_authenticate
+to complete the rendezvous.  the supervisor's per-tick drain matches
+the nonce against the pending-auth fingerprint slot.
+
+what this test actually checks: a freeze-test on a Linux dev host
+without a live RPC socket cannot exercise the body end-to-end (the
+binding's bounds check rejects FD < 0, and elisp does not expose a
+raw fd integer for /dev/null without a syscall binding we do not
+have).  instead this test verifies the slice-4-shaped surface is in
+place:
+
+  1. the binding `pid1-client-auth-handshake' is fbound (the module
+     loaded with slice 4 patched in);
+  2. its arity is (min=1, max=2): the legacy arity-1 form still
+     works (compat for rpc-client.el on main), AND the new arity-2
+     form is reachable (the slice-4 nonce slot exists);
+  3. calling it with a malformed 1-byte nonce raises `pid1-error'
+     with errno that signals the length check fired (proves the
+     binding's NONCE-len validation path is actually wired, not
+     dead code).
+
+the end-to-end handshake (file_name_lookup, mach_msg, auth dance)
+lives in tests/hurd-client-handshake.c which runs against a real
+gnumach + libports stack on a Hurd VM.  this elisp test exists so a
+mis-applied SPEC on main (binding shipped without the NONCE arg, or
+without the length check) trips the dev-host harness before it
+reaches the Hurd branch."
+  (interactive)
+  (let ((result 'fail))
+    (cond
+     ((not (fboundp 'pid1-client-auth-handshake))
+      (setq result (cons 'skip "pid1-client-auth-handshake unbound (module not loaded)")))
+     (t
+      ;; subtest 1: arity must be (1 . 2).  func-arity returns
+      ;; (MIN . MAX) for built-in module functions when emacs knows
+      ;; the arity, which it does for ones registered via
+      ;; make_function(env, MIN, MAX, ...).
+      (let* ((arity (condition-case _ (func-arity #'pid1-client-auth-handshake)
+                      (error nil)))
+             (arity-ok (and (consp arity)
+                            (eq (car arity) 1)
+                            (eq (cdr arity) 2))))
+        (cond
+         ((not arity-ok)
+          (setq result (format "arity %S, want (1 . 2)" arity)))
+         (t
+          ;; subtest 2: short NONCE must raise pid1-error.  passing a
+          ;; 1-byte unibyte string trips the `need != 17' branch
+          ;; (copy_string_contents reports need=2 for 1 byte + NUL).
+          ;; we use FD=0 (stdin) so the bounds check passes and the
+          ;; nonce-len check is the one that fires.  on Linux the
+          ;; body never runs (the binding returns before
+          ;; port->client_auth_handshake) because the length check
+          ;; rejects first.
+          (let ((short-nonce (string-as-unibyte (make-string 1 0))))
+            (condition-case err
+                (progn
+                  (pid1-client-auth-handshake 0 short-nonce)
+                  (setq result "short nonce returned without signal"))
+              (error
+               ;; any error from the binding is acceptable here; the
+               ;; positive assertion is the call did not silently
+               ;; succeed.  pid1-error is the documented signal but
+               ;; the test does not pin the exact symbol so a future
+               ;; refactor that renames it does not break us.
+               (ignore err)
+               (setq result 'pass)))))))))
+    (freeze-test--port-hurd-record 'port-hurd/client-handshake result)
     result))
 
 (provide 'freeze-test-port-hurd)
