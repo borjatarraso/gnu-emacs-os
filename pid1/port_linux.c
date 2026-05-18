@@ -276,12 +276,17 @@ linux_get_peer_cred(int fd, uint32_t *uid_out, uint32_t *gid_out)
  * connect(2) without having to branch on kernel; on Hurd the same
  * call performs the rendezvous-port dance against the auth server.
  *
- * the (void) cast on FD is the standard -Wunused-parameter -Werror
- * dance for a stub that genuinely ignores its argument. */
+ * slice 4 of v0.8 design-2.2 grew this signature to take a 16-byte
+ * NONCE arg matching the Hurd backend's needs (the elisp side reads
+ * the supervisor-minted nonce off the socket before calling the
+ * handshake).  Linux ignores it; the (void) casts on FD + NONCE are
+ * the standard -Wunused-parameter -Werror dance for a stub that
+ * genuinely ignores its arguments. */
 static int
-linux_client_auth_handshake(int fd)
+linux_client_auth_handshake(int fd, const uint8_t nonce[16])
 {
     (void)fd;
+    (void)nonce;
     return 0;
 }
 
