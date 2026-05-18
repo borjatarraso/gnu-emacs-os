@@ -831,6 +831,23 @@ struct submit_nonce_request {
     uint8_t           nonce[GEOS_AUTH_NONCE_LEN];
 };
 
+/* publish/pending state hoisted for hurd_get_peer_cred.  the canonical
+ * definitions and the long-form rationale live near the libports
+ * publish_auth_port block ~line 1167; we duplicate just the names +
+ * struct shape here because hurd_get_peer_cred is keyed on the table
+ * and we want the lookup body to stay co-located with the slice-5
+ * design comment above it.  keep these in sync with the canonical
+ * defs; the compiler will catch any drift via redeclaration errors. */
+#define GEOS_AUTH_PENDING_MAX 16
+struct pending_auth_row {
+    uint8_t   nonce[GEOS_AUTH_NONCE_LEN];
+    uint32_t  uid;
+    uint32_t  gid;
+    time_t    expiry;       /* 0 = empty slot */
+};
+static struct port_info *auth_port_obj;
+static struct pending_auth_row pending_auth[GEOS_AUTH_PENDING_MAX];
+
 /* peer credentials over AF_UNIX, server side of the v0.8 design-2.2
  * handshake (slice 5 rewrite).  design at
  * docs/v08-hurd-peer-cred-design.md section 3.5.2.
@@ -1166,7 +1183,10 @@ hurd_client_auth_handshake(int fd, const uint8_t nonce[GEOS_AUTH_NONCE_LEN])
  * means "auth channel live, drain at every tick". */
 static struct port_bucket *auth_bucket = NULL;
 static struct port_class  *auth_class  = NULL;
-static struct port_info   *auth_port_obj = NULL;
+/* auth_port_obj hoisted to top of file (above hurd_get_peer_cred) so
+ * the slice-5 lookup can reference it without a circular textual
+ * dependency; defined as the canonical tentative-definition there,
+ * which the linker resolves to a single zero-init slot. */
 
 /* pending-auth table.  populated by S_geos_auth_submit_nonce as it
  * extracts {uid, gid} via auth_server_authenticate; read by
@@ -1183,19 +1203,12 @@ static struct port_info   *auth_port_obj = NULL;
  * future libports threadpool ever serves requests in parallel, this
  * table needs a mutex.  documented in port_layer.h's auth_drain
  * docstring. */
-#define GEOS_AUTH_PENDING_MAX 16
-/* GEOS_AUTH_NONCE_LEN hoisted to top of file (above hurd_get_peer_cred)
- * so hurd_client_auth_handshake can reference it; do not redeclare. */
+/* GEOS_AUTH_PENDING_MAX, struct pending_auth_row, and the
+ * pending_auth[] array itself are hoisted above hurd_get_peer_cred
+ * (this file's first user) so the lookup body stays co-located with
+ * the slice-5 design comment.  GEOS_AUTH_NONCE_LEN is hoisted there
+ * too; do not redeclare. */
 #define GEOS_AUTH_TTL_SECS    5
-
-struct pending_auth_row {
-    uint8_t   nonce[GEOS_AUTH_NONCE_LEN];
-    uint32_t  uid;
-    uint32_t  gid;
-    time_t    expiry;       /* 0 = empty slot */
-};
-
-static struct pending_auth_row pending_auth[GEOS_AUTH_PENDING_MAX];
 
 /* GEOS_AUTH_SUBMIT_NONCE_MSGID hoisted to top of file (above
  * hurd_get_peer_cred) so hurd_client_auth_handshake can reference it.
@@ -1316,7 +1329,10 @@ fsys_getroot (fsys_t fsys,
     if (auth_port_obj == NULL) {
         *file = MACH_PORT_NULL;
         *filePoly = MACH_MSG_TYPE_COPY_SEND;
-        *do_retry = FS_RETRY_NONE;
+        /* Debian Hurd 0.9 enum retry_type defines NORMAL/REAUTH/MAGICAL
+         * only; FS_RETRY_NONE does not exist.  the "no further dir_lookup
+         * needed" idiom in fs.defs is FS_RETRY_NORMAL with empty name. */
+        *do_retry = FS_RETRY_NORMAL;
         retry_name[0] = '\0';
         return EOPNOTSUPP;
     }
