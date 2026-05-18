@@ -127,7 +127,16 @@ console(const char *msg)
  * is unreadable, empty, or whitespace-only. invariant: never errors
  * out the boot. failures log to /dev/console and continue. boot path
  * only because console() is gated on !PID1_MODULE; the module path
- * uses Fpid1_set_hostname driven from elisp instead. */
+ * uses Fpid1_set_hostname driven from elisp instead.
+ *
+ * on Hurd, sethostname can return EROFS (the glibc-hurd wrapper's
+ * /etc/hostname persistence step hits the read-only root at init
+ * time, before the rootfs is remounted rw).  we log and continue.
+ * core/hostname.el's `hostname-apply' runs at supervisor load time
+ * and re-calls `pid1-set-hostname' (the module binding wired into
+ * the same port->set_hostname slot), so the proc-server gets the
+ * right value once the rootfs is writable; no C-side retry
+ * machinery is needed. */
 static void
 set_hostname_at_boot(void)
 {
@@ -1085,12 +1094,12 @@ spawn_emacs(void)
         argv[ai] = NULL;
 
         /* envp is fixed-size; we splice PID1_MODULE_PATH, DISPLAY,
-         * GEOS_MODE and GEOS_KERNEL in if they were set.  4 fixed
-         * entries + up to 4 conditional + trailing NULL = 9 slots
-         * worst-case today.  the cap is sized at 12 to leave headroom
-         * for the next env splice (skeptic B2: a missing bump on the
-         * next addition would write envp[ei] = NULL one past the array
-         * and the bug class is "supervisor execve overruns envp" which
+         * GEOS_MODE, GEOS_KERNEL in if they were set.  4 fixed entries
+         * + up to 4 conditional + trailing NULL = 9 slots worst-case
+         * today.  the cap is sized at 12 to leave headroom for the
+         * next env splice (skeptic B2: a missing bump on the next
+         * addition would write envp[ei] = NULL one past the array and
+         * the bug class is "supervisor execve overruns envp" which
          * brick-installs).  raise the cap together with any new
          * envp[ei++] line. */
         char *envp[12];
