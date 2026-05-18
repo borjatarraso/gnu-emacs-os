@@ -115,19 +115,36 @@ typedef struct port_caps {
     int (*suspend)(const char *state);
 
     /* peer credentials for an AF_UNIX SOCK_STREAM accepted fd.
-     * on Linux this is getsockopt(SO_PEERCRED) returning struct ucred.
-     * on Hurd there is no SO_PEERCRED; auth ports passed via mach_msg
-     * are the native equivalent but require a separate handshake the
-     * RPC channel does not have yet.  the Hurd backend returns -1 with
-     * errno=ENOSYS until a real handshake lands.  the supervisor side
-     * (Fpid1_rpc_poll) special-cases ENOSYS by closing the connection
-     * and returning nil to the poller, so the per-200ms timer does not
-     * panic forever on the unsupported kernel; every other errno is
-     * forwarded as pid1-error and panic-handled.  UID_OUT / GID_OUT
-     * are written only on success; on failure their contents are
-     * unspecified, and the caller initialises them to a non-root
-     * sentinel before the port call as defence in depth. */
-    int (*get_peer_cred)(int fd, uint32_t *uid_out, uint32_t *gid_out);
+     * on Linux this is getsockopt(SO_PEERCRED) returning struct ucred;
+     * NONCE is ignored.  on Hurd there is no SO_PEERCRED; the
+     * supervisor minted a 16-byte NONCE on accept, wrote it to the
+     * client, and the client ran the auth_user_authenticate dance
+     * against the gnumach auth server with the matching NONCE in the
+     * submit_nonce mach_msg.  hurd_get_peer_cred consults the
+     * pending_auth[] table the per-tick drain has populated; if the
+     * NONCE row is present, the uid/gid are copied out and the row is
+     * cleared.  if the NONCE row is not yet present the body sleeps
+     * 200ms and retries up to 5 times, surfacing ETIMEDOUT if the
+     * client never completes the handshake.  rows in pending_auth[]
+     * also expire after 5s so an abandoned handshake never wedges.
+     * the supervisor side (Fpid1_rpc_poll) special-cases ENOSYS by
+     * closing the connection and returning nil to the poller, so the
+     * per-200ms timer does not panic forever on a backend that does
+     * not implement the call; every other errno is forwarded as
+     * pid1-error and panic-handled.  UID_OUT / GID_OUT are written
+     * only on success; on failure their contents are unspecified, and
+     * the caller initialises them to a non-root sentinel before the
+     * port call as defence in depth.  NONCE must be non-NULL; the
+     * Hurd backend returns -1 with errno=EINVAL on NULL, and ENOSYS
+     * if publish_auth_port has not run.
+     *
+     * slice 5 of v0.8 design 2.2 grew this signature to take the
+     * 16-byte NONCE the supervisor wrote to the client on accept.
+     * the Linux backend ignores NONCE; the (void)nonce cast keeps
+     * -Wunused-parameter -Werror clean.  full design at
+     * docs/v08-hurd-peer-cred-design.md section 3.5.2. */
+    int (*get_peer_cred)(int fd, const uint8_t nonce[16],
+                         uint32_t *uid_out, uint32_t *gid_out);
 
     /* client-side counterpart to get_peer_cred.  the Linux peer-cred
      * model is server-only: getsockopt(SO_PEERCRED) reads a snapshot

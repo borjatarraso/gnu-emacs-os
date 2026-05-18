@@ -2302,7 +2302,14 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
      * default would be the worst possible footgun.  -1 is "nobody"
      * on every kernel we target. */
     uint32_t peer_uid = (uint32_t)-1, peer_gid = (uint32_t)-1;
-    if (port->get_peer_cred(conn, &peer_uid, &peer_gid) < 0) {
+    /* placeholder all-zero nonce: the real mint + send-to-client lands in
+     * the next commit on main (slice 5 supervisor splice).  Linux ignores
+     * NONCE entirely; Hurd would not yet match a real client without the
+     * mint side, so the all-zero buffer keeps the build clean under the
+     * new signature without changing observable behaviour on Linux. */
+    uint8_t nonce[16];
+    memset(nonce, 0, sizeof nonce);
+    if (port->get_peer_cred(conn, nonce, &peer_uid, &peer_gid) < 0) {
         int err = errno;
         if (err == ENOSYS) {
             /* log the refusal once per boot: the 200ms tick would
