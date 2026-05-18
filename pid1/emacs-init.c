@@ -42,6 +42,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/random.h>
 #include <sys/reboot.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -2302,13 +2303,42 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
      * default would be the worst possible footgun.  -1 is "nobody"
      * on every kernel we target. */
     uint32_t peer_uid = (uint32_t)-1, peer_gid = (uint32_t)-1;
-    /* placeholder all-zero nonce: the real mint + send-to-client lands in
-     * the next commit on main (slice 5 supervisor splice).  Linux ignores
-     * NONCE entirely; Hurd would not yet match a real client without the
-     * mint side, so the all-zero buffer keeps the build clean under the
-     * new signature without changing observable behaviour on Linux. */
+    /* slice 5 of v0.8 design 2.2: mint a 16-byte rendezvous NONCE and
+     * write it to the client before any other byte hits the wire.  the
+     * client (rpc-client.el) reads exactly 16 bytes with
+     * pid1-unix-recv-exactly, then passes them to
+     * pid1-client-auth-handshake which uses them as the matching
+     * identifier on the Hurd auth_user_authenticate dance.  on Linux
+     * the bytes are read and discarded by the client; the supervisor's
+     * Linux get_peer_cred backend ignores NONCE and continues to use
+     * SO_PEERCRED.  the NONCE must arrive at the client before our
+     * peer-cred read; the order is mint -> send -> get_peer_cred so the
+     * Hurd backend's pending_auth[] lookup has a chance to find the
+     * row the client has posted via the mach side channel.
+     *
+     * getentropy(2) is glibc-portable (Hurd's glibc ships it) and the
+     * call is bounded to 256 bytes per the manpage, well above our 16.
+     * a getentropy failure here is "the kernel ran out of entropy",
+     * which on Linux is essentially never; treat it as a transient
+     * client error (close the fd, return nil to the poller) rather
+     * than panicking the 200ms tick.
+     *
+     * the send(2) uses MSG_NOSIGNAL so a client that disconnected
+     * between accept and our first write does not raise SIGPIPE on
+     * the supervisor.  short writes on a fresh SOCK_STREAM connection
+     * with 16 bytes of payload should not happen on any sane kernel,
+     * but we still check: a short write is treated as a client error
+     * (close the fd, return nil) for the same reason as getentropy. */
     uint8_t nonce[16];
-    memset(nonce, 0, sizeof nonce);
+    if (getentropy(nonce, sizeof nonce) < 0) {
+        close(conn);
+        return Qnil;
+    }
+    ssize_t nw = send(conn, nonce, sizeof nonce, MSG_NOSIGNAL);
+    if (nw != (ssize_t)sizeof nonce) {
+        close(conn);
+        return Qnil;
+    }
     if (port->get_peer_cred(conn, nonce, &peer_uid, &peer_gid) < 0) {
         int err = errno;
         if (err == ENOSYS) {
