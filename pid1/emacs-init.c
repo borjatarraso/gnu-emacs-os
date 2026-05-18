@@ -2437,15 +2437,18 @@ Fpid1_client_auth_handshake(emacs_env *env, ptrdiff_t nargs,
                             emacs_value *args, void *data)
 {
     (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
     if (nargs != 1)
         return pid1_signal_errno(env,
                                  "pid1: client-auth-handshake: nargs",
                                  EINVAL);
     intmax_t fd_im = env->extract_integer(env, args[0]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return Qnil;
     if (fd_im < 0 || fd_im > 0x7fffffff)
         return pid1_signal_errno(env,
                                  "pid1: client-auth-handshake: fd out of range",
-                                 EBADF);
+                                 EINVAL);
     int fd = (int)fd_im;
     if (port->client_auth_handshake(fd) < 0)
         return pid1_signal_errno(env,
