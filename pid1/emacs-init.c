@@ -220,7 +220,16 @@ static void
 do_mount(const char *src, const char *tgt, const char *type,
          unsigned long flags, const char *opts)
 {
-    if (mkdir(tgt, 0755) < 0 && errno != EEXIST) {
+    /* access(F_OK) gate: on Hurd, mkdir on a directory that already
+     * exists under a read-only root returns EROFS, NOT EEXIST, so the
+     * existing if-clause's EEXIST guard never fires and the boot log
+     * fills with "pid1: mkdir /tmp failed: Read-only file system"
+     * lines for every standard dir that was already there.  the access
+     * pre-check skips mkdir entirely when the dir exists.  on Linux
+     * mkdir-on-existing-dir returns EEXIST cleanly, so this gate is a
+     * cheap no-op there. */
+    if (access(tgt, F_OK) != 0 &&
+        mkdir(tgt, 0755) < 0 && errno != EEXIST) {
         char buf[256];
         snprintf(buf, sizeof buf,
                  "pid1: mkdir %s failed: %s", tgt, strerror(errno));
@@ -490,8 +499,20 @@ mount_var(void)
     char buf[256];
     /* /var may not exist on a fresh root; the guix system image populates
      * it during activation, but we run BEFORE activation. mkdir is
-     * idempotent for our purposes (EEXIST is success). */
-    if (mkdir("/var", 0755) < 0 && errno != EEXIST) {
+     * idempotent for our purposes (EEXIST is success).
+     *
+     * the access(F_OK) gate ahead of mkdir is for the Hurd case where
+     * the root filesystem is still mounted read-only at PID-1 time (no
+     * Debian checkroot.sh runs because /sbin/init is no longer
+     * sysvinit's init).  mkdir on a RO root returns EROFS, NOT EEXIST,
+     * even when the directory already exists; the unguarded version
+     * dumped a "pid1: mkdir /var failed: Read-only file system" line on
+     * every Hurd boot even though /var was right there.  on Linux this
+     * gate is dead weight (mkdir on an existing dir returns EEXIST which
+     * the if-clause already skips) but the cost is one access() syscall
+     * which doesn't move the needle on boot time. */
+    if (access("/var", F_OK) != 0 &&
+        mkdir("/var", 0755) < 0 && errno != EEXIST) {
         snprintf(buf, sizeof buf,
                  "pid1: mkdir /var failed: %s", strerror(errno));
         console(buf);
