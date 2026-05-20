@@ -172,6 +172,15 @@ want every other interface to come up.  log and continue."
 ;; pure: open file, parse, return data. no buffer side effects leak
 ;; out, no global state mutated. these are the sort of thing the
 ;; *network* buffer (later) will poll on a timer.
+;;
+;; hurd tier A note (v0.9.2). hurd procfs has no /proc/net/ subtree
+;; at all. the route table lives at /proc/route (no `net/' prefix),
+;; with decimal-dotted addresses and `/dev/<iface>' in the iface
+;; column. there is no /proc/net/dev equivalent, so the hurd
+;; "interface counters" reader is a derived list: one row per iface
+;; observed in /proc/route plus a synthetic lo, with every counter
+;; field zeroed. tier B (pfinet RPC for real byte/packet counters)
+;; belongs in port_hurd.c and is out of v0.9.2 scope.
 
 (defun network--read-file (path)
   "Return contents of PATH as a string, or signal `network-error'.
@@ -223,26 +232,66 @@ row.  see `network-read-proc-net-dev' for the plist shape."
                   out)))))
     (nreverse out)))
 
+(defun network--read-proc-net-dev-hurd ()
+  "Hurd backend for `network-read-proc-net-dev'.
+Hurd procfs has no /proc/net/dev equivalent, so there is no text
+file to parse for byte/packet counters.  derive the iface set
+from `network--read-proc-net-route-hurd' (which has already
+stripped the `/dev/' prefix) and return one row per unique iface
+with every counter field stub-zero.  lo rarely shows up in
+/proc/route, so force it in.
+
+calling the route reader from inside the dev reader is
+intentional: both fire from the same *network* buffer refresh
+tick, the route file is small, and writing a second parser of
+the same file just to scrape an iface list would be silly.  real
+byte/packet counters need a pfinet RPC against /servers/socket/2
+and live in port_hurd.c; deferred.
+
+KNOWN LIMITATION: Linux /proc/net/dev enumerates every kernel-
+known iface regardless of routing state.  this derivation only
+sees ifaces that have at least one route, so a configured-but-
+DOWN secondary iface with no route will be invisible in *network*
+on Hurd.  in practice the v0.9.2 canonical VM has one routed eth0
+plus lo so nothing hides today; documenting the asymmetry here
+because the pfinet-RPC follow-up is the proper fix."
+  (let* ((rows (network--read-proc-net-route-hurd))
+         (ifaces '())
+         (out '()))
+    (dolist (r rows)
+      (let ((ifc (plist-get r :iface)))
+        (when (and ifc (not (member ifc ifaces)))
+          (push ifc ifaces))))
+    (unless (member "lo" ifaces)
+      (push "lo" ifaces))
+    (dolist (ifc (nreverse ifaces))
+      (push (list :iface      ifc
+                  :rx-bytes   0
+                  :rx-packets 0
+                  :rx-errs    0
+                  :rx-drop    0
+                  :tx-bytes   0
+                  :tx-packets 0
+                  :tx-errs    0
+                  :tx-drop    0)
+            out))
+    (nreverse out)))
+
 (defun network-read-proc-net-dev ()
   "Parse interface counters into a list of plists, one per interface.
 Each plist: (:iface STRING :rx-bytes N :rx-packets N :rx-errs N
 :rx-drop N :tx-bytes N :tx-packets N :tx-errs N :tx-drop N).
-Dispatches on `geos-kernel': on linux, reads /proc/net/dev; on
-hurd, the equivalent surface is the pfinet translator at
-/servers/socket/2 plus an RPC walk.  hurd backend is not wired
-yet, so the hurd arm routes through `geos-port-unimplemented'
-and returns nil; the *network* buffer renders an empty interface
-table in that case rather than dying.
-
-The function name keeps \"proc-net-dev\" for backward compatibility
-with callers and for self-documenting commit blame; on hurd it is
-a misnomer but renaming everywhere is more churn than it is worth."
+Dispatches on `geos-kernel': linux reads /proc/net/dev; hurd has
+no equivalent file, so the hurd arm derives the iface set from
+/proc/route (via `network--read-proc-net-dev-hurd') with every
+counter field stub-zero.  real per-iface counters on hurd need a
+pfinet RPC against /servers/socket/2 and live in port_hurd.c;
+deferred."
   (cond
    ((geos-kernel-linux-p)
     (network--read-proc-net-dev-linux))
    ((geos-kernel-hurd-p)
-    (geos-port-unimplemented 'network-read-proc-net-dev)
-    nil)
+    (network--read-proc-net-dev-hurd))
    (t
     (geos-port-unimplemented 'network-read-proc-net-dev)
     nil)))
@@ -288,21 +337,59 @@ for the plist shape."
                 out))))
     (nreverse out)))
 
+(defun network--read-proc-net-route-hurd ()
+  "Hurd backend for `network-read-proc-net-route'.
+Parses /proc/route (no `net/' prefix on Hurd procfs).  same 11-
+column header shape as the Linux file, but addresses are decimal-
+dotted already (so we do NOT pass them through `network--hex-to-
+ipv4') and the Iface column carries `/dev/<ifname>' which we
+strip down to the bare ifname so the *network* buffer renders
+`eth0' matching the Linux side.
+
+FLAGS BASE: parsed as hex to match Linux convention and the
+`%04X' zero-padded shape the procfs translator emits.  the
+v0.9.2 verification sample only contained values 0001 and 0003
+which read identically in either base, so this is an inference
+from format shape rather than a proven choice; if a future probe
+catches a value like `0010' decoding wrong (16 vs 10) flip to
+base 10 here.  filed for the v0.9.2 VM re-verify checklist."
+  (let* ((raw (network--read-file "/proc/route"))
+         (lines (split-string raw "\n" t))
+         (data-lines (cdr lines)) ;; first line is the column header
+         (out '()))
+    (dolist (line data-lines)
+      (let* ((cols (network--split-fields line))
+             (raw-iface (and (>= (length cols) 8) (nth 0 cols)))
+             (iface (cond
+                     ((null raw-iface) nil)
+                     ((string-prefix-p "/dev/" raw-iface)
+                      (substring raw-iface (length "/dev/")))
+                     (t raw-iface))))
+        (when (and iface (not (string-empty-p iface)))
+          (push (list :iface  iface
+                      :dest   (nth 1 cols)
+                      :gw     (nth 2 cols)
+                      :flags  (string-to-number (nth 3 cols) 16)
+                      :metric (string-to-number (nth 6 cols))
+                      :mask   (nth 7 cols))
+                out))))
+    (nreverse out)))
+
 (defun network-read-proc-net-route ()
   "Parse the kernel routing table into a list of plists.
 Each plist: (:iface STRING :dest STRING :gw STRING :mask STRING
 :flags INT :metric INT). Addresses are converted from kernel hex
 to dotted IPv4 on linux.
 
-Dispatches on `geos-kernel': linux reads /proc/net/route; hurd's
-equivalent is a pfinet RPC walk and is not wired yet, so the hurd
-arm routes through `geos-port-unimplemented' and returns nil."
+Dispatches on `geos-kernel': linux reads /proc/net/route; hurd
+reads /proc/route (no `net/' prefix) where addresses are decimal-
+dotted on disk and the iface column has the `/dev/' prefix
+stripped before it lands in the plist."
   (cond
    ((geos-kernel-linux-p)
     (network--read-proc-net-route-linux))
    ((geos-kernel-hurd-p)
-    (geos-port-unimplemented 'network-read-proc-net-route)
-    nil)
+    (network--read-proc-net-route-hurd))
    (t
     (geos-port-unimplemented 'network-read-proc-net-route)
     nil)))
