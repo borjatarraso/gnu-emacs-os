@@ -23,14 +23,16 @@
 ;; "Linux". that is correct behavior: the kernel IS Linux. GEOS is
 ;; the OS that runs ON Linux. only the user-facing CLI is rebranded.
 ;;
-;; on hurd the /proc/sys/kernel/* nodes do not exist: hurd's procfs
-;; translator only exposes /proc/<pid>/* and a handful of summary
-;; nodes.  the four reads below would silently return "" for every
-;; field, and the user would see a uname line of bare hostnames.  the
-;; port seam in core/port.el carries the branch: on hurd we synthesize
-;; the four UTS fields from Emacs built-ins (system-name,
-;; emacs-build-time, system-configuration) so eshell/uname still has
-;; something to print.  the branch lives at the data-source layer
+;; on hurd the /proc/sys/kernel/* nodes MAY exist (the hurd procfs
+;; translator exposes them, with hurd-native values like "GNU" for
+;; ostype and "0.9" for osrelease) or MAY return "" if the translator
+;; is not mounted or the node is stripped.  the port seam in
+;; core/port.el carries the branch: on hurd we try the same four
+;; /proc reads first, and fall back PER FIELD to Emacs built-ins
+;; (system-name, emacs-build-time, literal "GNU") for any node that
+;; returns "".  per-field, not all-or-nothing: a half-populated
+;; procfs gets stitched together with synthesized defaults for the
+;; missing columns.  the branch lives at the data-source layer
 ;; (geos--uname), the eshell entry point geos/uname is unchanged.
 
 (require 'panic)
@@ -66,54 +68,84 @@ which is what coreutils uname does too on a stripped /proc."
         :version (geos--uts-field "/proc/sys/kernel/version")
         :host    (geos--uts-field "/proc/sys/kernel/hostname")))
 
+(defun geos--parse-proc-version-hurd (raw)
+  "Parse Hurd's /proc/version into a (RELEASE . VERSION) cons.
+On Debian Hurd 0.9 the file is of the form
+  Linux version 2.6.1 (GNU 0.9 GNU-Mach ... x86_64)
+the leading \"Linux version 2.6.1\" is a Linux-compat preamble;
+the parenthesised payload is what we actually want.  RELEASE comes
+from the \"GNU <release>\" prefix inside the parens (\"0.9\" here);
+VERSION is the rest of the parenthesised payload (the Mach build
+string plus arch).  returns nil if RAW does not match the expected
+shape so callers fall back to the synthesized defaults."
+  (when (stringp raw)
+    (let ((trimmed (string-trim raw)))
+      (when (string-match
+             "(GNU \\([^ )]+\\) +\\(.*\\))[^()]*\\'"
+             trimmed)
+        (cons (match-string 1 trimmed)
+              (string-trim (match-string 2 trimmed)))))))
+
 (defun geos--uname-hurd ()
   "Hurd backend for `geos--uname'.
-The /proc/sys/kernel/* nodes do not exist on hurd's procfs translator,
-so we synthesize the four UTS fields from Emacs built-ins:
+Try the same /proc/sys/kernel/* paths Linux uses; the hurd procfs
+translator exposes them when configured with sysctl emulation,
+with hurd-native values (ostype likely \"GNU\" or \"Hurd\",
+osrelease likely something like \"0.9\").  Stock Debian Hurd 0.9
+does NOT publish /proc/sys/, so the per-field reads fall through
+to a secondary source: /proc/version, which is exposed unconditionally
+and carries a (GNU <release> GNU-Mach <version> ...) payload we can
+parse for :release and :version.  if even /proc/version is absent
+we substitute synthesized defaults per-field:
 
-  :kernel  literal \"GNU\"  (mach + hurd servers, no kernel string
-                              file to read; matches what `uname -s'
-                              prints on a real hurd box)
-  :release placeholder \"0.9\".  hurd has no userland-readable
-                              equivalent of /proc/sys/kernel/osrelease;
-                              the side-branch port will substitute the
-                              real release once a Mach-RPC source lands.
-  :version `emacs-build-time' formatted as a coreutils-style date.
-                              correct enough for an audit of WHEN this
-                              userland was built; not the kernel's
-                              build date, but no userland source for
-                              that either.
-  :host    `(system-name)', which on a booted GEOS is what
+  :kernel  default \"GNU\"  (mach + hurd servers; matches `uname -s'
+                              on a real hurd box)
+  :release default \"unknown\".  /proc/version parse gives \"0.9\"
+                              on debian hurd 0.9 when the sysctl
+                              tree is missing.
+  :version default `GEOS-userland built <emacs-build-time>'.
+                              /proc/version parse gives the GNU-Mach
+                              build string when the sysctl tree is
+                              missing; honest fallback otherwise.
+  :host    default `(system-name)', which on a booted GEOS is what
                               /etc/hostname applied via pid1's
                               sethostname(2) call.
 
-No shelling-out, no /proc reads.  the eshell uname rebrand prefers
-something over nothing here."
-  (list :kernel  "GNU"
-        ;; TODO(hurd): replace literal "0.9" once pid1 exports the
-        ;; gnumach release string through the port table.  the
-        ;; placeholder is grep-able so the deferred-work flag is
-        ;; visible to anyone scanning git blame for this column.
-        :release "0.9"
-        ;; prefix with "GEOS-userland built " so the column does not
-        ;; impersonate a kernel-build-date field on real-hurd output.
-        ;; uname -v on linux prints the kernel's own build date; we
-        ;; cannot read gnumach's build date today, so we render what
-        ;; we DO know (this userland's build time) honestly.
-        :version (concat "GEOS-userland built "
-                         (format-time-string "%a %b %e %H:%M:%S %Y"
-                                             (or emacs-build-time
-                                                 (current-time))))
-        :host    (or (system-name) "")))
+Per-field fallback, not all-or-nothing: a half-populated procfs
+gets stitched together with /proc/version data or synthesized
+defaults for the missing columns.  no shelling-out."
+  (let* ((proc-kernel  (geos--uts-field "/proc/sys/kernel/ostype"))
+         (proc-release (geos--uts-field "/proc/sys/kernel/osrelease"))
+         (proc-version (geos--uts-field "/proc/sys/kernel/version"))
+         (proc-host    (geos--uts-field "/proc/sys/kernel/hostname"))
+         (procv-raw    (geos--uts-field "/proc/version"))
+         (procv-pair   (geos--parse-proc-version-hurd procv-raw))
+         (procv-release (car-safe procv-pair))
+         (procv-version (cdr-safe procv-pair))
+         (synth-version (concat "GEOS-userland built "
+                                (format-time-string
+                                 "%a %b %e %H:%M:%S %Y"
+                                 (or emacs-build-time (current-time))))))
+    (list :kernel  (if (string-empty-p proc-kernel)  "GNU"          proc-kernel)
+          :release (cond ((not (string-empty-p proc-release)) proc-release)
+                         (procv-release procv-release)
+                         (t "unknown"))
+          :version (cond ((not (string-empty-p proc-version)) proc-version)
+                         (procv-version procv-version)
+                         (t synth-version))
+          :host    (if (string-empty-p proc-host)
+                       (or (system-name) "")
+                     proc-host))))
 
 (defun geos--uname ()
   "Return the four UTS fields as a plist, dispatching on `geos-kernel'.
 Plist shape: (:kernel STRING :release STRING :version STRING :host
-STRING).  Linux arm reads /proc/sys/kernel/*; hurd arm synthesizes
-from Emacs built-ins.  the branch lives here (data-source layer),
-not in `eshell/uname' (render layer); that file builds output
-strings out of whatever this returns and never asks which kernel
-it is on."
+STRING).  Linux arm reads /proc/sys/kernel/*; hurd arm reads the
+same paths (hurd procfs translator) and falls back per-field to
+Emacs built-ins for any node that returns \"\".  the branch lives
+here (data-source layer), not in `eshell/uname' (render layer);
+that file builds output strings out of whatever this returns and
+never asks which kernel it is on."
   (cond
    ((geos-kernel-linux-p) (geos--uname-linux))
    ((geos-kernel-hurd-p)  (geos--uname-hurd))

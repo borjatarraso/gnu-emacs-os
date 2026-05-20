@@ -104,13 +104,20 @@ one missing-feature event must not abort the rest of the boot."
 ;;     reader is expected to work; column ordering may differ on hurd
 ;;     and the renderer notes the assumption.
 ;;
-;;   - buffers/disks.el reads /sys/block.  hurd has no sysfs; the
-;;     buffer's data-source layer detects hurd and renders an
-;;     unimplemented message via `geos-port-unimplemented'.
+;;   - buffers/disks.el reads /sys/block on linux.  hurd has no sysfs;
+;;     the v0.9.3 tier A backend walks /dev/ for whole-disk node
+;;     patterns (wd*/hd*/sd*/ucd*/ud*/cd*/fd*) and joins them with
+;;     /proc/mounts (provided by the hurd procfs translator) by
+;;     matching either literal `/dev/NAME' or the store-spec
+;;     `device:NAME' form from fsysopts.  size is unknown for
+;;     unmounted hurd devices pending storeio device_get_status RPC.
 ;;
-;;   - install/disk.el also reads /sys/block.  install wizard is not
-;;     load-bearing for the hurd spike; the entry refuses with a
-;;     clear error on hurd, no branched implementation.
+;;   - install/disk.el also reads /sys/block on linux.  the v0.9.3
+;;     tier A hurd arm enumerates whole disks the same way and parses
+;;     /proc/mounts for mounted-p with both literal and store-spec
+;;     matching.  the wizard's downstream steps (partition/mkfs/grub)
+;;     stay linux-only; buffers/install.el refuses to format on a
+;;     non-linux kernel.
 ;;
 ;;   - early-init.el reads /proc/cmdline.  hurd's procfs translator
 ;;     exposes /proc/cmdline too, so the existing reader works as-is.

@@ -69,25 +69,48 @@ a degraded dev host; degrade to nil silently."
          (t nil)))
     (error nil)))
 
+(defun state--detect-mode-hurd ()
+  "Hurd backend for `state--detect-mode'.
+The Hurd procfs translator exposes /proc/mounts too; the contents
+differ from Linux (an ext2fs translator settles /var instead of an
+ext4 driver, or there is no /var line at all because /var is just a
+subtree of the root translator), but the file shape is the same so
+the same read works.  i accept the hurd-native mount types as-is:
+ext2fs/ext3/ext4 all mean \\='persistent here, tmpfs (unlikely but
+not impossible) means \\='tmpfs, and a missing /var line falls
+through to a writable-probe of state-root.  no special-case parsing
+beyond the type alternation; absent /proc nodes are a normal-case
+degraded mode, not a panic."
+  (condition-case _
+      (with-temp-buffer
+        (insert-file-contents "/proc/mounts")
+        (goto-char (point-min))
+        (cond
+         ((re-search-forward "^[^ ]+ /var tmpfs " nil t) 'tmpfs)
+         ((re-search-forward "^[^ ]+ /var ext[234]\\(?:fs\\)? " nil t) 'persistent)
+         ((file-writable-p state-root) 'tmpfs)
+         (t nil)))
+    (error
+     ;; /proc/mounts not present (no procfs translator yet, or a
+     ;; stripped recovery boot).  fall back to the writable-probe
+     ;; so persistence-aware buffers still see something usable.
+     (if (file-writable-p state-root) 'tmpfs nil))))
+
 (defun state--detect-mode ()
   "Set `state-mode' to \\='persistent, \\='tmpfs, or nil.
-Dispatches on `geos-kernel'.  on linux, reads /proc/mounts to find
-what is on /var.  on hurd, the mount-list surface is different
-(walking /servers or the procfs translator); for now we route the
-miss through `geos-port-unimplemented' and fall back to a writable-
-probe of state-root so persistence-aware buffers still get a usable
-answer.  the buffer header lines will read \"none\" or \"tmpfs\" on
-hurd, which is the documented degraded mode."
+Dispatches on `geos-kernel'.  on linux, reads /proc/mounts and
+matches ext4/tmpfs.  on hurd, reads the same /proc/mounts (the
+procfs translator exposes it) and matches ext2fs/ext3/ext4/tmpfs,
+falling back to a writable-probe if no /var line is present.  on
+an unknown kernel we still route the miss through
+`geos-port-unimplemented' so the post-mortem shows which kernel
+failed."
   (setq state-mode
         (cond
          ((geos-kernel-linux-p)
           (state--detect-mode-linux))
          ((geos-kernel-hurd-p)
-          (geos-port-unimplemented 'state-detect-mode)
-          ;; best-effort fallback: if state-root is writable, treat
-          ;; it as tmpfs (everything works but writes do not survive
-          ;; reboot).  if not, nil (no persistence at all).
-          (if (file-writable-p state-root) 'tmpfs nil))
+          (state--detect-mode-hurd))
          (t
           (geos-port-unimplemented 'state-detect-mode)
           nil))))

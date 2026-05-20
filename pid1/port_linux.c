@@ -34,6 +34,7 @@
 #include <net/route.h>
 #include <netinet/in.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -319,6 +320,118 @@ linux_auth_drain(void)
     return 0;
 }
 
+/* byte size of block device NAME by reading /sys/block/<name>/size.
+ * sysfs publishes the value in 512-byte sectors regardless of the
+ * physical sector size (the ABI doc spells this out at
+ * Documentation/ABI/stable/sysfs-block), so the 512 multiplier is the
+ * stable contract.  uint64_t for the multiply because a 16 TB disk
+ * has ~3.1e10 sectors and uint32_t * 512 wraps somewhere past 8 TB.
+ *
+ * NAME validation: bare device names only, no NULL, no empty string,
+ * no '/' or "..".  the elisp caller already extracted a bare name from
+ * a /dev/ scan; the check here is defence in depth so a future
+ * callsite that grew a "/dev/" prefix can't escape into arbitrary
+ * sysfs paths.  the explicit ".." reject also covers the case where
+ * a synthetic NAME of ".." or ".." would otherwise resolve up the
+ * sysfs tree to something unrelated.  EINVAL on bad input.
+ *
+ * the fd is closed on every exit path; PID 1 never exits, so a fd
+ * leak is forever. */
+static int
+linux_disk_size_bytes(const char *name, uint64_t *out)
+{
+    if (!name || !out) { errno = EINVAL; return -1; }
+    size_t nlen = strlen(name);
+    if (nlen == 0) { errno = EINVAL; return -1; }
+    /* NAME_MAX on linux is 255, but sysfs block names cap much shorter.
+     * cap at 200 here so the snprintf below into a 4096 buffer is
+     * trivially safe and a runaway caller hitting us with a 4-KiB
+     * "name" gets a clean EINVAL instead of a truncated path. */
+    if (nlen > 200) { errno = EINVAL; return -1; }
+    /* reject anything that looks like a path component.  '/' is the
+     * obvious one; ".." would let a caller climb out of /sys/block
+     * (e.g. NAME="..", path becomes "/sys/block/../size" which is
+     * "/sys/size"); leading '.' alone is fine because sysfs has no
+     * dotfiles in /sys/block but we still reject ".." outright. */
+    if (strchr(name, '/') != NULL) { errno = EINVAL; return -1; }
+    if (strcmp(name, "..") == 0 || strcmp(name, ".") == 0) {
+        errno = EINVAL; return -1;
+    }
+
+    char path[4096];
+    int pn = snprintf(path, sizeof path, "/sys/block/%s/size", name);
+    if (pn < 0 || (size_t)pn >= sizeof path) {
+        /* snprintf truncated; treat as EINVAL.  with the 200-byte cap
+         * above this branch is unreachable today, but leave the check
+         * in so a future cap bump can't ship a silent truncation. */
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;  /* open's errno (ENOENT, EACCES, ...) */
+
+    /* /sys/block/<name>/size is a single decimal number plus newline.
+     * a 64-bit count tops out at 20 digits; 32 bytes is a comfortable
+     * cap that catches "someone wrote garbage into the sysfs node"
+     * without overflowing the stack buffer.
+     *
+     * pid1 has live signal handlers (SIGCHLD reaper at minimum) so a
+     * single read() can return short with EINTR or just a partial
+     * count.  loop until EOF or buffer-full, accumulating; treat
+     * "filled the cap without EOF" as malformed sysfs content (EIO). */
+    char buf[32];
+    size_t total = 0;
+    for (;;) {
+        if (total >= sizeof buf - 1) {
+            /* 31 bytes of digits is already past any sane sysfs size
+             * token.  refuse to keep reading. */
+            (void)close(fd);
+            errno = EIO;
+            return -1;
+        }
+        ssize_t r = read(fd, buf + total, sizeof buf - 1 - total);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            int saved = errno;
+            (void)close(fd);
+            errno = saved;
+            return -1;
+        }
+        if (r == 0) break;
+        total += (size_t)r;
+    }
+    (void)close(fd);
+    if (total == 0) { errno = EIO; return -1; }
+    buf[total] = '\0';
+
+    /* strtoull is the right tool: it sets errno=ERANGE on overflow and
+     * gives us an endptr so we can confirm we consumed the whole token.
+     * sysfs writes "<decimal>\n", so the legal terminator set is
+     * "\n" or "\0".  anything else is parse failure. */
+    errno = 0;
+    char *endp = NULL;
+    unsigned long long sectors = strtoull(buf, &endp, 10);
+    if (errno != 0) {
+        /* ERANGE from strtoull, surface as EIO (the value is parseable
+         * but doesn't fit; both meanings are "sysfs gave us junk"). */
+        errno = EIO;
+        return -1;
+    }
+    if (endp == buf) { errno = EIO; return -1; }  /* no digits at all */
+    /* skip a single trailing newline if present, then require NUL */
+    if (*endp == '\n') endp++;
+    if (*endp != '\0') { errno = EIO; return -1; }
+
+    /* 512-byte sectors.  do the multiply in uint64_t so a 16-TB disk
+     * (32 Gi sectors) does not wrap.  strtoull is unsigned long long,
+     * cast to uint64_t before the multiply is paranoia on platforms
+     * where unsigned long long is wider than 64 bits (none we ship to
+     * today, but the cost is zero). */
+    *out = (uint64_t)sectors * (uint64_t)512;
+    return 0;
+}
+
 /* the table.  one assignment per slot, no NULLs.  the Hurd backend
  * will provide a parallel const port_caps port_hurd_impl with the
  * same shape. */
@@ -335,6 +448,7 @@ const port_caps port_linux_impl = {
     .client_auth_handshake = linux_client_auth_handshake,
     .publish_auth_port     = linux_publish_auth_port,
     .auth_drain            = linux_auth_drain,
+    .disk_size_bytes       = linux_disk_size_bytes,
 };
 
 /* the active pointer.  starts NULL; main() and emacs_module_init()
