@@ -2402,7 +2402,6 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
         return pid1_signal_errno(env, "pid1: rpc-poll: read payload", err);
     }
     /* build the plist (:fd FD :uid U :gid G :payload "BYTES"). */
-    emacs_value Qcons = env->intern(env, "cons");
     emacs_value kw_fd      = env->intern(env, ":fd");
     emacs_value kw_uid     = env->intern(env, ":uid");
     emacs_value kw_gid     = env->intern(env, ":gid");
@@ -2411,13 +2410,22 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
     emacs_value v_uid = env->make_integer(env, (intmax_t)peer_uid);
     emacs_value v_gid = env->make_integer(env, (intmax_t)peer_gid);
     emacs_value v_pl  = env->make_string(env, payload, (ptrdiff_t)plen32);
-    /* (list :fd FD :uid U :gid G :payload P) via cons chain. */
+    /* gate before the funcall: OOM during make_string can leave a
+     * non-local exit pending; without this check, funcall would run
+     * with an exit already raised, which is undefined per the module
+     * API.  out-of-range length cannot happen here because plen32
+     * was already clamped to RPC_PAYLOAD_MAX above; OOM under
+     * sustained pressure is the residual risk this check covers.
+     * matches the same shape as the post-funcall check below. */
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
+        close(conn);
+        return Qnil;
+    }
     emacs_value list_args[8] = {
         kw_fd, v_fd, kw_uid, v_uid, kw_gid, v_gid, kw_payload, v_pl
     };
     emacs_value plist = env->funcall(env, env->intern(env, "list"),
                                      8, list_args);
-    (void)Qcons;
     if (env->non_local_exit_check(env) != emacs_funcall_exit_return) {
         close(conn);
         return Qnil;
