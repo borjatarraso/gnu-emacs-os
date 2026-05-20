@@ -2386,10 +2386,16 @@ Fpid1_rpc_poll(emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
         close(conn);
         return pid1_signal_errno(env, "pid1: rpc-poll: bad length", EMSGSIZE);
     }
-    /* read on stack up to 64 KiB.  larger main loop frame than the
-     * other Fpid1_* but pid1 has 8 MiB default stack and is not
-     * recursive in this path. */
-    char payload[RPC_PAYLOAD_MAX];
+    /* off-stack: 64 KiB per-call frame was the B3 skeptic flag from
+     * v0.8.1.  static is safe here because emacs is single-threaded
+     * (same justification as the warned_enosys flag above) and this
+     * function is not reentrant: the only caller is rpc-server--tick's
+     * `while pending` loop, which calls pid1-rpc-poll serially, and
+     * nothing in this body funcalls back into user lisp before the
+     * payload bytes are copied into v_pl via make_string.  trade-off:
+     * 64 KiB BSS per supervisor (cheap, only touched pages commit) in
+     * exchange for the stack-frame win. */
+    static char payload[RPC_PAYLOAD_MAX];
     if (rpc_read_full(conn, payload, plen32) < 0) {
         int err = errno;
         close(conn);
