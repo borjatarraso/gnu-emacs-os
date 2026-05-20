@@ -36,6 +36,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -67,6 +68,7 @@
  * one of these, which is the loud-failure we want. */
 #include <hurd.h>
 #include <hurd/auth.h>
+#include <hurd/fs.h>
 #include <hurd/fshelp.h>
 /* NOT including <hurd/fsys.h> on purpose: that header is the user-side
  * fsys RPC stub set whose fsys_getroot prototype takes a separate
@@ -1894,6 +1896,171 @@ hurd_auth_drain(void)
     return 0;
 }
 
+/* byte size of block device NAME via file_get_storage_info on a
+ * storeio file_t.  the 2026-05-20 probe at docs/runlogs/
+ * 2026-05-20-hurd-storeio-getsize.md falsified the cookbook (which
+ * said device_get_status with DEV_GET_SIZE on the file_name_lookup
+ * file_t); the file_t returned by file_name_lookup speaks the fs/io
+ * protocol, not the Mach device protocol, and the cookbook RPC
+ * returns MIG_BAD_ID (-303).  the working RPC is
+ * file_get_storage_info from <hurd/fs.h>: it works on the same
+ * file_t and returns enough structure (block_size in ints[2], a
+ * sequence of (start, length) run pairs in offsets[]) that the size
+ * is just `ints[2] * sum(offsets[2k+1])`.
+ *
+ * NAME validation: exact match for port_linux.c's contract (bare
+ * device name, no NULL, no empty, no '/', no "..", no ".", cap at
+ * 200 bytes).  the elisp caller already extracts the bare form from
+ * a /dev/ scan; the check here is defence in depth so a future
+ * callsite that grew a "/dev/" prefix can't escape into arbitrary
+ * filesystem paths.  EINVAL on bad input.
+ *
+ * lifecycle: file_name_lookup returns MACH_PORT_NULL with errno set
+ * on failure (ENOENT for a missing node, ENXIO for a node whose
+ * translator is dead; the probe's /dev/cd0 + /dev/hd0 cases hit the
+ * ENXIO path on the canonical image).  file_get_storage_info OOL-
+ * allocates the four return arrays in our address space; we must
+ * vm_deallocate each one and mach_port_deallocate each port right
+ * in ports[] on every exit path, success or failure.  the supervisor
+ * is long-lived; a Mach port or vm_allocation leak per disk lookup
+ * would compound forever.
+ *
+ * overflow guards: the multiply ints[2] * run can wrap on a multi-TB
+ * disk if either operand is interpreted as 32-bit; widen to uint64_t
+ * first and check both the per-run multiply and the running-total
+ * add against UINT64_MAX.  on overflow we surface EIO; the alternative
+ * (returning a truncated size) would silently mis-size the disk in
+ * the *disks* buffer.
+ *
+ * the libhurduser convention is that the error_t returned by an RPC
+ * stub is already a POSIX errno (the stubs translate kern_return_t
+ * via __hurd_fail internally), so assigning err directly to errno is
+ * safe.  no mig_errors.h translation table here. */
+static int
+hurd_disk_size_bytes(const char *name, uint64_t *out)
+{
+    if (name == NULL || name[0] == '\0') { errno = EINVAL; return -1; }
+    if (out == NULL) { errno = EINVAL; return -1; }
+    size_t nlen = strlen(name);
+    if (nlen > 200) { errno = EINVAL; return -1; }
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        errno = EINVAL; return -1;
+    }
+    for (size_t i = 0; i < nlen; i++) {
+        if (name[i] == '/') { errno = EINVAL; return -1; }
+    }
+
+    /* build /dev/<name>.  256 fits any legal NAME (cap 200) plus the
+     * 5-byte "/dev/" prefix plus NUL with margin. */
+    char path[256];
+    int pn = snprintf(path, sizeof path, "/dev/%s", name);
+    if (pn < 0 || (size_t)pn >= sizeof path) { errno = EINVAL; return -1; }
+
+    /* file_name_lookup returns MACH_PORT_NULL with errno set on
+     * failure (ENOENT for missing node, ENXIO for translator-less
+     * node, per the 2026-05-20 probe). */
+    file_t f = file_name_lookup(path, O_READ, 0);
+    if (f == MACH_PORT_NULL) return -1;  /* errno already set */
+
+    /* OOL return arrays.  the kernel allocates these in our address
+     * space; we must vm_deallocate each one before returning, even
+     * on the error paths.  declared up front so the cleanup block can
+     * walk them unconditionally. */
+    mach_port_t *ports = NULL;
+    mach_msg_type_number_t portsCnt = 0;
+    int *ints = NULL;
+    mach_msg_type_number_t intsCnt = 0;
+    off_t *offsets = NULL;
+    mach_msg_type_number_t offsetsCnt = 0;
+    char *data = NULL;
+    mach_msg_type_number_t dataCnt = 0;
+
+    error_t err = file_get_storage_info(f, &ports, &portsCnt,
+                                        &ints, &intsCnt,
+                                        &offsets, &offsetsCnt,
+                                        &data, &dataCnt);
+    int rc = -1;
+    int saved_errno = 0;
+
+    if (err) {
+        /* libhurduser error_t is already a POSIX errno. */
+        saved_errno = err;
+        goto cleanup;
+    }
+
+    /* invariants: need at least ints[2] for block_size, and at least
+     * one (start, length) pair in offsets[].  the probe at
+     * docs/runlogs/2026-05-20-hurd-storeio-getsize.md confirmed
+     * intsCnt=6 and offsetsCnt=2 for wd0 and wd0s2; we accept any
+     * shape that satisfies the minimums and has an even offsetsCnt
+     * (start/length pairs). */
+    if (intsCnt < 3 || offsetsCnt < 2 || (offsetsCnt % 2) != 0) {
+        saved_errno = EIO;
+        goto cleanup;
+    }
+
+    /* compute total_bytes = ints[2] * sum(offsets[2k+1]) over the
+     * offsetsCnt/2 runs.  uint64_t accumulator so multi-TB disks do
+     * not wrap.  ints[2] is a signed int in the RPC signature but
+     * always non-negative in practice (block sizes are 512, 4096, ...);
+     * cast through (unsigned) before widening to keep -Wsign-conversion
+     * happy and to clamp any pathological negative to a huge positive
+     * value that the overflow guard below will catch as EIO. */
+    uint64_t bs = (uint64_t)(unsigned)ints[2];
+    uint64_t total = 0;
+    for (mach_msg_type_number_t k = 0; k < offsetsCnt; k += 2) {
+        uint64_t run = (uint64_t)offsets[k + 1];
+        /* per-run overflow: bs * run is the per-run byte count. */
+        if (bs != 0 && run > UINT64_MAX / bs) {
+            saved_errno = EIO;
+            goto cleanup;
+        }
+        uint64_t add = bs * run;
+        /* running-total overflow: total + add must fit. */
+        if (add > UINT64_MAX - total) {
+            saved_errno = EIO;
+            goto cleanup;
+        }
+        total += add;
+    }
+
+    *out = total;
+    rc = 0;
+
+cleanup:
+    /* OOL cleanup: vm_deallocate each array, mach_port_deallocate
+     * each port right in ports[], then mach_port_deallocate the
+     * file_t.  this is the standard libhurduser pattern; cleanup
+     * runs on every path including error so we do not leak Mach
+     * resources on a long-running supervisor.  per-element loop on
+     * the ports[] array is required because vm_deallocate releases
+     * the storage but does not deref the port rights it holds. */
+    if (ports != NULL && portsCnt > 0) {
+        for (mach_msg_type_number_t i = 0; i < portsCnt; i++) {
+            mach_port_deallocate(mach_task_self(), ports[i]);
+        }
+        vm_deallocate(mach_task_self(), (vm_address_t)ports,
+                      portsCnt * sizeof(*ports));
+    }
+    if (ints != NULL && intsCnt > 0) {
+        vm_deallocate(mach_task_self(), (vm_address_t)ints,
+                      intsCnt * sizeof(*ints));
+    }
+    if (offsets != NULL && offsetsCnt > 0) {
+        vm_deallocate(mach_task_self(), (vm_address_t)offsets,
+                      offsetsCnt * sizeof(*offsets));
+    }
+    if (data != NULL && dataCnt > 0) {
+        vm_deallocate(mach_task_self(), (vm_address_t)data, dataCnt);
+    }
+    mach_port_deallocate(mach_task_self(), f);
+
+    if (rc < 0) {
+        errno = saved_errno;
+    }
+    return rc;
+}
+
 /* the table.  same shape as port_linux_impl, every slot populated.
  * the symmetry is what lets emacs-init.c pick one or the other at
  * compile time without touching the call sites. */
@@ -1910,6 +2077,7 @@ const port_caps port_hurd_impl = {
     .client_auth_handshake = hurd_client_auth_handshake,
     .publish_auth_port     = hurd_publish_auth_port,
     .auth_drain            = hurd_auth_drain,
+    .disk_size_bytes       = hurd_disk_size_bytes,
 };
 
 /* the active pointer + the require-or-abort helper live in
