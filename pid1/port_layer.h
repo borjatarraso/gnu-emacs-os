@@ -246,6 +246,41 @@ typedef struct port_caps {
      * the supervisor uses that to skip the drain until the auth
      * channel is live. */
     int (*auth_drain)(void);
+
+    /* return byte size of block device NAME (bare name, no "/dev/"
+     * prefix) in *OUT.  on Linux this is `/sys/block/<name>/size *
+     * 512' (sysfs publishes size in 512-byte sectors per
+     * Documentation/ABI/stable/sysfs-block, regardless of physical
+     * sector size, so the 512 multiplier is the contract, not a
+     * sector-size assumption).  on Hurd this is file_get_storage_info
+     * on the storeio file_t from file_name_lookup("/dev/<name>",
+     * O_READ, 0), with total_bytes = ints[2] * sum(offsets[2k+1])
+     * over the offsetsCnt/2 runs.  units on both sides are bytes
+     * directly.  the 2026-05-20 storeio probe (docs/runlogs/
+     * 2026-05-20-hurd-storeio-getsize.md) confirmed
+     * file_get_storage_info as the working RPC after device_get_status
+     * returned MIG_BAD_ID on the file_t the cookbook said to use.
+     *
+     * NAME validation: no NULL, no empty string, no '/' or ".." or
+     * any path separator.  bare device names only; the caller already
+     * computed the bare form from a /dev/ scan, this is defence in
+     * depth so a callsite that grew a /dev/ prefix can't escape into
+     * arbitrary sysfs paths.  EINVAL on bad input.
+     *
+     * returns 0 on success, -1 with errno set on failure: ENOENT for
+     * a missing node (no /sys/block/<name>/size on Linux, no
+     * /dev/<name> on Hurd), ENXIO for a node present but lacking a
+     * translator on Hurd, EIO for an unparseable sysfs size on Linux
+     * (the kernel writes a single decimal token plus newline; anything
+     * else means the file was clobbered or this isn't really a sysfs
+     * size node).
+     *
+     * the Hurd side ships in port_hurd.c on the side branch as the
+     * first of the four post-v0.9 Mach RPC slots; the slot lands here
+     * so the elisp consumers in emacs-init/buffers/disks.el and
+     * emacs-init/install/disk.el have a single name to dispatch
+     * against on both kernels. */
+    int (*disk_size_bytes)(const char *name, uint64_t *out);
 } port_caps;
 
 /* the active backend.  starts NULL.  exactly one assignment per

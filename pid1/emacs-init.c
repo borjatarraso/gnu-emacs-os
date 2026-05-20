@@ -2949,6 +2949,57 @@ Fpid1_reboot(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return Qnil;
 }
 
+/* (pid1-disk-size-bytes NAME) -> integer byte count or nil.
+ * NAME is the bare block-device name (e.g. "sda", "wd0"), no "/dev/"
+ * prefix.  on Linux dispatches to port->disk_size_bytes which reads
+ * /sys/block/<NAME>/size and multiplies by 512.  the elisp consumers
+ * in emacs-init/buffers/disks.el and emacs-init/install/disk.el
+ * render nil as "?" in the size column, so a missing/unreadable disk
+ * surfaces as a soft "?" instead of a panic.  this is a userland
+ * read, not a privileged syscall whose failure should crash PID 1.
+ *
+ * the NAME_MAX dance: linux NAME_MAX is 255, sysfs block names are
+ * much shorter (a typical "sda" is 3 bytes), the 256-byte buffer here
+ * fits any legal name and rejects overlong input cleanly via
+ * extract_cstring_into's ENAMETOOLONG branch.
+ *
+ * the INT64_MAX guard: env->make_integer takes intmax_t (signed
+ * 64-bit on every platform we ship to), our out is uint64_t.  a disk
+ * bigger than 2^63 bytes (~9.2 ZB) is not physically reachable today
+ * but the cast would silently produce a negative integer on overflow,
+ * which the elisp side would render as a nonsense size.  belt-and-
+ * suspenders nil return matches the "nil = ?" convention. */
+static emacs_value
+Fpid1_disk_size_bytes(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                      void *data)
+{
+    (void)data;
+    emacs_value Qnil = env->intern(env, "nil");
+    if (nargs != 1)
+        return pid1_signal_errno(env,
+                                 "pid1: pid1-disk-size-bytes needs 1 arg",
+                                 EINVAL);
+    /* 256 covers NAME_MAX + NUL with one byte to spare; the port-layer
+     * validator caps tighter anyway (200 bytes on linux). */
+    char name[256];
+    if (extract_cstring_into(env, args[0], name, sizeof name) < 0) {
+        /* extract_cstring_into raises pid1-error on overflow via
+         * pid1_signal_errno (ENAMETOOLONG).  this binding's documented
+         * contract is "integer on success, nil on any failure" so the
+         * elisp consumer can render "?" without a condition-case.  clear
+         * the pending non-local exit before returning soft nil. */
+        env->non_local_exit_clear(env);
+        return Qnil;
+    }
+    uint64_t out = 0;
+    if (port->disk_size_bytes(name, &out) < 0)
+        return Qnil;
+    /* defensive overflow check, see docstring above */
+    if (out > (uint64_t)INT64_MAX)
+        return Qnil;
+    return env->make_integer(env, (intmax_t)out);
+}
+
 /* signal pid1-error with an arbitrary literal message (no strerror
  * suffix). used by parent-side validation paths that do not have an
  * errno to report, like "uid below floor".  invariant: sets a non-local
@@ -3618,6 +3669,15 @@ emacs_module_init(struct emacs_runtime *ert)
         "STATE is one of \"mem\", \"freeze\", \"standby\", \"disk\".",
         NULL);
     pid1_defalias(env, "pid1-suspend", sus);
+
+    emacs_value dsb = env->make_function(env, 1, 1, Fpid1_disk_size_bytes,
+        "Byte size of block device NAME (bare name, no \"/dev/\" prefix). "
+        "Returns an integer on success, nil on any failure (the elisp "
+        "side renders nil as \"?\" in the size column).  Linux: reads "
+        "/sys/block/NAME/size and multiplies by 512.  Hurd: dispatches "
+        "to file_get_storage_info on the storeio file_t (side branch).",
+        NULL);
+    pid1_defalias(env, "pid1-disk-size-bytes", dsb);
 
     emacs_value spw = env->make_function(env, 6, 6, Fpid1_spawn_as_uid,
         "pid1-spawn-as-uid: spawn child as uid/gid per v0.5 ABI",
