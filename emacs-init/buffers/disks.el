@@ -25,6 +25,16 @@
 ;; renders "(no data)" and the underlying error is funnelled through
 ;; `panic-handle'. statfs failure on a single mount degrades that one
 ;; row to "?" rather than poisoning the whole render.
+;;
+;; on Hurd the data sources change: there is no sysfs at all, so the
+;; block-devices section walks /dev/ for whole-disk node patterns
+;; (wd0, hd0, sd0, ucd0, ud0, cd0, fd0; the sN partition slices land
+;; in the mount section instead).  /proc/mounts is provided by the
+;; Hurd procfs translator and parses with the existing Linux parser
+;; unchanged.  size is unknown for unmounted Hurd devices today (no
+;; sysfs, and statvfs only works on a mounted filesystem); the
+;; formatter renders "?" for nil so that is honest.  tier B will fill
+;; it in via storeio's device_get_status RPC from port_hurd.c.
 
 (require 'panic)
 (require 'port)
@@ -134,6 +144,98 @@ because the kernel records the dentry that was actually opened."
           (push (plist-get m :mount-point) out))))
     (nreverse out)))
 
+;; -- hurd /dev walker --------------------------------------------------------
+
+(defconst disks-buffer--hurd-whole-disk-re
+  "\\`\\(wd\\|hd\\|sd\\|ucd\\|ud\\|cd\\|fd\\)[0-9]+\\'"
+  "Match a Hurd whole-disk node name under /dev/.
+wd*/hd*/sd* cover IDE and SCSI; ucd*/ud* are USB; cd*/fd* are
+removable optical and floppy.  the regex deliberately rejects any
+trailing `sN' suffix so partition slices like `wd0s1' do not get
+counted as their own disk in the block-devices section.")
+
+(defconst disks-buffer--hurd-removable-re
+  "\\`\\(cd\\|fd\\|ucd\\|ud\\)"
+  "Match a Hurd disk name that should be flagged removable.
+coarse heuristic.  cd/fd are obvious; ucd/ud are USB which we
+treat as removable by convention.  the kernel does not publish a
+removable bit on Hurd today, this is the best we can do without
+RPC.")
+
+(defun disks-buffer--list-hurd-block-devices ()
+  "Return list of plists, one per whole-disk node under /dev/ on Hurd.
+Mirrors the shape `disks-buffer--list-block-devices' returns on
+Linux: each plist carries :name, :size-bytes, :removable.  size is
+nil because Hurd has no sysfs and statvfs only works on a mounted
+filesystem, not on a raw device node; the formatter renders nil as
+\"?\" so the column stays honest.  removable comes from a coarse
+name-prefix heuristic (`disks-buffer--hurd-removable-re')."
+  (when (file-directory-p "/dev")
+    (let (out)
+      (condition-case _
+          (dolist (name (directory-files "/dev" nil "\\`[^.]"))
+            (when (string-match-p disks-buffer--hurd-whole-disk-re name)
+              (push (list :name name
+                          :size-bytes nil
+                          :removable (and (string-match-p
+                                           disks-buffer--hurd-removable-re
+                                           name)
+                                          t))
+                    out)))
+        (error nil))
+      (nreverse out))))
+
+(defun disks-buffer--mounts-for-device-hurd (name mounts)
+  "Return mount points whose device column refers to disk NAME on Hurd.
+NAME is the bare whole-disk name (e.g. `wd0').  matches the literal
+node path `/dev/NAME' optionally followed by `sN' (the partition-
+slice marker).  the trailing check guards against `wd0' over-
+matching `wd00' on a system with many disks.
+
+mirrors `disks-buffer--mounts-for-device' in shape; cannot share
+code because the Linux variant matches on `/dev/sda' + partition
+digit suffix and the two formats do not overlap.
+
+`fsysopts /' on Hurd returns store-spec form like `part:2:device:wd0'
+which would also identify the disk, but that string is the live
+translator argv, not what the Hurd procfs emits in `/proc/mounts'.
+the 2026-05-20 probe (`docs/runlogs/2026-05-20-v092-verify-v093-probe.md')
+confirmed `/proc/mounts' uses the literal `/dev/wd0s2' shape; add
+the store-spec branch back if a future probe finds a Hurd build
+that emits translator argv into mounts."
+  (let ((prefix (concat "/dev/" name))
+        out)
+    (dolist (m mounts)
+      (let ((dev (plist-get m :device)))
+        (when (and (stringp dev)
+                   (string-prefix-p prefix dev)
+                   (let ((rest (substring dev (length prefix))))
+                     (or (string-empty-p rest)
+                         (string-match-p "\\`s[0-9]" rest))))
+          (push (plist-get m :mount-point) out))))
+    (nreverse out)))
+
+(defun disks-buffer--render-block-devices-hurd (devs mounts)
+  "Insert the block-devices section for DEVS on Hurd, joining MOUNTS.
+Parallel of `disks-buffer--render-block-devices' that calls the
+Hurd matcher instead of the Linux one.  the column layout is
+identical so the buffer reads the same way across kernels."
+  (insert "block devices\n")
+  (insert (format "  %-12s %10s %-9s %s\n"
+                  "name" "size" "removable" "mounted-on"))
+  (if (null devs)
+      (insert "  (no data)\n")
+    (dolist (d devs)
+      (let* ((name (plist-get d :name))
+             (mps  (disks-buffer--mounts-for-device-hurd name mounts))
+             (line (format "  %-12s %10s %-9s %s"
+                           name
+                           (disks-buffer--format-bytes
+                            (plist-get d :size-bytes))
+                           (if (plist-get d :removable) "yes" "no")
+                           (if mps (mapconcat #'identity mps ", ") "-"))))
+        (insert (propertize line 'disks-blockdev d) "\n")))))
+
 ;; -- formatting --------------------------------------------------------------
 
 (defun disks-buffer--format-bytes (n)
@@ -231,12 +333,16 @@ isn't, push it to a process-filter pipeline."
 Wrapped in `condition-case' so a parse glitch does not stop the
 timer or kill the buffer.
 
-On non-linux kernels the data sources do not exist: /proc/mounts is
-linux's mount-list surface (hurd has a different one) and /sys/block
-is sysfs (hurd has no sysfs at all).  per the hurd port spike, we
-render a single-line `not implemented' banner on hurd and skip the
-expensive sections entirely.  the render still updates the header
-line so the timer is observably alive."
+The data sources branch on `geos-kernel'.  Linux reads /proc/mounts
+and /sys/block; that has been the only path since v0.1.  Hurd has no
+sysfs at all, but /proc/mounts is provided by the Hurd procfs
+translator and parses with the same Linux parser; the Hurd arm walks
+/dev/ for whole-disk node patterns (wd*, hd*, sd*, ucd*, ud*, cd*,
+fd*) instead, and joins them against /proc/mounts by matching either
+the literal `/dev/NAME' prefix or the store-spec `device:NAME' form
+that `fsysopts /' produces for the root translator.  size is unknown
+for unmounted Hurd devices today; tier B will fill that in via
+storeio's device_get_status RPC once port_hurd.c grows the verb."
   (let ((inhibit-read-only t)
         (start-line (line-number-at-pos))
         (start-col (current-column)))
@@ -245,14 +351,7 @@ line so the timer is observably alive."
           (format "*disks*  refreshed %s"
                   (format-time-string "%Y-%m-%d %H:%M:%S")))
     (cond
-     ((not (geos-kernel-linux-p))
-      ;; route through panic-handle so a post-mortem can tell whether
-      ;; the user actually opened *disks* on a non-linux kernel.
-      (geos-port-unimplemented 'disks-buffer-render)
-      (insert (format
-               "*disks* is not implemented on kernel %s.\n\nthe disks view reads /proc/mounts and /sys/block, both linux-specific surfaces.  a hurd backend would walk /servers and the libstore translators; that work is tracked under the hurd port effort.\n"
-               geos-kernel)))
-     (t
+     ((geos-kernel-linux-p)
       (condition-case err
           (let ((mounts (disks-buffer--read-proc-mounts))
                 (devs   (disks-buffer--list-block-devices)))
@@ -262,7 +361,25 @@ line so the timer is observably alive."
          (if (fboundp 'panic-handle)
              (panic-handle err 'disks-buffer-render)
            (message "disks-buffer render failed: %S" err))
-         (insert "render failed, see *panic*\n")))))
+         (insert "render failed, see *panic*\n"))))
+     ((geos-kernel-hurd-p)
+      (condition-case err
+          (let ((mounts (disks-buffer--read-proc-mounts))
+                (devs   (disks-buffer--list-hurd-block-devices)))
+            (disks-buffer--render-block-devices-hurd devs mounts)
+            (disks-buffer--render-mounts mounts))
+        (error
+         (if (fboundp 'panic-handle)
+             (panic-handle err 'disks-buffer-render-hurd)
+           (message "disks-buffer render (hurd) failed: %S" err))
+         (insert "render failed, see *panic*\n"))))
+     (t
+      ;; unknown kernel: route through panic-handle so a post-mortem
+      ;; can tell which kernel string slipped past the predicates.
+      (geos-port-unimplemented 'disks-buffer-render)
+      (insert (format
+               "*disks* is not implemented on kernel %s.\n"
+               geos-kernel))))
     (goto-char (point-min))
     (forward-line (1- start-line))
     (move-to-column start-col)))

@@ -54,6 +54,7 @@
 
 (require 'cl-lib)
 (require 'panic)
+(require 'port)
 (require 'install-disk)
 (require 'install-mkfs)
 (require 'install-copy)
@@ -395,10 +396,23 @@ binding per key."
     (_ (message "install: no back from %s" install--state))))
 
 (defun install-yes ()
-  "y handler.  only meaningful in :format-confirm."
+  "y handler.  only meaningful in :format-confirm.
+On non-linux kernels the format/mkfs/copy/grub chain does not
+port (parted is not on hurd, the wizard hard-codes mkfs.ext4 and
+GRUB i386-pc), so we refuse here instead of half-doing it.  the
+disk-pick / part-pick steps still run on hurd as a read-only
+preview of what the wizard would target on linux."
   (interactive)
   (pcase install--state
-    (:format-confirm (install--enter-format))
+    (:format-confirm
+     (cond
+      ((not (geos-kernel-linux-p))
+       (geos-port-unimplemented 'install-format)
+       (install--fail
+        (cons :format
+              (format "format step is linux-only; running on %s"
+                      geos-kernel))))
+      (t (install--enter-format))))
     (_ (message "install: y has no meaning in %s" install--state))))
 
 (defun install-reboot ()

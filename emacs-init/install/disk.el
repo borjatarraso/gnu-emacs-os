@@ -97,6 +97,95 @@ something you install onto).  the wizard wants raw disks only."
         entries)
        #'string<))))
 
+;; -- hurd enumeration helpers ------------------------------------------------
+
+(defconst install-disk--hurd-whole-disk-re
+  "\\`\\(wd\\|hd\\|sd\\|ucd\\|ud\\|cd\\|fd\\)[0-9]+\\'"
+  "Match a Hurd whole-disk node name under /dev/.
+deliberately rejects the `sN' partition-slice suffix; the wizard
+installs onto a whole disk, not a slice.  same regex as
+`disks-buffer--hurd-whole-disk-re', kept duplicated rather than
+imported so the install package does not pull in the buffers tree.")
+
+(defconst install-disk--hurd-removable-re
+  "\\`\\(cd\\|fd\\|ucd\\|ud\\)"
+  "Match a Hurd disk name we treat as removable.
+coarse: optical, floppy, USB.  no kernel-side bit for this on Hurd,
+so this is best-effort.")
+
+(defun install-disk--all-names-hurd ()
+  "Return the sorted list of Hurd whole-disk names under /dev/.
+Walks /dev/ and keeps anything matching `install-disk--hurd-whole-
+disk-re'.  no equivalent of the loop/ram/dm- exclusion list is
+needed: those devices have no Hurd analogue at the whole-disk
+node-name level.  symlinks like /dev/disk are skipped because they
+do not match the whole-disk regex."
+  (when (file-directory-p "/dev")
+    (let (out)
+      (condition-case _
+          (dolist (name (directory-files "/dev" nil "\\`[^.]"))
+            (when (string-match-p install-disk--hurd-whole-disk-re name)
+              (push name out)))
+        (error nil))
+      (sort out #'string<))))
+
+(defun install-disk--size-bytes-hurd (_name)
+  "Return nil.  Hurd has no sysfs size publisher.
+`file-attributes' on a special file returns nil for size, and
+statvfs only works on a mounted filesystem.  the renderer prints
+`?' for nil which is the honest answer until tier B wires
+storeio's device_get_status RPC from port_hurd.c."
+  nil)
+
+(defun install-disk--removable-hurd (name)
+  "Return non-nil if NAME looks like a removable Hurd device.
+Same coarse name-prefix heuristic the *disks* buffer uses:
+cd/fd/ucd/ud are removable, everything else is not."
+  (and (string-match-p install-disk--hurd-removable-re name) t))
+
+(defun install-disk--model-hurd (_name)
+  "Return nil.  no model-string source on Hurd without RPC.
+the renderer prints `?' for nil; tier B can promote this to a real
+value once port_hurd.c exposes a storeio query."
+  nil)
+
+(defun install-disk-mounted-p-hurd (name)
+  "Return non-nil if any slice of disk NAME is mentioned in /proc/mounts.
+NAME is bare (e.g. `wd0').  matches the literal Hurd node path
+`/dev/NAME' optionally followed by `sN' (the partition-slice
+marker); the trailing check guards against `wd0' over-matching a
+hypothetical `wd00'.
+
+the 2026-05-20 probe
+(`docs/runlogs/2026-05-20-v092-verify-v093-probe.md') showed
+`/proc/mounts' on Hurd uses the literal node form even for the
+root translator (`/dev/wd0s2 / ext2fs ...').  `fsysopts /' returns
+the store-spec form `part:2:device:wd0' but that is the live
+translator argv, not what procfs emits.  add a store-spec branch
+here if a future probe finds a Hurd build that emits translator
+argv into mounts."
+  (let ((prefix (concat "/dev/" name))
+        (hit nil))
+    (when (file-readable-p install-disk--proc-mounts)
+      (condition-case _
+          (with-temp-buffer
+            (insert-file-contents install-disk--proc-mounts)
+            (goto-char (point-min))
+            (while (and (not hit) (not (eobp)))
+              (let* ((line (buffer-substring (line-beginning-position)
+                                             (line-end-position)))
+                     (fields (split-string line "[ \t]+" t))
+                     (dev (car fields)))
+                (when (and (stringp dev)
+                           (string-prefix-p prefix dev)
+                           (let ((rest (substring dev (length prefix))))
+                             (or (string-empty-p rest)
+                                 (string-match-p "\\`s[0-9]" rest))))
+                  (setq hit t)))
+              (forward-line 1)))
+        (error nil)))
+    hit))
+
 (defun install-disk--mounted-devices ()
   "Return the set of device paths mentioned in /proc/mounts.
 Returns a hash table keyed on the literal device string (e.g.
@@ -122,36 +211,43 @@ given disk is currently in use."
 
 (defun install-disk-mounted-p (name)
   "Return non-nil if any partition of disk NAME is currently mounted.
-NAME is a bare name (sda, nvme0n1), no /dev/ prefix.  we check the
-prefix `/dev/NAME' against /proc/mounts so both /dev/sda1 and
-/dev/sda2 (and their nvme0n1pN variants) trigger the refusal.
+NAME is a bare name (sda, nvme0n1; or wd0, hd0 on Hurd), no /dev/
+prefix.  on Linux we check the `/dev/NAME' prefix against
+/proc/mounts so both /dev/sda1 and /dev/sda2 (and the nvme0n1pN
+variants) trigger the refusal.  on Hurd the matcher also handles
+the store-spec form `part:2:device:NAME' that the root translator
+exposes via fsysopts.
 
 This is the wizard's primary safety net.  format-step refuses to
 proceed if this returns non-nil for the operator-picked disk;
 without that net a mistyped target name silently destroys the
 current /."
-  (let ((mounted (install-disk--mounted-devices))
-        (prefix (concat "/dev/" name))
-        (hit nil))
-    (maphash
-     (lambda (dev _)
-       (unless hit
-         (when (and (string-prefix-p prefix dev)
-                    ;; require the next char to be a partition digit
-                    ;; (sda1, nvme0n1p1) OR equal to the device itself
-                    ;; (someone mounted the whole disk). string= covers
-                    ;; the latter; string-prefix-p plus a digit check
-                    ;; covers the former.  this guards against sda
-                    ;; accidentally matching sdaa1, which is a valid
-                    ;; device name on systems with many disks.
-                    (or (string= dev prefix)
-                        (let ((suffix (substring dev (length prefix))))
-                          (and (not (string-empty-p suffix))
-                               (string-match-p
-                                "\\`\\(p?[0-9]+\\)" suffix)))))
-           (setq hit t))))
-     mounted)
-    hit))
+  (cond
+   ((geos-kernel-hurd-p)
+    (install-disk-mounted-p-hurd name))
+   (t
+    (let ((mounted (install-disk--mounted-devices))
+          (prefix (concat "/dev/" name))
+          (hit nil))
+      (maphash
+       (lambda (dev _)
+         (unless hit
+           (when (and (string-prefix-p prefix dev)
+                      ;; require the next char to be a partition digit
+                      ;; (sda1, nvme0n1p1) OR equal to the device itself
+                      ;; (someone mounted the whole disk). string= covers
+                      ;; the latter; string-prefix-p plus a digit check
+                      ;; covers the former.  this guards against sda
+                      ;; accidentally matching sdaa1, which is a valid
+                      ;; device name on systems with many disks.
+                      (or (string= dev prefix)
+                          (let ((suffix (substring dev (length prefix))))
+                            (and (not (string-empty-p suffix))
+                                 (string-match-p
+                                  "\\`\\(p?[0-9]+\\)" suffix)))))
+             (setq hit t))))
+       mounted)
+      hit))))
 
 (defun install-disk-list ()
   "Return a list of plists describing every install-targetable disk.
@@ -170,18 +266,34 @@ investigate.  routing through panic-handle (rather than signalling)
 matches the rest of the userland: a parse glitch in sysfs must not
 take the supervisor down.
 
-Hurd guard: the install wizard is linux-only.  the implementation
-reads /sys/block (no sysfs on hurd) and the wizard's downstream
-steps (mkfs / grub-install i386-pc) also do not port.  per the hurd
-spike work order, install/ is NOT branched; it refuses with a clear
-error.  routed through `geos-port-unimplemented' for the *panic*
-trail and returns nil so the *install* buffer renders an empty
-disk list with a banner."
+Hurd arm: v0.9.3 tier A enumerates whole disks by walking /dev/
+for the wd*/hd*/sd*/ucd*/ud*/cd*/fd* node patterns (no sysfs on
+hurd, no model strings without RPC).  size is nil pending storeio
+device_get_status (tier B), model is nil, removable is a coarse
+name-prefix heuristic.  mounted-p reads /proc/mounts (provided by
+the hurd procfs translator) and matches both literal `/dev/NAME'
+prefixes and the store-spec `device:NAME' form that fsysopts emits
+for the root translator.  the wizard's downstream steps (mkfs /
+grub-install i386-pc) still do NOT port; `buffers/install.el'
+refuses to advance past :format-confirm on a non-linux kernel, so
+the enumeration here is read-only / advisory until tier B."
   (cond
-   ((not (geos-kernel-linux-p))
-    (geos-port-unimplemented 'install-wizard)
-    nil)
-   (t
+   ((geos-kernel-hurd-p)
+    (require 'cl-lib)
+    (condition-case err
+        (mapcar
+         (lambda (name)
+           (list :name name
+                 :path (concat "/dev/" name)
+                 :size-bytes (install-disk--size-bytes-hurd name)
+                 :model (install-disk--model-hurd name)
+                 :removable (install-disk--removable-hurd name)
+                 :mounted (install-disk-mounted-p-hurd name)))
+         (install-disk--all-names-hurd))
+      (error
+       (panic-handle err 'install-disk-list-hurd)
+       nil)))
+   ((geos-kernel-linux-p)
     (require 'cl-lib)
     (condition-case err
         (mapcar
@@ -195,7 +307,10 @@ disk list with a banner."
          (install-disk--all-names))
       (error
        (panic-handle err 'install-disk-list)
-       nil)))))
+       nil)))
+   (t
+    (geos-port-unimplemented 'install-wizard)
+    nil)))
 
 (defun install-disk-format-bytes (n)
   "Human-readable rendering of byte count N (integer or nil).

@@ -192,8 +192,8 @@ The verification levels in the last column:
 | `core/network.el` Linux/Hurd dispatch | implemented | YES on 2026-05-18 (v0.9.2; Hurd arm parses `/proc/route` with decimal addresses and the `/dev/` prefix stripped; dev reader derives iface set from the same parse with counters stub-zero pending pfinet RPC in `port_hurd.c`; runlog `docs/runlogs/2026-05-18-v092-procnet-verify.md`) |
 | `core/state.el` Linux/Hurd dispatch | implemented | YES on 2026-05-18 (v0.9.1; VM-verified on Debian Hurd 0.9: no /var translator and no /proc/sys, so writable-probe is authoritative; native procfs read is wired but inert today; runlog `docs/runlogs/2026-05-18-v091-procfs-verify.md`) |
 | `core/uname.el` Linux/Hurd dispatch | implemented | YES on 2026-05-18 (v0.9.1; VM-verified on Debian Hurd 0.9: /proc/sys/kernel/* absent, /proc/version parsed for release+version, per-field synthesis fills the rest; runlog `docs/runlogs/2026-05-18-v091-procfs-verify.md`) |
-| `buffers/disks.el` Hurd not-implemented banner | implemented | YES on Linux, NO on Hurd |
-| `install/disk.el` Hurd not-implemented banner | implemented | YES on Linux, NO on Hurd |
+| `buffers/disks.el` Hurd not-implemented banner | implemented | YES (probe-derived) on 2026-05-20 (v0.9.3 tier A; Hurd arm walks `/dev/` for whole-disk node patterns (wd*, hd*, sd*, ucd*, ud*, cd*, fd*), parses `/proc/mounts` for the device column matching the literal `/dev/<name>` form the live VM emits; size unknown for unmounted devices pending storeio device_get_status RPC; runlog `docs/runlogs/2026-05-20-v092-verify-v093-probe.md`) |
+| `install/disk.el` Hurd not-implemented banner | implemented | YES (probe-derived) on 2026-05-20 (v0.9.3 tier A; Hurd arm enumerates whole disks the same way and parses `/proc/mounts` for mounted-p; install wizard's partition/format/grub steps remain Linux-only and refused on Hurd by `buffers/install.el`; runlog `docs/runlogs/2026-05-20-v092-verify-v093-probe.md`) |
 | `services/journal-tail.el` Hurd no-op | implemented | YES on Linux, NO on Hurd |
 | `user/userland/audio.el` Hurd not-implemented banner | implemented | YES on Linux, NO on Hurd |
 
