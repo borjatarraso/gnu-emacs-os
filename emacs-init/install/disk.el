@@ -129,13 +129,18 @@ do not match the whole-disk regex."
         (error nil))
       (sort out #'string<))))
 
-(defun install-disk--size-bytes-hurd (_name)
-  "Return nil.  Hurd has no sysfs size publisher.
-`file-attributes' on a special file returns nil for size, and
-statvfs only works on a mounted filesystem.  the renderer prints
-`?' for nil which is the honest answer until tier B wires
-storeio's device_get_status RPC from port_hurd.c."
-  nil)
+(defun install-disk--size-bytes-hurd (name)
+  "Return byte size of Hurd whole-disk NAME, or nil if the RPC refuses.
+Hurd has no sysfs size publisher: `file-attributes' on a special
+file returns nil for size and statvfs only works on a mounted
+filesystem.  the slot is wired through the `pid1-disk-size-bytes'
+module binding (which on Hurd reaches storeio's device_get_status
+RPC from port_hurd.c).  the fboundp guard keeps this file loadable
+on a Linux dev host without pid1-module.so present.  nil still
+surfaces if the underlying RPC fails so the renderer's `?' render
+stays honest."
+  (when (fboundp 'pid1-disk-size-bytes)
+    (pid1-disk-size-bytes name)))
 
 (defun install-disk--removable-hurd (name)
   "Return non-nil if NAME looks like a removable Hurd device.
@@ -268,15 +273,17 @@ take the supervisor down.
 
 Hurd arm: v0.9.3 tier A enumerates whole disks by walking /dev/
 for the wd*/hd*/sd*/ucd*/ud*/cd*/fd* node patterns (no sysfs on
-hurd, no model strings without RPC).  size is nil pending storeio
-device_get_status (tier B), model is nil, removable is a coarse
+hurd, no model strings without RPC).  size comes from the
+`pid1-disk-size-bytes' module binding (storeio device_get_status
+under the hood); nil still surfaces if the underlying RPC fails so
+the `?' render stays honest.  model is nil, removable is a coarse
 name-prefix heuristic.  mounted-p reads /proc/mounts (provided by
 the hurd procfs translator) and matches both literal `/dev/NAME'
 prefixes and the store-spec `device:NAME' form that fsysopts emits
 for the root translator.  the wizard's downstream steps (mkfs /
 grub-install i386-pc) still do NOT port; `buffers/install.el'
 refuses to advance past :format-confirm on a non-linux kernel, so
-the enumeration here is read-only / advisory until tier B."
+the enumeration here is read-only / advisory."
   (cond
    ((geos-kernel-hurd-p)
     (require 'cl-lib)

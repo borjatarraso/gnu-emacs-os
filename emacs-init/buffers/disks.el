@@ -31,10 +31,11 @@
 ;; (wd0, hd0, sd0, ucd0, ud0, cd0, fd0; the sN partition slices land
 ;; in the mount section instead).  /proc/mounts is provided by the
 ;; Hurd procfs translator and parses with the existing Linux parser
-;; unchanged.  size is unknown for unmounted Hurd devices today (no
-;; sysfs, and statvfs only works on a mounted filesystem); the
-;; formatter renders "?" for nil so that is honest.  tier B will fill
-;; it in via storeio's device_get_status RPC from port_hurd.c.
+;; unchanged.  size comes from the `pid1-disk-size-bytes' module
+;; binding when loaded (the slot wires through pid1-module.so to the
+;; storeio device_get_status RPC in port_hurd.c); nil still surfaces
+;; if the underlying RPC fails and the formatter renders "?" so the
+;; column stays honest.
 
 (require 'panic)
 (require 'port)
@@ -165,18 +166,21 @@ RPC.")
 (defun disks-buffer--list-hurd-block-devices ()
   "Return list of plists, one per whole-disk node under /dev/ on Hurd.
 Mirrors the shape `disks-buffer--list-block-devices' returns on
-Linux: each plist carries :name, :size-bytes, :removable.  size is
-nil because Hurd has no sysfs and statvfs only works on a mounted
-filesystem, not on a raw device node; the formatter renders nil as
-\"?\" so the column stays honest.  removable comes from a coarse
-name-prefix heuristic (`disks-buffer--hurd-removable-re')."
+Linux: each plist carries :name, :size-bytes, :removable.  size
+comes from the `pid1-disk-size-bytes' module binding when loaded;
+nil still surfaces if the underlying RPC fails, and the formatter
+renders nil as \"?\" so the column stays honest.  the fboundp guard
+keeps this file loadable on a Linux dev host without pid1-module.so
+present.  removable comes from a coarse name-prefix heuristic
+(`disks-buffer--hurd-removable-re')."
   (when (file-directory-p "/dev")
     (let (out)
       (condition-case _
           (dolist (name (directory-files "/dev" nil "\\`[^.]"))
             (when (string-match-p disks-buffer--hurd-whole-disk-re name)
               (push (list :name name
-                          :size-bytes nil
+                          :size-bytes (when (fboundp 'pid1-disk-size-bytes)
+                                        (pid1-disk-size-bytes name))
                           :removable (and (string-match-p
                                            disks-buffer--hurd-removable-re
                                            name)
@@ -340,9 +344,10 @@ translator and parses with the same Linux parser; the Hurd arm walks
 /dev/ for whole-disk node patterns (wd*, hd*, sd*, ucd*, ud*, cd*,
 fd*) instead, and joins them against /proc/mounts by matching either
 the literal `/dev/NAME' prefix or the store-spec `device:NAME' form
-that `fsysopts /' produces for the root translator.  size is unknown
-for unmounted Hurd devices today; tier B will fill that in via
-storeio's device_get_status RPC once port_hurd.c grows the verb."
+that `fsysopts /' produces for the root translator.  size comes from
+the `pid1-disk-size-bytes' module binding when loaded; nil still
+surfaces if the underlying RPC fails so the \"?\" render stays
+honest."
   (let ((inhibit-read-only t)
         (start-line (line-number-at-pos))
         (start-col (current-column)))
