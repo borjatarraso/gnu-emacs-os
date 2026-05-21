@@ -73,6 +73,22 @@
  * of the watcher itself, not of the elisp dispatch.
  *
  * exit 0 + "PASS" on success, exit 1 + "FAIL: ..." otherwise.
+ *
+ * Probe D2 (v0.9.9 v2.1 follow-on): exercises the broadened ESRCH
+ * guard added at the same commit as this comment.  the v2.1 VM-verify
+ * established that gnumach 1.8+git20260224 returns KERN_FAILURE
+ * (0x40000003) from proc_pid2task for a pid the proc server has no
+ * live task for, NOT KERN_INVALID_NAME (0xf), so the guard now fires
+ * on either code.  driving this branch through a real arm path would
+ * need to win a fork-and-die race; instead the probe calls the test-
+ * only helper __test_hurd_arm_parent_death_for_pid(999999, SIGUSR2)
+ * which mirrors steps 1-2 of hurd_arm_parent_death and exercises the
+ * KERN_FAILURE arm of the guard directly.  D2 asserts: (a) the
+ * helper returns -1, (b) errno is ESRCH, (c) SIGUSR2 was raised on
+ * the calling thread (observed via a sentinel byte from the SIGUSR2
+ * handler, same pattern as D1).  D2 runs INSIDE the harness process
+ * (not under fork) because the helper synthesises the parent-gone
+ * condition; no second process is needed.
  */
 
 #define _GNU_SOURCE
@@ -103,10 +119,20 @@
  * the same access pattern here, no module loading involved. */
 extern const port_caps port_hurd_impl;
 
+/* test-only entry compiled under -DPID1_TEST_HELPER; exercises the
+ * v0.9.9 v2.1 KERN_FAILURE arm of the ESRCH short-circuit on an
+ * arbitrary pid, without forking.  see port_hurd.c for the body. */
+extern int __test_hurd_arm_parent_death_for_pid(int pid, int sig);
+
 /* sentinel pipe used by the SIGUSR1 handler in the grandchild.
  * declared at file scope so the async-signal-safe handler can write
  * to it without passing it through a context pointer. */
 static int g_sentinel_w = -1;
+
+/* second sentinel pipe used by the SIGUSR2 handler inside the harness
+ * for Probe D2.  separate fd from g_sentinel_w so D1 and D2 cannot
+ * confuse each other if a stray SIGUSR1 ever arrives during D2. */
+static int g_sentinel2_w = -1;
 
 static void
 on_sigusr1(int sig)
@@ -115,6 +141,17 @@ on_sigusr1(int sig)
     if (g_sentinel_w >= 0) {
         char b = '!';
         ssize_t w = write(g_sentinel_w, &b, 1);
+        (void)w;
+    }
+}
+
+static void
+on_sigusr2(int sig)
+{
+    (void)sig;
+    if (g_sentinel2_w >= 0) {
+        char b = '2';
+        ssize_t w = write(g_sentinel2_w, &b, 1);
         (void)w;
     }
 }
@@ -355,6 +392,71 @@ main(void)
         fprintf(stdout,
                 "FAIL: sentinel read error or EOF; grandchild aborted "
                 "before signal (check exit code path in source)\n");
+        return 1;
+    }
+
+    /* ---- Probe D2: KERN_FAILURE arm of the ESRCH short-circuit. ----
+     * call the test-only helper against a pid the proc server has
+     * never heard of (999999) and assert:
+     *   (a) the helper returns -1
+     *   (b) errno is ESRCH (one stable errno for parent-gone)
+     *   (c) SIGUSR2 was raised on the calling thread (sentinel byte)
+     * the helper synthesises the parent-gone condition without a
+     * fork race; on Debian Hurd 0.9 / gnumach 1.8+git20260224 the
+     * proc_pid2task(999999) call returns KERN_FAILURE.  before the
+     * v2.1 broadening, the fall-through mapped KERN_FAILURE -> EIO
+     * and never raised the signal, so this probe is the regression
+     * gate for the fix. */
+    int sentinel2[2];
+    if (pipe(sentinel2) != 0) {
+        fprintf(stdout, "FAIL: D2 pipe sentinel2: %s\n", strerror(errno));
+        return 1;
+    }
+    g_sentinel2_w = sentinel2[1];
+
+    struct sigaction sa2;
+    memset(&sa2, 0, sizeof sa2);
+    sa2.sa_handler = on_sigusr2;
+    sigemptyset(&sa2.sa_mask);
+    sa2.sa_flags = 0;
+    if (sigaction(SIGUSR2, &sa2, NULL) != 0) {
+        fprintf(stdout, "FAIL: D2 sigaction SIGUSR2: %s\n", strerror(errno));
+        return 1;
+    }
+
+    errno = 0;
+    int d2_rc = __test_hurd_arm_parent_death_for_pid(999999, SIGUSR2);
+    int d2_errno = errno;
+    if (d2_rc != -1) {
+        fprintf(stdout,
+                "FAIL: D2 helper returned %d, expected -1\n", d2_rc);
+        return 1;
+    }
+    if (d2_errno != ESRCH) {
+        fprintf(stdout,
+                "FAIL: D2 errno=%d (%s), expected ESRCH\n",
+                d2_errno, strerror(d2_errno));
+        return 1;
+    }
+    /* signal delivery is synchronous because pthread_kill targets
+     * THIS thread; by the time the helper returns, the handler has
+     * already run and written the sentinel byte.  use a 1s budget
+     * just in case the kernel schedules the handler asynchronously
+     * on some future Hurd build; today on gnumach 1.8 the byte is
+     * already in the pipe. */
+    int d2_byte = read_byte_with_timeout(sentinel2[0], 1);
+    (void)close(sentinel2[0]);
+    (void)close(sentinel2[1]);
+    g_sentinel2_w = -1;
+    if (d2_byte == 1) {
+        fprintf(stdout,
+                "FAIL: D2 no SIGUSR2 sentinel within 1s; the broadened "
+                "guard did not raise the signal\n");
+        return 1;
+    }
+    if (d2_byte == 2) {
+        fprintf(stdout,
+                "FAIL: D2 sentinel2 read error or EOF\n");
         return 1;
     }
 

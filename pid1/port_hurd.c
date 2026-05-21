@@ -2115,10 +2115,17 @@ cleanup:
  *      KERN_INVALID_NAME, retry with 100ms nanosleep up to 10 times
  *      (1s total) so a fresh-forked caller does not race the proc
  *      server's registration of its own pid.  on persistent
- *      KERN_INVALID_NAME: kill(getpid(), signal); errno=ESRCH;
- *      return -1.  parent_task is a SEND right we own; the watcher
- *      will take ownership in step 6 and we MUST NOT deallocate it
- *      on the success path.
+ *      KERN_INVALID_NAME or KERN_FAILURE: pthread_kill(self, signal);
+ *      errno=ESRCH; return -1.  ESRCH is the one stable errno callers
+ *      see when the parent task is unreachable, regardless of which
+ *      Mach return code the kernel surfaces; the v0.9.9 v2.1
+ *      VM-verify on Debian Hurd 0.9 / gnumach 1.8+git20260224
+ *      showed proc_pid2task returns KERN_FAILURE (0x40000003) for
+ *      both bogus and just-reaped pids, NOT the textbook KERN_
+ *      INVALID_NAME (0xf), so both arms of the guard must fire.
+ *      parent_task is a SEND right we own; the watcher will take
+ *      ownership in step 6 and we MUST NOT deallocate it on the
+ *      success path.
  *
  *   3. mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &notify_port).
  *      this is the receive right the kernel will send the dead-name
@@ -2442,7 +2449,7 @@ hurd_arm_parent_death(int sig)
         (void)nanosleep(&ts, NULL);
     }
     if (kr != KERN_SUCCESS) {
-        if (kr == KERN_INVALID_NAME) {
+        if (kr == KERN_INVALID_NAME || kr == KERN_FAILURE) {
             /* ESRCH short-circuit: parent really is gone (or proc
              * server permanently lost the pid; either way the death-
              * link semantics are "parent is no longer reachable").
@@ -2452,7 +2459,23 @@ hurd_arm_parent_death(int sig)
              * is correct here because we are the armer thread; using
              * kill(getpid(),sig) on Hurd can deliver to any thread,
              * same hazard as the watcher path.  then return -1/ESRCH
-             * per the spec. */
+             * per the spec.
+             *
+             * v0.9.9 v2.1 empirical: gnumach 1.8+git20260224 on
+             * Debian GNU/Hurd 0.9 returns KERN_FAILURE (0x40000003),
+             * NOT KERN_INVALID_NAME (0xf), when proc_pid2task is
+             * called with a pid the proc server has no live task
+             * for.  the C probe confirmed this for both bogus pids
+             * (999999) and just-reaped child pids; only the success
+             * paths returned KERN_SUCCESS (0x0).  the KERN_INVALID_
+             * NAME arm of the guard is kept for theoretical kernels
+             * that DO surface the textbook code; without the KERN_
+             * FAILURE arm the race-window caller (parent dies
+             * between getppid() and proc_pid2task) currently gets
+             * -1/EIO via the fall-through and the signal is never
+             * raised.  one ESRCH errno for both arms keeps the
+             * caller contract stable across whichever Mach code the
+             * kernel happens to surface. */
             (void)pthread_kill(pthread_self(), sig);
             errno = ESRCH;
             return -1;
@@ -2610,6 +2633,53 @@ hurd_arm_parent_death(int sig)
     pthread_mutex_unlock(&g_arm_lock);
     return 0;
 }
+
+#ifdef PID1_TEST_HELPER
+/* test-only entry: drive the proc_pid2task call against an arbitrary
+ * pid (not just getppid()) and exercise the parent-gone branches of
+ * hurd_arm_parent_death without trying to win a fork race.  the body
+ * mirrors steps 1-2 of the real slot exactly up to the ESRCH short-
+ * circuit; on success it returns 0 WITHOUT spinning a watcher (that
+ * would leak the receive-right plumbing for the synthetic case), on
+ * the parent-gone branches it raises sig on the calling thread and
+ * returns -1/ESRCH; on every other Mach code it returns -1 with the
+ * same hurd_pdeath_errno_from_kr mapping.  this is the only mechanism
+ * the probe harness has to reach the KERN_FAILURE arm of the guard
+ * deterministically, because gnumach 1.8 returns KERN_FAILURE for
+ * bogus / reaped pids and a real arm path would otherwise need a
+ * fork-and-die race to surface it.  symbol is gated by
+ * PID1_TEST_HELPER so it never compiles into the production module
+ * or the standalone pid1 binary. */
+int
+__test_hurd_arm_parent_death_for_pid(int pid, int sig)
+{
+    if (sig < 1 || sig >= NSIG) {
+        errno = EINVAL;
+        return -1;
+    }
+    process_t proc = getproc();
+    if (proc == MACH_PORT_NULL) {
+        errno = EAGAIN;
+        return -1;
+    }
+    task_t parent_task = MACH_PORT_NULL;
+    kern_return_t kr = proc_pid2task(proc, pid, &parent_task);
+    if (kr == KERN_INVALID_NAME || kr == KERN_FAILURE) {
+        (void)pthread_kill(pthread_self(), sig);
+        errno = ESRCH;
+        return -1;
+    }
+    if (kr != KERN_SUCCESS) {
+        errno = hurd_pdeath_errno_from_kr(kr);
+        return -1;
+    }
+    /* success path: we deliberately do not arm a watcher here; the
+     * helper exists to exercise the guard arm only.  release the
+     * fresh send right we own. */
+    (void)mach_port_deallocate(mach_task_self(), parent_task);
+    return 0;
+}
+#endif /* PID1_TEST_HELPER */
 
 /* the table.  same shape as port_linux_impl, every slot populated.
  * the symmetry is what lets emacs-init.c pick one or the other at
