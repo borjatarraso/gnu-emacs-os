@@ -2420,6 +2420,9 @@ hurd_arm_parent_death(int sig)
     if (g_arm.active && g_arm.notify_port != MACH_PORT_NULL) {
         (void)mach_port_mod_refs(mach_task_self(), g_arm.notify_port,
                                  MACH_PORT_RIGHT_RECEIVE, -1);
+        /* g_arm now names a destroyed receive right until the success
+         * write at the bottom of the function or an error-path clear;
+         * the held lock keeps any second concurrent caller out. */
     }
 
     /* step 6: heap-allocate the watcher context and spin the thread.
