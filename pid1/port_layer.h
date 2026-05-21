@@ -289,34 +289,67 @@ typedef struct port_caps {
      * SIGTERM) when the parent process (pid1) dies.
      *
      * Linux backend: prctl(PR_SET_PDEATHSIG, signal).  see
-     * docs/runlogs/2026-05-21-hurd-xorg-probe.md probe F.
+     * docs/runlogs/2026-05-21-hurd-xorg-probe.md probe F.  re-arm with
+     * any signal is a Linux kernel-level write (no contract concern).
      *
-     * Hurd backend (v0.9.9, side branch only): the real Mach dead-name
-     * notify path.  proc_pid2task(getproc(), getppid(), &parent_task)
-     * (NOT hardcoded pid=1; future spawn paths arm from non-pid1
-     * parents), mach_port_allocate(self, RECEIVE, &notify_port),
+     * Hurd backend (v0.9.9 v2, side branch only): the real Mach
+     * dead-name notify path with revised ownership and re-entry
+     * contracts after v1 VM-verify falsification.  call sequence:
+     * proc_pid2task(getproc(), getppid(), &parent_task) with a 10x
+     * 100ms retry loop on KERN_INVALID_NAME (covers the freshly-
+     * forked-caller race; pid1 is the registered ancestor of all
+     * spawn_xorg children from boot so the retry is a no-op there),
+     * mach_port_allocate(self, RECEIVE, &notify_port),
      * mach_port_request_notification(self, parent_task,
      * MACH_NOTIFY_DEAD_NAME, sync=0, notify_port, MAKE_SEND_ONCE,
-     * &prev), drop prev if non-null, deallocate parent_task, then a
-     * PTHREAD_CREATE_DETACHED watcher that blocks in mach_msg on
-     * notify_port until the dead-name message arrives and does
-     * kill(getpid(), signal).  re-entrancy is last-writer-wins:
-     * destroying the old receive right wakes the old watcher with
-     * MACH_RCV_PORT_DIED which exits via its failure path; no
-     * pthread_cancel.  exec divergence: Mach receive rights and
-     * pthreads do not survive exec, so the link silently breaks on
-     * the exec'd image (caller re-arms post-exec if needed).
-     * cited in docs/runlogs/2026-05-21-hurd-xorg-probe.md probes F2/G
-     * and in mach_port.defs:247 + notify.defs:106.
+     * &prev), drop prev if VALID, then a PTHREAD_CREATE_DETACHED
+     * watcher that blocks in mach_msg on notify_port with
+     * TIMEOUT_NONE until the dead-name message arrives and does
+     * kill(getpid(), signal).  parent_task's SEND right ownership
+     * transfers to the watcher; the watcher deallocates both
+     * parent_task and notify_port on exit.  do NOT deallocate
+     * parent_task in the armer on success (v1 bug: the kernel binds
+     * the notification record to the ipc_entry in our ipc_space per
+     * mach_port.defs:228-251, so eagerly dropping the send right
+     * frees the entry and silently consumes the notification).
+     *
+     * re-entrancy contract (v2): IDEMPOTENT on same signal, EALREADY
+     * on different signal.  a second call with the same signal as the
+     * live arm returns 0 with no side effects; a second call with a
+     * different signal returns -1/EALREADY and the FIRST arm stays
+     * live (so signal-on-death is whichever was armed first).  there
+     * is never more than one watcher pthread per process.  v1 tried
+     * last-writer-wins via mod_refs(-1) on the previous receive right
+     * and that DOES NOT WAKE the old watcher's mach_msg on gnumach
+     * (wakeup is keyed on message arrival, not on rights destruction),
+     * leaking +100 pthreads per 100 calls.  callers that genuinely
+     * need to change the death-link signal must exec into a new
+     * process (Mach receive rights and pthreads do not survive exec).
+     *
+     * exec divergence: Mach receive rights and pthreads do not survive
+     * exec, so the link silently breaks on the exec'd image.  caller
+     * re-arms post-exec if needed.  cited in docs/runlogs/2026-05-21-
+     * hurd-xorg-probe.md probes F2/G and in mach_port.defs:247 +
+     * notify.defs:106.
      *
      * callers tolerate ENOSYS: the death-link is defence-in-depth, the
      * Hurd spawn path still works without it (pid1 dying causes the
      * kernel to reboot anyway).  caller logs ENOSYS at INFO and
-     * continues; any other errno is panic-routed.  matches the
-     * publish_auth_port / get_peer_cred ENOSYS-tolerance pattern from
-     * v0.8.
+     * continues; EALREADY is treated as success by spawn_xorg-style
+     * call sites (the first arm wins, the redundant call is the
+     * caller's bug to fix); any other errno is panic-routed.
      *
-     * returns 0 on success, -1 with errno set on failure. */
+     * return values:
+     *   0          : success, OR idempotent second arm with same
+     *                signal on Hurd (Linux always treats as success).
+     *   -1/EINVAL  : signal out of range.
+     *   -1/ENOMEM  : malloc/pthread_create resource failure (Hurd).
+     *   -1/EALREADY: Hurd, second arm with different signal; first
+     *                arm stays live.
+     *   -1/ESRCH   : Hurd, parent already dead after retry loop;
+     *                in-process kill(getpid(), signal) has fired
+     *                before this return.
+     *   -1/EIO     : Hurd, unknown kern_return_t. */
     int (*arm_parent_death)(int signal);
 } port_caps;
 

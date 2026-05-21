@@ -2071,65 +2071,120 @@ cleanup:
  * SIGTERM) when the parent process (pid1, or whoever getppid() returns
  * at arm time) dies.
  *
- * v0.9.9 body (this commit): the real Mach dead-name notify path.
+ * v0.9.9 v2 body (this commit): the real Mach dead-name notify path,
+ * post-VM-verify falsification.  v1 (hurd/87a5ed5) FAILed VM-verify
+ * on canonical Debian Hurd 0.9 for three load-bearing reasons; this
+ * v2 body corrects each.
  *
- *   1. proc_pid2task(getproc(), getppid(), &parent_task) to obtain a
- *      send right on the parent task.  the parent's pid is read from
- *      getppid(); we do NOT hardcode pid 1 because future spawn paths
- *      (e.g. exwm helpers re-fork'd from the supervisor's own pid) may
- *      arm a death-link from a non-pid1 parent.
+ *   1. parent_task send right OWNERSHIP TRANSFERS TO THE WATCHER.
+ *      v1 deallocated parent_task right after request_notification
+ *      returned, on the assumption that the kernel had recorded the
+ *      task by name and no longer needed our send right alive.  WRONG:
+ *      mach/mach_port.defs:228-251 binds the notification to the
+ *      ipc_entry in OUR ipc_space, not to a kernel-private table.
+ *      when we dealloc parent_task its user-ref hits zero, the entry
+ *      is freed, the recorded send-once is consumed silently, and the
+ *      dead-name notification never arrives.  fix: the watcher holds
+ *      parent_task alive for its lifetime and deallocates on exit.
  *
- *   2. mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &notify_port).
+ *   2. RE-ENTRY IS BANNED.  v1 destroyed the prev receive right via
+ *      mach_port_mod_refs(-1) under the assumption that the old
+ *      watcher's blocked mach_msg would wake with MACH_RCV_PORT_DIED.
+ *      WRONG: gnumach keys mach_msg receive wakeup on message arrival,
+ *      not on receive-rights destruction.  100 back-to-back arm calls
+ *      leaked +100 pthreads and +800 MiB of stack reservation.  fix:
+ *      arm is idempotent on same-signal (returns 0, no-op), EALREADY
+ *      on different-signal.  watcher count is always exactly 1 per
+ *      process.  no pthread_cancel, no pthread_kill, no thread join.
+ *
+ *   3. PROC_PID2TASK RACE.  v1 test harness forked B and immediately
+ *      armed; proc_pid2task fired KERN_INVALID_NAME because the proc
+ *      server had not yet registered A's pid.  PRODUCTION spawn_xorg
+ *      path is not affected (pid1 is the proc-server-registered
+ *      ancestor of all tasks from boot).  fix lives in the test
+ *      harness, not here: harness calls proc_child(getproc(), B_task)
+ *      after fork to prime the lookup chain.
+ *
+ * call shape:
+ *
+ *   1. pid_t ppid = getppid().
+ *
+ *   2. process_t proc = getproc() (cached send right; do NOT
+ *      deallocate).  proc_pid2task(proc, ppid, &parent_task) cited at
+ *      /usr/include/x86_64-gnu/hurd/process.defs:234.  on
+ *      KERN_INVALID_NAME, retry with 100ms nanosleep up to 10 times
+ *      (1s total) so a fresh-forked caller does not race the proc
+ *      server's registration of its own pid.  on persistent
+ *      KERN_INVALID_NAME: kill(getpid(), signal); errno=ESRCH;
+ *      return -1.  parent_task is a SEND right we own; the watcher
+ *      will take ownership in step 6 and we MUST NOT deallocate it
+ *      on the success path.
+ *
+ *   3. mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &notify_port).
  *      this is the receive right the kernel will send the dead-name
- *      notification to.  we keep it.
+ *      notification to.  the watcher takes ownership; main body
+ *      deallocates only on error.
  *
- *   3. mach_port_request_notification(self, parent_task,
+ *   4. mach_port_request_notification(self, parent_task,
  *          MACH_NOTIFY_DEAD_NAME, 0, notify_port,
  *          MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev).  cited:
  *          /usr/include/x86_64-gnu/mach/mach_port.defs:247 (the routine)
  *          and /usr/include/x86_64-gnu/mach/notify.defs:106 (the msgid,
  *          MACH_NOTIFY_DEAD_NAME = 0100 octal = 64 decimal).
- *      polymorphic-type contract on the args (gnumach reads these by
- *      name, no transfer of parent_task, mints a send-once from our
- *      receive right, and hands us back the previous notify port as
- *      `prev` which we MUST deallocate if non-null).
+ *      kernel reads parent_task by name (no transfer), mints a send-
+ *      once from our receive right, and hands us back the previous
+ *      notify port as `prev` which we MUST deallocate if VALID.
+ *      `prev` ownership stays with main on every path (re-entry-
+ *      rejected or success); the watcher never sees it.
  *
- *   4. drop the parent_task send right (kernel already recorded the
- *      name internally for the notification).  drop the prev send
- *      right unconditionally if non-null.
+ *   5. RE-ENTRY CHECK under g_arm_lock.  if g_arm.active: clean up
+ *      the resources we just allocated (deallocate parent_task,
+ *      deallocate prev if VALID, mod_refs(-1) notify_port), and:
+ *        - if g_arm.signal == sig: return 0 (idempotent no-op)
+ *        - else:                   errno=EALREADY; return -1
+ *      the previous arm stays live; we deliberately do NOT touch it.
  *
- *   5. pthread_create(watcher) with PTHREAD_CREATE_DETACHED.  the
- *      watcher mach_msg's notify_port with MACH_MSG_TIMEOUT_NONE,
- *      asserts the incoming msgh_id is MACH_NOTIFY_DEAD_NAME, then
- *      kill(getpid(), signal) and pthread_exit.
+ *   6. heap-allocate hurd_pdeath_watcher_ctx with notify_port,
+ *      parent_task_name (the send right's name; ownership now
+ *      transferred to the watcher), and signal.
  *
- * ESRCH short-circuit: if proc_pid2task fails with KERN_INVALID_NAME
- * the parent already died between getppid() and proc_pid2task; we
- * raise(signal) in-process before returning -1/ESRCH so the caller
- * observes the same end-state as a successful arm + immediate parent
- * death.  documented here so a future skeptic reading the early
- * return does not "fix" the in-process raise.
+ *   7. pthread_create detached.  on failure: free ctx, deallocate
+ *      parent_task, mod_refs(-1) notify_port, unlock, errno from
+ *      prc, return -1.
  *
- * re-entrancy: last-writer-wins.  a process-global `g_arm` struct
- * (notify_port + signal + watcher tid) under a pthread mutex holds
- * the previous arm.  a second call destroys the old receive right
- * (mod_refs -1), which unblocks the old watcher's mach_msg with
- * MACH_RCV_PORT_DIED; the watcher's failure path runs pthread_exit
- * and we are clean.  do NOT pthread_cancel; the receive-port-
- * destroyed path is the kernel-blessed teardown.
+ *   8. write g_arm and unlock.  if MACH_PORT_VALID(prev): deallocate
+ *      before the unlock (lock ownership is irrelevant for the
+ *      dealloc, but doing it under the lock keeps the cleanup grouped
+ *      with the g_arm write).  return 0.
+ *
+ * watcher body: blocks in mach_msg(MACH_RCV_MSG, ctx->notify_port,
+ * TIMEOUT_NONE).  TIMEOUT_NONE is safe because re-entry is banned;
+ * nothing else tries to wake this thread.  on MACH_NOTIFY_DEAD_NAME
+ * matching ctx->parent_task_name: kill(getpid(), signal), deallocate
+ * BOTH parent_task_name AND notify_port, free ctx, pthread_exit.
+ * on any other mach_msg outcome: log to /dev/console, deallocate
+ * both rights, free ctx, pthread_exit.  the watcher OWNS both rights
+ * from step 6 onward and is the sole place either gets released.
+ *
+ * ESRCH short-circuit: documented in step 2 above; raise the
+ * requested signal in-process so the caller observes the same end-
+ * state as a successful arm + instant fire.
  *
  * authority: docs/runlogs/2026-05-21-hurd-xorg-probe.md is the
  * receipt that pins both the slot shape and the load-bearing
  * primitive correction (probes F, F2, G).  v0.9.8 placeholder was
- * the ENOSYS body; this commit replaces it with the watcher.
+ * the ENOSYS body; v0.9.9 v1 (hurd/87a5ed5) shipped the watcher
+ * with the wrong ownership and re-entry models; this commit (v2)
+ * is the post-falsification rewrite.
  *
- * load-bearing falsification: proc_setowner is NOT the right
- * primitive.  proc_setowner is marked "Deprecated" at
- * /usr/include/x86_64-gnu/hurd/process.defs:127.  the right
- * primitive is MACH_NOTIFY_DEAD_NAME via
- * mach_port_request_notification at mach_port.defs:247 +
- * notify.defs:106.  do not "fix" this function by routing through
- * proc_setowner; that path is already falsified.
+ * load-bearing falsification log: proc_setowner is NOT the right
+ * primitive (Deprecated at /usr/include/x86_64-gnu/hurd/process.defs
+ * :127).  the right primitive is MACH_NOTIFY_DEAD_NAME via
+ * mach_port_request_notification at mach_port.defs:247 + notify.defs
+ * :106.  v1's "release parent_task after request_notification" was
+ * also falsified: the kernel needs the send right's ipc_entry to
+ * stay populated for the notification record to survive (see
+ * mach_port.defs:228-251).
  *
  * exec divergence: Mach receive rights are NOT inherited across
  * exec.  the watcher pthread also disappears at exec.  the death
@@ -2150,7 +2205,7 @@ cleanup:
  * circuit above, so sync=0 is the lighter path.
  *
  * TBD-2: NO_SENDERS fail-safe registration is intentionally not
- * wired in this slice (out of v0.9.9 scope per the spec).
+ * wired in this slice (deferred to v0.9.10).
  *
  * TBD-3: kill(getpid(), sig) from the watcher pthread.  POSIX
  * guarantees the signal is delivered to the process; the implementer
@@ -2160,19 +2215,34 @@ cleanup:
  * shows pthread+signals broken on this Hurd image, fall back to a
  * pipe write polled from main.
  *
- * returns 0 on success, -1 with errno set on failure. */
+ * return values:
+ *   0          : success, OR idempotent second arm with same signal.
+ *   -1/EINVAL  : signal out of range.
+ *   -1/ENOMEM  : malloc or pthread_create resource failure.
+ *   -1/EALREADY: second arm with DIFFERENT signal; first arm stays
+ *                live, no new watcher spun.
+ *   -1/ESRCH   : parent already dead (after retry loop); the
+ *                in-process kill(getpid(), signal) has already fired
+ *                before this return.
+ *   -1/EIO     : unknown kern_return_t escaped the local table. */
 
-/* re-entrancy bookkeeping.  one process-global slot under a mutex; a
- * second arm call destroys the previous receive right and installs a
- * new one.  the watcher pthread for the previous arm wakes from
- * mach_msg with MACH_RCV_PORT_DIED and exits via its own failure
- * path; no pthread_cancel, no thread join. */
+/* re-entrancy bookkeeping.  one process-global slot under a mutex.
+ * v0.9.9 v2 contract: second arm with same signal is idempotent
+ * (returns 0 with no side effects); second arm with different signal
+ * fails fast with EALREADY.  there is never more than one watcher
+ * pthread live in a process.
+ *
+ * parent_task_name is recorded so a future skeptic reading g_arm can
+ * answer "which send right does the live watcher own?" without
+ * chasing the heap ctx (which is owned exclusively by the watcher
+ * pthread and freed on its exit). */
 static struct {
-    pthread_t       tid;          /* detached watcher; not joinable */
-    mach_port_t     notify_port;  /* receive right we hold */
-    int             signal;       /* signal the watcher will raise */
-    int             active;       /* 1 once tid+notify_port are valid */
-} g_arm = { 0, MACH_PORT_NULL, 0, 0 };
+    pthread_t       tid;               /* detached watcher; not joinable */
+    mach_port_t     notify_port;       /* receive right held by watcher */
+    mach_port_t     parent_task_name;  /* send right held by watcher */
+    int             signal;            /* signal the watcher will raise */
+    int             active;            /* 1 once tid+notify_port are valid */
+} g_arm = { 0, MACH_PORT_NULL, MACH_PORT_NULL, 0, 0 };
 static pthread_mutex_t g_arm_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* heap struct handed to the detached watcher.  freed by the watcher
@@ -2189,15 +2259,13 @@ struct hurd_pdeath_watcher_ctx {
 static void *
 hurd_pdeath_watcher(void *arg)
 {
-    /* copy into stack locals and free the heap struct immediately.
-     * the caller might re-arm before we ever return; the kernel has
-     * already snapshotted the parent_task name and our receive right,
-     * so holding the heap struct alive serves nothing. */
+    /* the heap ctx stays alive for the watcher's lifetime; we hold
+     * the ONLY references to parent_task_name (send right) and
+     * notify_port (receive right) in the process from the moment the
+     * armer hands them to us.  re-entry is banned at the armer, so
+     * nothing else will touch either right.  on every exit path we
+     * free both rights and the ctx. */
     struct hurd_pdeath_watcher_ctx *ctx = arg;
-    mach_port_t notify_port      = ctx->notify_port;
-    mach_port_t parent_task_name = ctx->parent_task_name;
-    int         sig              = ctx->signal;
-    free(ctx);
 
     /* mach_msg buffer sized for mach_dead_name_notification_t (header
      * + trailer + not_port name).  the kernel-emitted dead-name
@@ -2208,30 +2276,29 @@ hurd_pdeath_watcher(void *arg)
         mach_dead_name_notification_t  dn;
         char                           pad[256];
     } buf;
-    /* zero the buffer so a future -Wuninitialized on a stub mach_msg
-     * does not trip the production build; the real kernel fills the
-     * header on every successful receive. */
-    memset(&buf, 0, sizeof buf);
 
     for (;;) {
+        /* zero before each receive: the kernel writes only the
+         * header it is sending us, and the message-id check below
+         * would dereference uninitialised storage if we left old
+         * bytes in place across an unrelated msg.  belt and braces. */
+        memset(&buf, 0, sizeof buf);
+
         mach_msg_return_t mr =
             mach_msg(&buf.hdr,
                      MACH_RCV_MSG,
                      0,
                      sizeof buf,
-                     notify_port,
+                     ctx->notify_port,
                      MACH_MSG_TIMEOUT_NONE,
                      MACH_PORT_NULL);
 
-        if (mr == MACH_RCV_PORT_DIED || mr == MACH_RCV_PORT_CHANGED) {
-            /* receive right destroyed under us, which is exactly what
-             * the re-entrancy teardown path does to the previous arm.
-             * exit silently; the new arm's watcher will carry on. */
-            pthread_exit(NULL);
-        }
         if (mr != MACH_MSG_SUCCESS) {
-            /* anything else is unexpected; log to /dev/console and
-             * exit.  do not spin on the failing receive. */
+            /* any failed receive is terminal.  re-entry is banned at
+             * the armer so the previous-watcher teardown that v1
+             * relied on via MACH_RCV_PORT_DIED never happens; if we
+             * see a failure here something unrelated went wrong.
+             * log, clean up both rights, free ctx, exit. */
             int fd = open("/dev/console", O_WRONLY | O_CLOEXEC);
             if (fd >= 0) {
                 char m[96];
@@ -2241,8 +2308,11 @@ hurd_pdeath_watcher(void *arg)
                 if (n > 0) { ssize_t w = write(fd, m, (size_t)n); (void)w; }
                 (void)close(fd);
             }
-            (void)mach_port_mod_refs(mach_task_self(), notify_port,
+            (void)mach_port_deallocate(mach_task_self(),
+                                       ctx->parent_task_name);
+            (void)mach_port_mod_refs(mach_task_self(), ctx->notify_port,
                                      MACH_PORT_RIGHT_RECEIVE, -1);
+            free(ctx);
             pthread_exit(NULL);
         }
 
@@ -2264,9 +2334,9 @@ hurd_pdeath_watcher(void *arg)
         }
 
         /* match the not_port name against what we armed against.
-         * mismatch is a kernel bug; we log and exit rather than send
-         * a spurious signal to ourselves. */
-        if (buf.dn.not_port != parent_task_name) {
+         * mismatch is a kernel bug; log and loop rather than send a
+         * spurious signal to ourselves. */
+        if (buf.dn.not_port != ctx->parent_task_name) {
             int fd = open("/dev/console", O_WRONLY | O_CLOEXEC);
             if (fd >= 0) {
                 char m[128];
@@ -2274,7 +2344,7 @@ hurd_pdeath_watcher(void *arg)
                                  "pid1: pdeath watcher port mismatch "
                                  "got=0x%x want=0x%x\n",
                                  (unsigned)buf.dn.not_port,
-                                 (unsigned)parent_task_name);
+                                 (unsigned)ctx->parent_task_name);
                 if (n > 0) { ssize_t w = write(fd, m, (size_t)n); (void)w; }
                 (void)close(fd);
             }
@@ -2286,11 +2356,14 @@ hurd_pdeath_watcher(void *arg)
          * targets the calling thread, kill targets the process, and
          * the spec wants process-level termination.  default action
          * for SIGTERM is exit, so this returns cleanly to the OS
-         * before mach_port_mod_refs runs; the mod_refs is best-
-         * effort, the kernel cleans up our task on exit anyway. */
-        (void)kill(getpid(), sig);
-        (void)mach_port_mod_refs(mach_task_self(), notify_port,
+         * before the cleanup below runs; the cleanup is best-effort,
+         * the kernel reaps our task on exit anyway. */
+        (void)kill(getpid(), ctx->signal);
+        (void)mach_port_deallocate(mach_task_self(),
+                                   ctx->parent_task_name);
+        (void)mach_port_mod_refs(mach_task_self(), ctx->notify_port,
                                  MACH_PORT_RIGHT_RECEIVE, -1);
+        free(ctx);
         pthread_exit(NULL);
     }
 }
@@ -2324,26 +2397,50 @@ hurd_arm_parent_death(int sig)
         return -1;
     }
 
+    /* step 1: ppid snapshot.  getppid is async-signal-safe and never
+     * fails on POSIX; the value is the parent at this instant which
+     * is what we want for the dead-name watch.  if the parent dies
+     * between this line and proc_pid2task below, the retry-loop /
+     * ESRCH short-circuit covers it. */
     pid_t ppid = getppid();
 
     /* step 2: parent's task port via the proc server.
      *
      * getproc() returns a CACHED send right; we MUST NOT deallocate
      * it (libc owns the cache).  proc_pid2task returns a FRESH send
-     * right we own and must drop with mach_port_deallocate later. */
+     * right we own; on the SUCCESS path this right transfers to the
+     * watcher in step 6, on every ERROR path we deallocate it.
+     *
+     * KERN_INVALID_NAME retry loop: on a freshly forked caller the
+     * proc server may not yet have registered our own pid (and thus
+     * not have our parent's pid in its hash either).  this is a
+     * narrow race observed in the v1 test harness; production
+     * spawn_xorg arms from a child whose parent is pid1, registered
+     * since boot, so the retry loop is a no-op there but defends the
+     * test path (and any future non-pid1-parented spawn path that
+     * arms within milliseconds of fork). */
     process_t proc = getproc();
     if (proc == MACH_PORT_NULL) {
         errno = EAGAIN;
         return -1;
     }
     task_t parent_task = MACH_PORT_NULL;
-    kern_return_t kr = proc_pid2task(proc, ppid, &parent_task);
+    kern_return_t kr = KERN_SUCCESS;
+    for (int attempt = 0; attempt < 10; attempt++) {
+        kr = proc_pid2task(proc, ppid, &parent_task);
+        if (kr != KERN_INVALID_NAME) break;
+        /* 100ms back-off; 10 attempts = 1s wall budget total. */
+        struct timespec ts = { 0, 100 * 1000 * 1000 };
+        (void)nanosleep(&ts, NULL);
+    }
     if (kr != KERN_SUCCESS) {
         if (kr == KERN_INVALID_NAME) {
-            /* ESRCH short-circuit: parent already dead.  raise the
-             * requested signal in-process so the caller sees the
-             * same end-state as a successful arm + instant fire.
-             * then return -1/ESRCH per the spec. */
+            /* ESRCH short-circuit: parent really is gone (or proc
+             * server permanently lost the pid; either way the death-
+             * link semantics are "parent is no longer reachable").
+             * raise the requested signal in-process so the caller
+             * sees the same end-state as a successful arm + instant
+             * fire.  then return -1/ESRCH per the spec. */
             (void)kill(getpid(), sig);
             errno = ESRCH;
             return -1;
@@ -2365,18 +2462,24 @@ hurd_arm_parent_death(int sig)
 
     /* step 4: request the dead-name notification.
      *
-     * arg-by-arg recap (spec section A.4):
+     * arg-by-arg recap (spec section B.4):
      *   self          : our task name, kernel reads it directly.
      *   parent_task   : SEND right we hold; kernel reads the name out
-     *                   and records it for the death watch.  no
-     *                   transfer; our send-right ownership unchanged.
+     *                   and binds the notification record to the
+     *                   ipc_entry in OUR ipc_space (mach_port.defs:
+     *                   228-251).  this is why parent_task MUST stay
+     *                   alive past this call (the watcher will hold
+     *                   it for its lifetime); v1's eager deallocate
+     *                   freed the entry and silently consumed the
+     *                   notification record.
      *   MACH_NOTIFY_DEAD_NAME : the msgid the kernel will set on the
      *                   delivered notification (notify.defs:106).
      *   sync = 0      : do NOT fire immediately if already dead; we
      *                   handle that case via the ESRCH short-circuit.
      *   notify_port   : OUR receive-right name; kernel mints a send-
      *                   once from it to use as the destination.  we
-     *                   keep the receive right.
+     *                   keep the receive right (the watcher will own
+     *                   it).
      *   MAKE_SEND_ONCE: tells the kernel to mint a send-once from our
      *                   receive right.  DO NOT pass MOVE_SEND_ONCE;
      *                   we are not transferring an existing one.
@@ -2384,7 +2487,12 @@ hurd_arm_parent_death(int sig)
      *                   (the port that USED to be registered for this
      *                   dead-name slot, typically MACH_PORT_NULL on
      *                   a fresh request) into our name space as a
-     *                   send right we own. */
+     *                   send right we own.  caller (us) is responsible
+     *                   for deallocating it on every exit path.
+     *
+     * on failure: deallocate parent_task and notify_port, return -1.
+     * we do NOT deallocate parent_task on the success path; ownership
+     * transfers to the watcher in step 6. */
     mach_port_t prev = MACH_PORT_NULL;
     kr = mach_port_request_notification(mach_task_self(),
                                         parent_task,
@@ -2393,55 +2501,63 @@ hurd_arm_parent_death(int sig)
                                         notify_port,
                                         MACH_MSG_TYPE_MAKE_SEND_ONCE,
                                         &prev);
-    /* drop the parent task send right unconditionally; the kernel
-     * has already recorded the name for the death watch and does
-     * not need our send right alive past this RPC. */
-    (void)mach_port_deallocate(mach_task_self(), parent_task);
-
-    /* drop prev unconditionally if non-null.  per the spec this is
-     * NOT nested inside an error branch: even on a partial failure
-     * the kernel may have handed us a previous port to clean up. */
-    if (MACH_PORT_VALID(prev)) {
-        (void)mach_port_deallocate(mach_task_self(), prev);
-    }
-
     if (kr != KERN_SUCCESS) {
+        (void)mach_port_deallocate(mach_task_self(), parent_task);
         (void)mach_port_mod_refs(mach_task_self(), notify_port,
                                  MACH_PORT_RIGHT_RECEIVE, -1);
+        /* if the kernel handed us a prev even on failure (does not
+         * happen on gnumach today but the contract permits it),
+         * release it so we do not leak. */
+        if (MACH_PORT_VALID(prev)) {
+            (void)mach_port_deallocate(mach_task_self(), prev);
+        }
         errno = hurd_pdeath_errno_from_kr(kr);
         return -1;
     }
 
-    /* step 5: re-entrancy teardown.  if a previous arm is live,
-     * destroy its receive right so its watcher's mach_msg returns
-     * MACH_RCV_PORT_DIED and exits.  do this under the lock so a
-     * second concurrent caller sees a consistent g_arm. */
+    /* step 5: RE-ENTRY CHECK under the lock.  if a watcher is already
+     * live in this process, we do NOT spin a second one (that was the
+     * v1 thread-leak).  same-signal: idempotent return 0.  different-
+     * signal: return -1/EALREADY and leave the existing arm alone.
+     * either way we clean up the resources WE allocated in steps 2-4
+     * because the existing watcher already owns its own pair. */
     pthread_mutex_lock(&g_arm_lock);
-    if (g_arm.active && g_arm.notify_port != MACH_PORT_NULL) {
-        (void)mach_port_mod_refs(mach_task_self(), g_arm.notify_port,
-                                 MACH_PORT_RIGHT_RECEIVE, -1);
-        /* g_arm now names a destroyed receive right until the success
-         * write at the bottom of the function or an error-path clear;
-         * the held lock keeps any second concurrent caller out. */
-    }
-
-    /* step 6: heap-allocate the watcher context and spin the thread.
-     * detached so we never need to pthread_join; the kernel reaps
-     * the thread on its pthread_exit. */
-    struct hurd_pdeath_watcher_ctx *ctx = malloc(sizeof *ctx);
-    if (ctx == NULL) {
+    if (g_arm.active) {
+        int prev_sig = g_arm.signal;
+        pthread_mutex_unlock(&g_arm_lock);
+        (void)mach_port_deallocate(mach_task_self(), parent_task);
+        if (MACH_PORT_VALID(prev)) {
+            (void)mach_port_deallocate(mach_task_self(), prev);
+        }
         (void)mach_port_mod_refs(mach_task_self(), notify_port,
                                  MACH_PORT_RIGHT_RECEIVE, -1);
-        g_arm.active = 0;
-        g_arm.notify_port = MACH_PORT_NULL;
+        if (prev_sig == sig) {
+            return 0; /* idempotent same-signal arm */
+        }
+        errno = EALREADY;
+        return -1;
+    }
+
+    /* step 6: heap-allocate the watcher context.  the watcher owns
+     * both rights for its lifetime and frees ctx on exit. */
+    struct hurd_pdeath_watcher_ctx *ctx = malloc(sizeof *ctx);
+    if (ctx == NULL) {
         pthread_mutex_unlock(&g_arm_lock);
+        (void)mach_port_deallocate(mach_task_self(), parent_task);
+        if (MACH_PORT_VALID(prev)) {
+            (void)mach_port_deallocate(mach_task_self(), prev);
+        }
+        (void)mach_port_mod_refs(mach_task_self(), notify_port,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
         errno = ENOMEM;
         return -1;
     }
     ctx->notify_port      = notify_port;
-    ctx->parent_task_name = parent_task; /* name only, right released */
+    ctx->parent_task_name = parent_task; /* ownership transfers here */
     ctx->signal           = sig;
 
+    /* step 7: spin the detached watcher.  detached so we never need
+     * to pthread_join; the watcher cleans up on its own pthread_exit. */
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
@@ -2449,20 +2565,30 @@ hurd_arm_parent_death(int sig)
     int prc = pthread_create(&tid, &attr, hurd_pdeath_watcher, ctx);
     pthread_attr_destroy(&attr);
     if (prc != 0) {
+        pthread_mutex_unlock(&g_arm_lock);
         free(ctx);
+        (void)mach_port_deallocate(mach_task_self(), parent_task);
+        if (MACH_PORT_VALID(prev)) {
+            (void)mach_port_deallocate(mach_task_self(), prev);
+        }
         (void)mach_port_mod_refs(mach_task_self(), notify_port,
                                  MACH_PORT_RIGHT_RECEIVE, -1);
-        g_arm.active = 0;
-        g_arm.notify_port = MACH_PORT_NULL;
-        pthread_mutex_unlock(&g_arm_lock);
         errno = prc; /* pthread_create returns errno directly */
         return -1;
     }
 
-    g_arm.tid         = tid;
-    g_arm.notify_port = notify_port;
-    g_arm.signal      = sig;
-    g_arm.active      = 1;
+    /* step 8: commit g_arm.  prev belongs to us on every path; if the
+     * kernel handed us a non-null prev, release it now.  doing it
+     * under the lock keeps every g_arm-related action grouped, and
+     * the dealloc itself is lock-agnostic. */
+    g_arm.tid              = tid;
+    g_arm.notify_port      = notify_port;
+    g_arm.parent_task_name = parent_task;
+    g_arm.signal           = sig;
+    g_arm.active           = 1;
+    if (MACH_PORT_VALID(prev)) {
+        (void)mach_port_deallocate(mach_task_self(), prev);
+    }
     pthread_mutex_unlock(&g_arm_lock);
     return 0;
 }
