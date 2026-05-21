@@ -291,17 +291,23 @@ typedef struct port_caps {
      * Linux backend: prctl(PR_SET_PDEATHSIG, signal).  see
      * docs/runlogs/2026-05-21-hurd-xorg-probe.md probe F.
      *
-     * Hurd backend: returns -1 with errno=ENOSYS in v0.9.8.  the real
-     * implementation is the v0.9.9 follow-on slice:
-     *   proc_pid2task(getproc(), 1, &parent_task);
-     *   mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &notify_port);
-     *   mach_port_request_notification(self, parent_task,
-     *       MACH_NOTIFY_DEAD_NAME, 0, notify_port,
-     *       MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
-     *   pthread_create(watcher) which mach_msg_recv's the dead-name and
-     *       kill(getpid(), signal) on receipt.
-     * cited in docs/runlogs/2026-05-21-hurd-xorg-probe.md probes F2/G and
-     * decision-relevant points.
+     * Hurd backend (v0.9.9, side branch only): the real Mach dead-name
+     * notify path.  proc_pid2task(getproc(), getppid(), &parent_task)
+     * (NOT hardcoded pid=1; future spawn paths arm from non-pid1
+     * parents), mach_port_allocate(self, RECEIVE, &notify_port),
+     * mach_port_request_notification(self, parent_task,
+     * MACH_NOTIFY_DEAD_NAME, sync=0, notify_port, MAKE_SEND_ONCE,
+     * &prev), drop prev if non-null, deallocate parent_task, then a
+     * PTHREAD_CREATE_DETACHED watcher that blocks in mach_msg on
+     * notify_port until the dead-name message arrives and does
+     * kill(getpid(), signal).  re-entrancy is last-writer-wins:
+     * destroying the old receive right wakes the old watcher with
+     * MACH_RCV_PORT_DIED which exits via its failure path; no
+     * pthread_cancel.  exec divergence: Mach receive rights and
+     * pthreads do not survive exec, so the link silently breaks on
+     * the exec'd image (caller re-arms post-exec if needed).
+     * cited in docs/runlogs/2026-05-21-hurd-xorg-probe.md probes F2/G
+     * and in mach_port.defs:247 + notify.defs:106.
      *
      * callers tolerate ENOSYS: the death-link is defence-in-depth, the
      * Hurd spawn path still works without it (pid1 dying causes the

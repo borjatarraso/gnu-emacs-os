@@ -1,0 +1,80 @@
+# tests/Makefile, builds the Hurd-only design-uncertainty probes.
+#
+# convention: every probe is a single .c that says "OK"/"PASS" on
+# stdout (exit 0) or "FAIL: <reason>" on stdout (exit 1).  no test
+# framework, no test runner, no expected-output files.  these are
+# answers-to-design-questions, not unit tests.
+#
+# the unit tests live under iso-build/freeze-tests/ and run inside
+# the booted emacs.  the QEMU smoke gate lives under iso-build/.
+# this Makefile is purely the C-probe build, invoked by hand from a
+# Hurd dev VM or by the v0.9.9 verification runlog.
+#
+# default `make` builds nothing; pick a PORT explicitly:
+#   make -C tests PORT=hurd            -> every Hurd-only probe
+#   make -C tests PORT=hurd pdeath     -> just the pdeath probe
+# Linux is not a supported PORT here because every probe in this
+# directory uses <mach.h> / <hurd.h>.  asking for PORT=linux is a
+# fast loud failure.
+
+PORT ?= hurd
+ifneq ($(PORT),hurd)
+$(error tests/Makefile: PORT=$(PORT) not supported; only PORT=hurd has any probes here)
+endif
+
+CC      ?= gcc
+CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -O2 -fno-strict-aliasing
+LDFLAGS ?=
+
+# Hurd link line.  identical to pid1/Makefile's PORT_BOOT_LIBS for
+# the slot-dispatch reuse case (the pdeath probe links port_hurd.c
+# directly and therefore needs the same libs that pid1's PORT=hurd
+# build pulls in).
+#
+# -lpthread is added explicitly here because we use pthread_create
+# in hurd-mach-sidechannel.c and the watcher in port_hurd.c uses
+# pthread_mutex / pthread_create as well.  pid1/Makefile does not
+# need to name -lpthread because libports' NEEDED chain transitively
+# pulls it in for the link, but C-level probes that do not pull
+# libports still need it via -pthread.
+PORT_LIBS := -lports -lfshelp -lhurduser -lmachuser
+PTHREAD   := -pthread
+
+.PHONY: all clean pdeath sidechannel pflocal-cmsg client-handshake publish-auth-port
+
+all: pdeath sidechannel pflocal-cmsg client-handshake publish-auth-port
+
+# the v0.9.9 dead-name watcher probe.  links port_hurd.c directly
+# (NOT through pid1-module.so) so the slot dispatches without an
+# elisp emacs in the address space.  uses PID1_TEST_HELPER as a
+# distinguishing macro in case a future port_hurd.c body wants to
+# tweak its behaviour under the probe; today nothing keys off it,
+# but defining it documents intent.
+pdeath: hurd-pdeath-probe
+hurd-pdeath-probe: hurd-pdeath-probe.c ../pid1/port_hurd.c ../pid1/port_layer.h
+	$(CC) $(CFLAGS) $(PTHREAD) -DPORT_HURD -DPID1_TEST_HELPER \
+	    -I../pid1 \
+	    -o $@ hurd-pdeath-probe.c ../pid1/port_hurd.c \
+	    $(LDFLAGS) $(PORT_LIBS)
+
+# pre-existing probes; one rule each so a make-all is honest about
+# what gets built when the Hurd toolchain is present.
+sidechannel: hurd-mach-sidechannel
+hurd-mach-sidechannel: hurd-mach-sidechannel.c
+	$(CC) $(CFLAGS) $(PTHREAD) -o $@ $< $(LDFLAGS)
+
+pflocal-cmsg: hurd-pflocal-cmsg
+hurd-pflocal-cmsg: hurd-pflocal-cmsg.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+client-handshake: hurd-client-handshake
+hurd-client-handshake: hurd-client-handshake.c
+	$(CC) $(CFLAGS) $(PTHREAD) -o $@ $< $(LDFLAGS) $(PORT_LIBS)
+
+publish-auth-port: hurd-publish-auth-port
+hurd-publish-auth-port: hurd-publish-auth-port.c
+	$(CC) $(CFLAGS) $(PTHREAD) -o $@ $< $(LDFLAGS) $(PORT_LIBS)
+
+clean:
+	rm -f hurd-pdeath-probe hurd-mach-sidechannel hurd-pflocal-cmsg \
+	      hurd-client-handshake hurd-publish-auth-port
