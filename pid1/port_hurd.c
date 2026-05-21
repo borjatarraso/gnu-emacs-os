@@ -2061,6 +2061,64 @@ cleanup:
     return rc;
 }
 
+/* arm a "die when parent dies" link from the child of a fork()+exec()
+ * sequence.  intended call site: in the child, after setsid() and
+ * before exec(), inside spawn_xorg() and similar future spawn paths.
+ * SIGNAL is the POSIX signal number to deliver to the child (typically
+ * SIGTERM) when the parent process (pid1) dies.
+ *
+ * v0.9.8 body (this commit): minimal ENOSYS placeholder.  set errno
+ * to ENOSYS and return -1.  the elisp / supervisor side already
+ * treats this slot as defence-in-depth (callers tolerate ENOSYS), and
+ * the existing safety net is that gnumach reboots the box if pid1
+ * itself dies; an orphaned child surviving for a few extra ticks is
+ * therefore not a correctness problem on Hurd today.  the ENOSYS
+ * shape is the same one suspend uses on this kernel: explicit "not
+ * on this kernel", not silent no-op.
+ *
+ * v0.9.9 plan (deferred): wire the real Mach dead-name notify path.
+ * the four-step sketch:
+ *
+ *   - proc_pid2task(getproc(), 1, &parent_task) to get pid1's task
+ *     port (we are running in the child here, so pid1 is the parent
+ *     by construction).
+ *   - mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &notify_port)
+ *     for our own receive right.
+ *   - mach_port_request_notification(self, parent_task,
+ *         MACH_NOTIFY_DEAD_NAME, 0, notify_port,
+ *         MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev) to ask gnumach to fire
+ *     a dead-name notify into notify_port when parent_task dies.
+ *   - pthread_create(watcher) which mach_msg_recv's the dead-name
+ *     message and then kill(getpid(), signal) to terminate this
+ *     child with the caller-requested POSIX signal.
+ *
+ * authority: docs/runlogs/2026-05-21-hurd-xorg-probe.md is the
+ * receipt that pins both the slot shape and the load-bearing
+ * primitive correction.  the probe identified the Mach dead-name
+ * notify as the right shape for the PR_SET_PDEATHSIG semantic on
+ * Hurd.
+ *
+ * load-bearing falsification: proc_setowner is NOT the right
+ * primitive.  the v0.9.7 release notes carried a "proc_setowner
+ * analogue of prctl" assumption that the probe killed.
+ * proc_setowner is marked "Deprecated" at
+ * /usr/include/x86_64-gnu/hurd/process.defs:127 (probe G in the
+ * receipt).  the right primitive is MACH_NOTIFY_DEAD_NAME via
+ * mach_port_request_notification at mach_port.defs:247 +
+ * notify.defs:106 (probe F2 in the receipt).  do not "fix" this
+ * function by routing through proc_setowner; that path is already
+ * falsified.
+ *
+ * returns 0 on success, -1 with errno set on failure.  v0.9.8
+ * always returns -1 / ENOSYS. */
+static int
+hurd_arm_parent_death(int signal)
+{
+    (void)signal;
+    errno = ENOSYS;
+    return -1;
+}
+
 /* the table.  same shape as port_linux_impl, every slot populated.
  * the symmetry is what lets emacs-init.c pick one or the other at
  * compile time without touching the call sites. */
@@ -2078,6 +2136,7 @@ const port_caps port_hurd_impl = {
     .publish_auth_port     = hurd_publish_auth_port,
     .auth_drain            = hurd_auth_drain,
     .disk_size_bytes       = hurd_disk_size_bytes,
+    .arm_parent_death      = hurd_arm_parent_death,
 };
 
 /* the active pointer + the require-or-abort helper live in
