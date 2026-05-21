@@ -147,7 +147,9 @@ console(const char *msg)
  * Hurd VM has no /etc/geos-cmdline, in which case the reader degrades
  * the same way it would on a malformed Linux cmdline (returns -1,
  * link_current_system skips the symlink, read_geos_mode defaults to
- * ui on Linux and to console on Hurd since v0.7.x has no Xorg there).
+ * ui on both kernels; on Hurd UI v0.9.8+ pid1 spawns Xvfb because
+ * native Xorg is blocked on the input-driver gap, see
+ * docs/runlogs/2026-05-21-hurd-xorg-probe.md).
  *
  * trust model: /proc/cmdline is kernel-provided and not writeable at
  * runtime.  /etc/geos-cmdline is a regular file the installer drops
@@ -384,22 +386,23 @@ read_gnu_system_path(char *out, size_t out_len)
 }
 
 /* parse GEOS_CMDLINE_PATH for the geos.mode= token. recognized values
- * are "ui" (default; spawn Xorg and run emacs as an X client),
- * "console" (skip Xorg, run emacs on /dev/console with TERM=linux),
- * and "recovery" (v0.4 item 10: skip Xorg AND skip the userland -l
- * chain; the operator lands on a bare *scratch* with panic.el
- * available so a broken defservice or defcustom cannot wedge the
- * boot).  anything else, including a missing token or an unreadable
- * cmdline source, defaults to UI on Linux: matches the historical
- * v0.1/v0.2 behaviour and means an unmodified GRUB entry keeps the
- * pretty boot.  on Hurd the cmdline source is /etc/geos-cmdline,
- * which is absent on a not-yet-installed VM; the absence is logged
- * once but otherwise falls through to the same UI default, and
- * main() additionally forces console mode under PORT_HURD because
- * the v0.7.x cycle does not bring up Xorg there (see
- * docs/runlogs/2026-05-18-hurd-pid1-boot-design.md).  invariant: pure
- * read, never blocks longer than the open+read takes.  logs the chosen
- * mode to /dev/console so the operator sees the decision in the boot
+ * are "ui" (default; spawn an X server and run emacs as an X client),
+ * "console" (skip the X server, run emacs on /dev/console with
+ * TERM=linux), and "recovery" (v0.4 item 10: skip the X server AND
+ * skip the userland -l chain; the operator lands on a bare *scratch*
+ * with panic.el available so a broken defservice or defcustom cannot
+ * wedge the boot).  anything else, including a missing token or an
+ * unreadable cmdline source, defaults to UI on both kernels: matches
+ * the historical v0.1/v0.2 behaviour and means an unmodified GRUB
+ * entry keeps the pretty boot.  on Hurd the cmdline source is
+ * /etc/geos-cmdline, which is absent on a not-yet-installed VM; the
+ * absence falls through to the same UI default.  v0.9.8 ships the
+ * Xvfb spawn path on Hurd UI (the v0.7.x force-console-mode override
+ * in main() is gone); native Xorg on Hurd is blocked on the
+ * input-driver gap (see docs/runlogs/2026-05-21-hurd-xorg-probe.md
+ * probes E3/E4/I and HURD_PORT.md).  invariant: pure read, never
+ * blocks longer than the open+read takes.  logs the chosen mode to
+ * /dev/console so the operator sees the decision in the boot
  * trace. */
 #define GEOS_MODE_UI       1
 #define GEOS_MODE_CONSOLE  0
@@ -410,16 +413,16 @@ read_geos_mode(void)
 {
     int fd = open(GEOS_CMDLINE_PATH, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-#ifdef PORT_HURD
-        /* on Hurd the cmdline source is /etc/geos-cmdline, which is
-         * absent on a not-yet-installed VM.  main() will force console
-         * mode shortly anyway (Xorg-on-Hurd is a v0.8+ item), so
-         * staying quiet here avoids a misleading "defaulting to ui"
-         * line that would be immediately contradicted by the boot
-         * trace.  see docs/runlogs/2026-05-18-hurd-pid1-boot-design.md. */
-#else
+        /* both kernels default to UI on a missing cmdline source.  on
+         * Linux this is /proc/cmdline (kernel-supplied, normally
+         * present); on Hurd it is /etc/geos-cmdline, which is absent
+         * on a not-yet-installed VM and so is the expected case for a
+         * manual Hurd install.  v0.9.8 ships the Xvfb spawn path on
+         * Hurd UI, so the default is no longer immediately overridden
+         * (the v0.7.x force-console block in main() is gone as of
+         * v0.9.8); the log line below is now accurate on both
+         * kernels.  see docs/runlogs/2026-05-21-hurd-xorg-probe.md. */
         console("pid1: " GEOS_CMDLINE_PATH " unreadable, defaulting to ui mode");
-#endif
         return GEOS_MODE_UI;
     }
     /* (B4) /proc/cmdline can exceed 4 KiB on real systems; loop. */
@@ -458,13 +461,13 @@ read_geos_mode(void)
         return GEOS_MODE_CONSOLE;
     }
     if (strcmp(val, "ui") == 0) {
-#ifndef PORT_HURD
-        /* on Hurd the main() override below forces console mode
-         * regardless of cmdline value (Xorg-on-Hurd is v0.8+); suppress
-         * the "will spawn Xorg + EXWM" log so the boot trace is
-         * coherent with what actually happens. */
-        console("pid1: geos.mode=ui, will spawn Xorg + EXWM");
-#endif
+        /* on Linux this means real Xorg + EXWM; on Hurd (v0.9.8+) it
+         * means Xvfb + EXWM because native Xorg is blocked on the
+         * input-driver gap (see docs/runlogs/2026-05-21-hurd-xorg-
+         * probe.md probes E3/E4/I).  the userland code does not
+         * branch on kernel; the difference is purely which X server
+         * binary pid1 spawns. */
+        console("pid1: geos.mode=ui, will spawn X server + EXWM");
         return GEOS_MODE_UI;
     }
     if (strcmp(val, "recovery") == 0) {
@@ -811,6 +814,27 @@ spawn_xorg(void)
             (void)dup2(xlog, 1);
             (void)dup2(xlog, 2);
             if (xlog > 2) (void)close(xlog);
+        }
+
+        /* arm the "die when parent dies" link before exec.  on Linux
+         * this is prctl(PR_SET_PDEATHSIG); on Hurd the v0.9.8 slot
+         * returns ENOSYS until the MACH_NOTIFY_DEAD_NAME watcher-thread
+         * lands in v0.9.9 (see docs/runlogs/2026-05-21-hurd-xorg-probe.md
+         * probe F2 + decision points).  ENOSYS is tolerated as a
+         * defence-in-depth gap: if pid1 dies the kernel reboots anyway,
+         * so an orphaned X server is moot.  any other errno is a real
+         * failure (out-of-range signal, kernel reject) and kills the
+         * child with the same _exit(127) we use for other pre-exec
+         * failures. */
+        if (port->arm_parent_death(SIGTERM) < 0) {
+            if (errno == ENOSYS) {
+                console("pid1: arm_parent_death not implemented on this kernel, "
+                        "Xorg child will outlive pid1 death (defence in depth gap, "
+                        "not load-bearing)");
+            } else {
+                console("pid1: arm_parent_death failed in xorg child");
+                _exit(127);
+            }
         }
 
         /* (M5, audit round-5 2026-05-10) anchor on the path component
@@ -1537,21 +1561,20 @@ main(int argc, char **argv)
      * server.  display_env stays NULL so spawn_emacs's envp does not
      * advertise a DISPLAY the user did not ask for.
      *
-     * Hurd divergence (see docs/ARCHITECTURE.md Level 3 and
-     * docs/runlogs/2026-05-18-hurd-pid1-boot-design.md): the Hurd
-     * port does not bring up Xorg in v0.7.x.  the device layer is
-     * different (no DRM card0, no modesetting) and verifying the
-     * supervisor loop on Hurd is the v0.7.x goal, not getting a
-     * graphical session up.  demote ui to console (the operator
-     * gets emacs -nw on /dev/console; Xorg-on-Hurd is v0.8+), but
-     * keep recovery intact because recovery is a safety mode the
-     * operator deliberately picked and silently dropping it to
-     * console would skip the userland-chain abort that recovery
-     * exists to guarantee. */
+     * Hurd UI path (v0.9.8): on Hurd we boot Xvfb instead of a real
+     * Xorg.  native Xorg on hurd-amd64 is blocked on the input-driver
+     * gap (kbd_drv.so's "set event mode" ioctl returns EBADF against
+     * /dev/cons/kbd and there is no evdev/libinput driver on the
+     * hurd-amd64 package set; see docs/runlogs/2026-05-21-hurd-xorg-
+     * probe.md probes E3/E4/I).  Xvfb works fully on Debian Hurd 0.9
+     * (probes C+D: xdpyinfo against :99 returns 23 extensions
+     * including RANDR/COMPOSITE/GLX), so the v0.9.8 default for a
+     * Hurd UI boot is /usr/bin/Xvfb.  if argv[3] gave us an explicit
+     * xorg spec it wins; otherwise we fall back to Xvfb at the
+     * Debian default install path.  the existing spawn_xorg code
+     * already detects Xvfb via path_ends_with and drops the
+     * Xorg-specific flags. */
     int boot_mode = read_geos_mode();
-#ifdef PORT_HURD
-    if (boot_mode != GEOS_MODE_RECOVERY) boot_mode = GEOS_MODE_CONSOLE;
-#endif
     if (boot_mode == GEOS_MODE_CONSOLE) {
         xorg_path = NULL;
         xorg_disabled = 1;
@@ -1565,6 +1588,49 @@ main(int argc, char **argv)
     } else {
         geos_mode_env = "GEOS_MODE=ui";
     }
+
+#ifdef PORT_HURD
+    /* v0.9.8: if we are in UI mode on Hurd and the caller did not pass
+     * an explicit Xorg spec via argv[3], default to /usr/bin/Xvfb (the
+     * Debian Hurd 0.9 package path, 2:21.1.22-1 in the canonical
+     * image).  the xkb / module / font / conf strings are all empty
+     * because spawn_xorg detects Xvfb via path_ends_with("/Xvfb") and
+     * skips every flag that only Xorg understands.  display_env is
+     * set so spawn_emacs's envp advertises DISPLAY=:0.  receipt:
+     * docs/runlogs/2026-05-21-hurd-xorg-probe.md probes C+D.
+     *
+     * (W6, skeptic 2026-05-21) access-check the Xvfb binary before
+     * committing to spawn it.  if the operator removed the Debian
+     * xvfb package from the Hurd image, leaving xorg_path pointing at
+     * a non-existent binary would have spawn_xorg execve-fail in a
+     * rapid loop until the supervisor's respawn cap tripped, with
+     * only a one-line "execve failed" diagnostic to show for it.
+     * cheaper to detect the gap here and fall back to console mode
+     * with a clear console() line so the operator knows what
+     * happened. */
+    if (boot_mode == GEOS_MODE_UI && xorg_path == NULL) {
+        if (access("/usr/bin/Xvfb", X_OK) == 0) {
+            xorg_path = "/usr/bin/Xvfb";
+            xorg_xkb_dir = "";
+            xorg_module_path = "";
+            xorg_font_path = "";
+            xorg_conf_path = "";
+            display_env = "DISPLAY=:0";
+            console("pid1: Hurd UI default, spawning /usr/bin/Xvfb");
+        } else {
+            int access_err = errno;
+            console("pid1: Hurd UI requested but /usr/bin/Xvfb not "
+                    "executable, falling back to console mode "
+                    "(install the xvfb package to enable UI)");
+            (void)access_err;  /* errno already reported via the line above */
+            xorg_path = NULL;
+            xorg_disabled = 1;
+            display_env = NULL;
+            boot_mode = GEOS_MODE_CONSOLE;
+            geos_mode_env = "GEOS_MODE=console";
+        }
+    }
+#endif
 
     /* phase 5a: start Xorg if argv[3] gave us a spec. critical that
      * this happens BEFORE the first spawn_emacs(), so emacs's first
@@ -3053,6 +3119,53 @@ Fpid1_disk_size_bytes(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
     return env->make_integer(env, (intmax_t)out);
 }
 
+/* (pid1-arm-parent-death SIGNAL) -> t on success, raises pid1-error
+ * on failure.  SIGNAL is an integer POSIX signal number (typically
+ * SIGTERM = 15).  on Linux dispatches to port->arm_parent_death which
+ * calls prctl(PR_SET_PDEATHSIG, SIGNAL).  on Hurd the slot returns -1
+ * with errno=ENOSYS until the v0.9.9 MACH_NOTIFY_DEAD_NAME watcher-
+ * thread lands; ENOSYS is surfaced as a pid1-error the caller is
+ * expected to catch (defence-in-depth, not load-bearing).
+ *
+ * CAVEAT: this changes the calling process's state.  prctl arms the
+ * pdeathsig against THIS process's parent, so calling it from the
+ * supervisor emacs would set up a death-link from the supervisor to
+ * pid1.  the intended call site is the post-fork child inside
+ * spawn_xorg() (which calls port->arm_parent_death directly without
+ * going through this binding).  the binding exists so the slot is
+ * testable and the dispatch table is exercised; callers from elisp
+ * MUST know what they are doing.  the freeze-test file
+ * iso-build/freeze-tests/freeze-test-arm-parent-death.el is the
+ * documented caller. */
+static emacs_value
+Fpid1_arm_parent_death(emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                       void *data)
+{
+    (void)data;
+    if (nargs != 1)
+        return pid1_signal_errno(env,
+                                 "pid1: pid1-arm-parent-death needs 1 arg",
+                                 EINVAL);
+    intmax_t sig = env->extract_integer(env, args[0]);
+    if (env->non_local_exit_check(env) != emacs_funcall_exit_return)
+        return env->intern(env, "nil");
+    /* POSIX signal range is 1..NSIG-1.  on glibc Linux NSIG = 65 so the
+     * inclusive upper bound is 64 (SIGRTMAX); SIGRTMIN is 34, the rest
+     * of the range is the standard signals.  use NSIG so a future glibc
+     * change is picked up automatically; the literal 64 was opaque (W2,
+     * skeptic 2026-05-21).  the kernel will reject out-of-range on its
+     * own with EINVAL, but a fast pre-check gives a clearer error
+     * message and avoids the syscall round-trip on obviously bogus
+     * input. */
+    if (sig < 1 || sig > NSIG - 1)
+        return pid1_signal_errno(env,
+                                 "pid1: pid1-arm-parent-death: signal out of range",
+                                 EINVAL);
+    if (port->arm_parent_death((int)sig) < 0)
+        return pid1_signal_errno(env, "pid1: arm-parent-death", errno);
+    return env->intern(env, "t");
+}
+
 /* signal pid1-error with an arbitrary literal message (no strerror
  * suffix). used by parent-side validation paths that do not have an
  * errno to report, like "uid below floor".  invariant: sets a non-local
@@ -3738,6 +3851,19 @@ emacs_module_init(struct emacs_runtime *ert)
         "to file_get_storage_info on the storeio file_t (side branch).",
         NULL);
     pid1_defalias(env, "pid1-disk-size-bytes", dsb);
+
+    emacs_value apd = env->make_function(env, 1, 1, Fpid1_arm_parent_death,
+        "Arm a \"die when parent dies\" link on THIS process.  SIGNAL is "
+        "an integer POSIX signal number (typically SIGTERM = 15) the "
+        "kernel will deliver when the parent dies.  Linux: dispatches to "
+        "prctl(PR_SET_PDEATHSIG).  Hurd: returns ENOSYS until v0.9.9 "
+        "wires the MACH_NOTIFY_DEAD_NAME watcher thread.  CAVEAT: this "
+        "mutates the calling process's state; the intended call site is "
+        "the post-fork child inside pid1's own spawn paths, which calls "
+        "the port slot directly without going through this binding.  the "
+        "binding exists so the slot is testable from elisp.",
+        NULL);
+    pid1_defalias(env, "pid1-arm-parent-death", apd);
 
     emacs_value spw = env->make_function(env, 6, 6, Fpid1_spawn_as_uid,
         "pid1-spawn-as-uid: spawn child as uid/gid per v0.5 ABI",

@@ -144,6 +144,88 @@ or nil if RAW does not look like a record."
                   :msg msg
                   :raw raw)))))))
 
+;; syslog (BSD/inetutils) line shape, as written by Debian Hurd's
+;; inetutils-syslogd into /var/log/kern.log:
+;;
+;;   MMM DD HH:MM:SS HOST TAG[: ]REST...
+;;
+;; example:
+;;   May 21 00:34:12 geos-hurd vmunix: cd0: dos partition I/O error
+;;
+;; the file is implicitly kern.* (syslog.conf routes kern.* there), so
+;; no per-record priority is on the wire.  we default :sev to "info"
+;; and leave :prio + :seq nil; the renderer copes (it reads :sev and
+;; :msg; missing :prio/:seq just hides those rows in the RET popup).
+;;
+;; the timestamp lacks a year; syslog convention is "current year".
+;; we use the host's current year + parse-time-string which returns a
+;; decoded-time we hand to encode-time.  if parsing fails we return
+;; nil so the filter drops the line rather than rendering an unparsed
+;; smear.  malformed lines (missing HOST or TAG) likewise yield nil.
+(defun journal-buffer--parse-syslog-record (raw)
+  "Parse one syslog/kern.log line RAW (no trailing newline).
+Return a plist (:source syslog :time TIME :sev \"info\" :msg S :raw R)
+or nil if RAW does not look like a syslog line."
+  (when (and (stringp raw)
+             (string-match
+              ;; MMM DD HH:MM:SS HOST TAG REST
+              ;; HOST: \S+ (no whitespace, no colon).
+              ;; TAG: everything up to the first ": " separator; we
+              ;; do not split off the tag into its own field because
+              ;; the renderer does not use it and the message is the
+              ;; whole suffix including the optional tag prefix.
+              (concat "^"
+                      "\\([A-Z][a-z][a-z]\\)[ ]+"     ; 1 month
+                      "\\([0-9]+\\)[ ]+"               ; 2 day
+                      "\\([0-9][0-9]:[0-9][0-9]:[0-9][0-9]\\)[ ]+"  ; 3 hh:mm:ss
+                      "\\([^ :]+\\)[ ]+"               ; 4 host
+                      "\\(.+\\)$")                     ; 5 rest (tag + msg)
+              raw))
+    (condition-case nil
+        (let* ((mon-str (match-string 1 raw))
+               (day     (string-to-number (match-string 2 raw)))
+               (hms     (match-string 3 raw))
+               (rest    (match-string 5 raw))
+               (year    (nth 5 (decode-time (current-time))))
+               (decoded (parse-time-string
+                         (format "%s %d %s %d" mon-str day hms year)))
+               (time    (and decoded (encode-time decoded))))
+          (and time
+               (list :source 'syslog
+                     :time time
+                     :sev "info"
+                     :msg rest
+                     :raw raw)))
+      (error nil))))
+
+;; /var/log/dmesg on Hurd is whatever Debian's /etc/init.d/bootlogs
+;; managed to slurp out of /dev/klog before SIGKILLing the dd that
+;; was reading it.  shape is raw gnumach printbuf: no syslog header,
+;; no timestamp, no tag.  lines look like:
+;;
+;;   Kernel page fault at address 0x0...
+;;   linux: Compaq SMART2 Controller
+;;
+;; we have nothing to anchor a real timestamp on; :time nil is the
+;; honest representation.  the renderer's `journal-buffer--format-ts'
+;; coalesces nil :time with (current-time), so the rendered line will
+;; carry the time the prime ran (boot-ish), which is a known approx.
+;; we keep :time nil in the plist itself so RET-on-line shows the
+;; truth in the raw popup.  empty / whitespace-only lines return nil
+;; so the caller can `unless' them out.
+(defun journal-buffer--parse-dmesg-record (raw)
+  "Parse one /var/log/dmesg line RAW (no trailing newline).
+Return a plist (:source dmesg :time nil :sev \"info\" :msg S :raw R)
+or nil if RAW is empty or whitespace-only."
+  (when (and (stringp raw)
+             (not (string-empty-p raw))
+             (not (string-match-p "\\`[ \t]+\\'" raw)))
+    (list :source 'dmesg
+          :time nil
+          :sev "info"
+          :msg raw
+          :raw raw)))
+
 (defun journal-buffer--format-ts (rec)
   "Return a fixed-width timestamp string for record REC.
 Kmsg records carry a monotonic microsecond timestamp; we render

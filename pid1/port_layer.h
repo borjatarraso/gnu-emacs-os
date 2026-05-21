@@ -281,6 +281,37 @@ typedef struct port_caps {
      * emacs-init/install/disk.el have a single name to dispatch
      * against on both kernels. */
     int (*disk_size_bytes)(const char *name, uint64_t *out);
+
+    /* arm a "die when parent dies" link from the child of a fork()+exec()
+     * sequence.  intended call site: in the child, after setsid() and
+     * before exec(), inside spawn_xorg() and similar future spawn paths.
+     * SIGNAL is the POSIX signal number to deliver to the child (typically
+     * SIGTERM) when the parent process (pid1) dies.
+     *
+     * Linux backend: prctl(PR_SET_PDEATHSIG, signal).  see
+     * docs/runlogs/2026-05-21-hurd-xorg-probe.md probe F.
+     *
+     * Hurd backend: returns -1 with errno=ENOSYS in v0.9.8.  the real
+     * implementation is the v0.9.9 follow-on slice:
+     *   proc_pid2task(getproc(), 1, &parent_task);
+     *   mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &notify_port);
+     *   mach_port_request_notification(self, parent_task,
+     *       MACH_NOTIFY_DEAD_NAME, 0, notify_port,
+     *       MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
+     *   pthread_create(watcher) which mach_msg_recv's the dead-name and
+     *       kill(getpid(), signal) on receipt.
+     * cited in docs/runlogs/2026-05-21-hurd-xorg-probe.md probes F2/G and
+     * decision-relevant points.
+     *
+     * callers tolerate ENOSYS: the death-link is defence-in-depth, the
+     * Hurd spawn path still works without it (pid1 dying causes the
+     * kernel to reboot anyway).  caller logs ENOSYS at INFO and
+     * continues; any other errno is panic-routed.  matches the
+     * publish_auth_port / get_peer_cred ENOSYS-tolerance pattern from
+     * v0.8.
+     *
+     * returns 0 on success, -1 with errno set on failure. */
+    int (*arm_parent_death)(int signal);
 } port_caps;
 
 /* the active backend.  starts NULL.  exactly one assignment per
