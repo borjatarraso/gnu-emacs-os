@@ -4,6 +4,12 @@
 /* hurd-pdeath-probe.c, end-to-end probe for the v0.9.9 v2
  * port_hurd_impl.arm_parent_death() body.
  *
+ * note: when invoked under sshd, redirect stdout/stderr to a file
+ * (e.g., ./hurd-pdeath-probe >/tmp/out 2>&1) so sshd does not wait
+ * on the grandchild's inherited stdout fd.  the harness intentionally
+ * does not redirect inside the binary so the operator can choose
+ * where output goes.
+ *
  * the question this answers:
  *
  *   when a child calls arm_parent_death(SIGUSR1) on Hurd and the
@@ -164,9 +170,11 @@ main(void)
 
     if (parent_a == 0) {
         /* parent A: fork grandchild B, prime the proc server, signal
-         * the gate, sleep, _exit. */
+         * the gate, sleep, _exit.  NOTE: do NOT close armed[0] before
+         * the fork; if we do, B inherits a closed gate fd and the
+         * read() returns EBADF immediately.  the post-fork branches
+         * each close the end they do not own. */
         (void)close(sentinel[0]); /* read end belongs to harness */
-        (void)close(armed[0]);    /* read end belongs to grandchild */
 
         pid_t b = fork();
         if (b < 0) {
@@ -180,7 +188,8 @@ main(void)
              * for SIGUSR1.  we MUST NOT call arm_parent_death before
              * the gate fires; the gate is what guarantees A has
              * already done proc_child(B_task) and the proc server's
-             * pid registrations are primed. */
+             * pid registrations are primed.  B keeps armed[0] (the
+             * read end) and closes armed[1] (A's write end). */
             (void)close(armed[1]);     /* B does not write armed */
             g_sentinel_w = sentinel[1];
 
@@ -232,10 +241,13 @@ main(void)
             _exit(0);
         }
 
-        /* parent A continues here.  close write ends we no longer
-         * need (sentinel[1] is grandchild's), then prime the proc
-         * server's view of B and signal the gate. */
+        /* parent A continues here.  close ends we no longer need:
+         * sentinel[1] is grandchild's write end, armed[0] is the read
+         * end which belongs to B.  armed[0] gets closed HERE (post
+         * fork) rather than pre-fork because B needs to inherit a
+         * live read fd before the fork. */
         (void)close(sentinel[1]);
+        (void)close(armed[0]);    /* A only writes the gate */
 
         /* prime: getproc -> proc_pid2task(B) -> proc_child(B_task).
          * A is the registered ancestor of B (the harness is A's
@@ -267,7 +279,13 @@ main(void)
         }
         kr = proc_child(proc, b_task);
         (void)mach_port_deallocate(mach_task_self(), b_task);
-        if (kr != KERN_SUCCESS) {
+        /* EBUSY (0x40000010) on this Debian Hurd 0.9 / gnumach
+         * 1.8+git20260224 means B is already registered as A's child
+         * by the implicit fork relationship.  the proc-server's
+         * "make B a child of A" call is a no-op when it is already
+         * true.  KERN_SUCCESS-or-EBUSY is the canonical contract
+         * shape: both mean "B is now A's registered child". */
+        if (kr != KERN_SUCCESS && kr != EBUSY) {
             _exit(13);
         }
 

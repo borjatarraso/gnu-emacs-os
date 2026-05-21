@@ -2207,13 +2207,15 @@ cleanup:
  * TBD-2: NO_SENDERS fail-safe registration is intentionally not
  * wired in this slice (deferred to v0.9.10).
  *
- * TBD-3: kill(getpid(), sig) from the watcher pthread.  POSIX
- * guarantees the signal is delivered to the process; the implementer
- * thread is unspecified but the handler runs in some thread that has
- * it unblocked.  the spawn child has no special signal handler for
- * SIGTERM, so the default action (terminate) applies.  if VM-verify
- * shows pthread+signals broken on this Hurd image, fall back to a
- * pipe write polled from main.
+ * TBD-3: signal delivery from the watcher pthread.  v2 used
+ * kill(getpid(), sig) on the theory that POSIX would deliver to
+ * some unblocked thread.  on Hurd's multi-threaded signal delivery
+ * VM-verify observed the signal landing in the watcher pthread's
+ * own context, leaving the main thread parked in pause() /
+ * mach_msg() forever.  v2.1 captures pthread_self() at arm time
+ * into ctx->main_thread and the watcher calls
+ * pthread_kill(ctx->main_thread, sig) instead, so the armer thread
+ * is guaranteed to receive the signal.
  *
  * return values:
  *   0          : success, OR idempotent second arm with same signal.
@@ -2222,8 +2224,8 @@ cleanup:
  *   -1/EALREADY: second arm with DIFFERENT signal; first arm stays
  *                live, no new watcher spun.
  *   -1/ESRCH   : parent already dead (after retry loop); the
- *                in-process kill(getpid(), signal) has already fired
- *                before this return.
+ *                in-process pthread_kill(pthread_self(), signal) has
+ *                already fired before this return.
  *   -1/EIO     : unknown kern_return_t escaped the local table. */
 
 /* re-entrancy bookkeeping.  one process-global slot under a mutex.
@@ -2254,6 +2256,11 @@ struct hurd_pdeath_watcher_ctx {
     mach_port_t notify_port;
     mach_port_t parent_task_name;
     int         signal;
+    pthread_t   main_thread;  /* the thread that called arm_parent_death;
+                                 we deliver the signal to it specifically
+                                 so a pause() / mach_msg() in that thread
+                                 actually wakes (kill(getpid(),sig) on Hurd
+                                 can pick the watcher's own thread). */
 };
 
 static void *
@@ -2351,14 +2358,15 @@ hurd_pdeath_watcher(void *arg)
             continue;
         }
 
-        /* parent died.  raise the requested signal on ourselves.
-         * use kill(getpid(), sig) rather than raise(sig): raise
-         * targets the calling thread, kill targets the process, and
-         * the spec wants process-level termination.  default action
-         * for SIGTERM is exit, so this returns cleanly to the OS
-         * before the cleanup below runs; the cleanup is best-effort,
-         * the kernel reaps our task on exit anyway. */
-        (void)kill(getpid(), ctx->signal);
+        /* parent died.  raise the requested signal on the thread
+         * that armed the link.  on multi-threaded Hurd, kill(getpid(),
+         * sig) can deliver to any thread including this watcher;
+         * pthread_kill targets the specific thread that armed the
+         * link so a pause()/mach_msg() in that thread actually wakes.
+         * v0.9.9 v2 used kill(getpid(),sig) and VM-verify caught the
+         * signal landing in the watcher pthread's context, leaving
+         * the main thread parked in pause() forever. */
+        (void)pthread_kill(ctx->main_thread, ctx->signal);
         (void)mach_port_deallocate(mach_task_self(),
                                    ctx->parent_task_name);
         (void)mach_port_mod_refs(mach_task_self(), ctx->notify_port,
@@ -2438,10 +2446,14 @@ hurd_arm_parent_death(int sig)
             /* ESRCH short-circuit: parent really is gone (or proc
              * server permanently lost the pid; either way the death-
              * link semantics are "parent is no longer reachable").
-             * raise the requested signal in-process so the caller
-             * sees the same end-state as a successful arm + instant
-             * fire.  then return -1/ESRCH per the spec. */
-            (void)kill(getpid(), sig);
+             * raise the requested signal on THIS thread (we are the
+             * caller that armed) so the caller sees the same end-
+             * state as a successful arm + instant fire.  pthread_self
+             * is correct here because we are the armer thread; using
+             * kill(getpid(),sig) on Hurd can deliver to any thread,
+             * same hazard as the watcher path.  then return -1/ESRCH
+             * per the spec. */
+            (void)pthread_kill(pthread_self(), sig);
             errno = ESRCH;
             return -1;
         }
@@ -2555,6 +2567,12 @@ hurd_arm_parent_death(int sig)
     ctx->notify_port      = notify_port;
     ctx->parent_task_name = parent_task; /* ownership transfers here */
     ctx->signal           = sig;
+    /* capture the armer thread id BEFORE the watcher is spawned so the
+     * watcher can pthread_kill() this specific thread on dead-name fire
+     * rather than kill(getpid(),sig), which on Hurd can land in the
+     * watcher's own context.  pthread_self() here returns the armer's
+     * tid because hurd_arm_parent_death runs in the caller's thread. */
+    ctx->main_thread      = pthread_self();
 
     /* step 7: spin the detached watcher.  detached so we never need
      * to pthread_join; the watcher cleans up on its own pthread_exit. */
