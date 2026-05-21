@@ -198,6 +198,34 @@ or nil if RAW does not look like a syslog line."
                      :raw raw)))
       (error nil))))
 
+;; /var/log/dmesg on Hurd is whatever Debian's /etc/init.d/bootlogs
+;; managed to slurp out of /dev/klog before SIGKILLing the dd that
+;; was reading it.  shape is raw gnumach printbuf: no syslog header,
+;; no timestamp, no tag.  lines look like:
+;;
+;;   Kernel page fault at address 0x0...
+;;   linux: Compaq SMART2 Controller
+;;
+;; we have nothing to anchor a real timestamp on; :time nil is the
+;; honest representation.  the renderer's `journal-buffer--format-ts'
+;; coalesces nil :time with (current-time), so the rendered line will
+;; carry the time the prime ran (boot-ish), which is a known approx.
+;; we keep :time nil in the plist itself so RET-on-line shows the
+;; truth in the raw popup.  empty / whitespace-only lines return nil
+;; so the caller can `unless' them out.
+(defun journal-buffer--parse-dmesg-record (raw)
+  "Parse one /var/log/dmesg line RAW (no trailing newline).
+Return a plist (:source dmesg :time nil :sev \"info\" :msg S :raw R)
+or nil if RAW is empty or whitespace-only."
+  (when (and (stringp raw)
+             (not (string-empty-p raw))
+             (not (string-match-p "\\`[ \t]+\\'" raw)))
+    (list :source 'dmesg
+          :time nil
+          :sev "info"
+          :msg raw
+          :raw raw)))
+
 (defun journal-buffer--format-ts (rec)
   "Return a fixed-width timestamp string for record REC.
 Kmsg records carry a monotonic microsecond timestamp; we render

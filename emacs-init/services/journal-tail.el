@@ -136,6 +136,51 @@ chunk retries."
                   (journal-buffer--append-records (nreverse recs))))))))
     (error (panic-handle err 'journal-tail--filter-syslog))))
 
+;; v0.9.6 follow-on: prime *journal* from /var/log/dmesg on Hurd.
+;; the syslog tail pipeline is wired correctly but /var/log/kern.log
+;; ships at 0 bytes on a fresh Debian Hurd 0.9 boot because gnumach
+;; doesn't push boot printfs through /dev/klog there.  /etc/init.d/
+;; bootlogs slurps the printbuf into /var/log/dmesg once at boot and
+;; that's where the actual boot transcript ends up.  without this
+;; prime, M-x journal on a fresh boot shows an empty buffer until a
+;; runtime kernel event happens (which can be never).
+;;
+;; pure elisp: `insert-file-contents-literally' into a temp buffer,
+;; split, parse each line through `journal-buffer--parse-dmesg-record',
+;; hand the lot to `journal-buffer--append-records'.  best-effort: if
+;; the file is missing (host has no bootlogs, or it hasn't run yet)
+;; or unreadable, we return cleanly and the supervised tail still
+;; comes up.  errors route through panic-handle.
+(defun journal-tail--prime-from-dmesg ()
+  "Prime *journal* with /var/log/dmesg contents on Hurd.
+No-op on Linux (kmsg already carries the boot ring buffer) and on
+Hurd hosts where /var/log/dmesg doesn't exist yet.  Errors are
+caught and routed through panic-handle; the supervised tail must
+still come up regardless."
+  (when (and (not (geos-kernel-linux-p))
+             (file-readable-p "/var/log/dmesg"))
+    (condition-case err
+        (let* ((journal (journal-tail--ensure-journal-buffer))
+               (text (with-temp-buffer
+                       (insert-file-contents-literally "/var/log/dmesg")
+                       (buffer-string)))
+               (lines (split-string text "\n"))
+               (recs '()))
+          (dolist (raw lines)
+            (let ((rec (journal-buffer--parse-dmesg-record raw)))
+              (when rec
+                (push rec recs))))
+          (when recs
+            (with-current-buffer journal
+              (journal-buffer--append-records (nreverse recs)))))
+      (error (panic-handle err 'journal-tail--prime-from-dmesg)))))
+
+;; prime BEFORE we register the live tail, so the boot transcript
+;; lands in *journal* first and runtime records stream in on top.
+;; on linux this is a no-op; the call cost is one branch on the
+;; kernel predicate.
+(journal-tail--prime-from-dmesg)
+
 ;; the `dd' we spawn on linux here is the same coreutils binary the
 ;; lazy in-buffer follower used.  bs=8192 is generous for kmsg
 ;; (records are typically << 1 KiB), status=none silences the
