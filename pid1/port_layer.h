@@ -348,7 +348,12 @@ typedef struct port_caps {
      *                arm stays live.
      *   -1/ESRCH   : Hurd, parent already dead after retry loop;
      *                in-process kill(getpid(), signal) has fired
-     *                before this return.
+     *                before this return.  fires on any of the
+     *                "parent-gone" code set {KERN_INVALID_NAME,
+     *                KERN_FAILURE, KERN_NO_SPACE} after err_kern
+     *                decoding (gnumach 1.8+git20260224 returns
+     *                proc_pid2task errors WRAPPED in the err_kern
+     *                subsystem rather than as bare KERN_* constants).
      *   -1/EIO     : Hurd, unknown kern_return_t. */
     int (*arm_parent_death)(int signal);
 } port_caps;

@@ -84,6 +84,7 @@
 #include <hurd/ports.h>
 #include <hurd/process.h>
 #include <mach.h>
+#include <mach/error.h>
 #include <mach/mach_host.h>
 #include <mach/message.h>
 #include <mach/mig_errors.h>
@@ -2111,21 +2112,25 @@ cleanup:
  *
  *   2. process_t proc = getproc() (cached send right; do NOT
  *      deallocate).  proc_pid2task(proc, ppid, &parent_task) cited at
- *      /usr/include/x86_64-gnu/hurd/process.defs:234.  on
- *      KERN_INVALID_NAME, retry with 100ms nanosleep up to 10 times
- *      (1s total) so a fresh-forked caller does not race the proc
- *      server's registration of its own pid.  on persistent
- *      KERN_INVALID_NAME or KERN_FAILURE: pthread_kill(self, signal);
- *      errno=ESRCH; return -1.  ESRCH is the one stable errno callers
- *      see when the parent task is unreachable, regardless of which
- *      Mach return code the kernel surfaces; the v0.9.9 v2.1
- *      VM-verify on Debian Hurd 0.9 / gnumach 1.8+git20260224
- *      showed proc_pid2task returns KERN_FAILURE (0x40000003) for
- *      both bogus and just-reaped pids, NOT the textbook KERN_
- *      INVALID_NAME (0xf), so both arms of the guard must fire.
- *      parent_task is a SEND right we own; the watcher will take
- *      ownership in step 6 and we MUST NOT deallocate it on the
- *      success path.
+ *      /usr/include/x86_64-gnu/hurd/process.defs:234.  on any of the
+ *      "parent-gone" code set {KERN_INVALID_NAME, KERN_FAILURE,
+ *      KERN_NO_SPACE} (each compared after err_kern decoding; see
+ *      hurd_pdeath_decode_kr), retry with 100ms nanosleep up to 10
+ *      times (1s total) so a fresh-forked caller does not race the
+ *      proc server's registration of its own pid.  on the persistent
+ *      same set: pthread_kill(self, signal); errno=ESRCH; return -1.
+ *      ESRCH is the one stable errno callers see when the parent task
+ *      is unreachable, regardless of which Mach return code the
+ *      kernel surfaces; the v0.9.9 v2.2 VM-verify on Debian Hurd 0.9
+ *      / gnumach 1.8+git20260224 showed proc_pid2task returns its
+ *      errors WRAPPED in the err_kern subsystem (0x40000000) rather
+ *      than as bare KERN_* constants.  observed values: 0x40000003
+ *      (= err_kern|KERN_NO_SPACE) and 0x40000005 (= err_kern|
+ *      KERN_FAILURE).  the textbook bare-value KERN_INVALID_NAME
+ *      (0xf) is kept in the recognised set for kernels that DO
+ *      surface it.  parent_task is a SEND right we own; the watcher
+ *      will take ownership in step 6 and we MUST NOT deallocate it
+ *      on the success path.
  *
  *   3. mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &notify_port).
  *      this is the receive right the kernel will send the dead-name
@@ -2230,7 +2235,9 @@ cleanup:
  *   -1/ENOMEM  : malloc or pthread_create resource failure.
  *   -1/EALREADY: second arm with DIFFERENT signal; first arm stays
  *                live, no new watcher spun.
- *   -1/ESRCH   : parent already dead (after retry loop); the
+ *   -1/ESRCH   : parent already dead (after retry loop); fired on
+ *                any of {KERN_INVALID_NAME, KERN_FAILURE,
+ *                KERN_NO_SPACE} after err_kern decoding.  the
  *                in-process pthread_kill(pthread_self(), signal) has
  *                already fired before this return.
  *   -1/EIO     : unknown kern_return_t escaped the local table. */
@@ -2383,22 +2390,67 @@ hurd_pdeath_watcher(void *arg)
     }
 }
 
+/* decode a kern_return_t that may have come back wrapped in the
+ * err_kern subsystem (high bits 0x40000000) and surface the bare
+ * low-order code.  gnumach 1.8+git20260224 on Debian GNU/Hurd 0.9
+ * returns proc_pid2task errors as err_kern-wrapped values
+ * (0x40000003 = err_kern|KERN_NO_SPACE, 0x40000005 =
+ * err_kern|KERN_FAILURE) rather than the bare textbook KERN_*
+ * constants.  every guard in this file that compares against KERN_*
+ * symbolic values MUST go through this helper first, or the compare
+ * silently never matches and the fall-through path fires the wrong
+ * errno (typically EIO).  err_get_code() is the canonical Mach idiom
+ * for this and lives in <mach/error.h>; the subsystem check guards
+ * against accidentally masking a bare code that just happens to have
+ * bits set above 0x3fff. */
+static inline kern_return_t
+hurd_pdeath_decode_kr(kern_return_t kr)
+{
+    if (err_get_system(kr) == err_kern) {
+        return err_get_code(kr);
+    }
+    return kr;
+}
+
 /* tiny errno table for the kern_return_t values this RPC path can
  * surface.  kept local to this function so the broader port_hurd.c
  * is not perturbed; if a future slot needs the same mapping we hoist
- * to a shared helper. */
+ * to a shared helper.  the input is decoded via hurd_pdeath_decode_kr
+ * first so err_kern-wrapped values from proc_pid2task on gnumach 1.8
+ * map to the right errno instead of falling through to EIO. */
 static int
 hurd_pdeath_errno_from_kr(kern_return_t kr)
 {
-    switch (kr) {
+    kern_return_t code = hurd_pdeath_decode_kr(kr);
+    switch (code) {
     case KERN_SUCCESS:            return 0;
     case KERN_INVALID_NAME:       return ESRCH;
+    case KERN_FAILURE:            return ESRCH;
+    case KERN_NO_SPACE:           return ESRCH;
     case KERN_INVALID_RIGHT:      return EPERM;
     case KERN_INVALID_ARGUMENT:   return EINVAL;
     case KERN_RESOURCE_SHORTAGE:  return ENOMEM;
     case MIG_BAD_ID:              return ENOSYS;
     default:                      return EIO;
     }
+}
+
+/* test whether a kern_return_t (possibly err_kern-wrapped) indicates
+ * "the parent task is no longer reachable".  KERN_INVALID_NAME is the
+ * spec-canonical value; KERN_FAILURE and KERN_NO_SPACE are what
+ * gnumach 1.8+git20260224 actually surfaces from proc_pid2task on
+ * Debian GNU/Hurd 0.9 for bogus or just-reaped pids (the two values
+ * were observed empirically at v0.9.9 v2.1 VM-verify and probe D2).
+ * keeping all three in the recognised set lets the same body work
+ * against the textbook kernels (which return INVALID_NAME) and the
+ * shipping gnumach without a build-time #ifdef. */
+static inline int
+hurd_pdeath_kr_is_parent_gone(kern_return_t kr)
+{
+    kern_return_t code = hurd_pdeath_decode_kr(kr);
+    return code == KERN_INVALID_NAME
+        || code == KERN_FAILURE
+        || code == KERN_NO_SPACE;
 }
 
 static int
@@ -2443,13 +2495,21 @@ hurd_arm_parent_death(int sig)
     kern_return_t kr = KERN_SUCCESS;
     for (int attempt = 0; attempt < 10; attempt++) {
         kr = proc_pid2task(proc, ppid, &parent_task);
-        if (kr != KERN_INVALID_NAME) break;
+        /* retry on the broadened parent-gone code set so a transient
+         * proc-server hiccup gets the same 2-3 attempts before we
+         * short-circuit to ESRCH.  the set covers both the textbook
+         * KERN_INVALID_NAME and the err_kern-wrapped KERN_FAILURE /
+         * KERN_NO_SPACE values gnumach 1.8 actually returns (decoded
+         * via hurd_pdeath_decode_kr inside the is_parent_gone helper).
+         * any other non-success kr is terminal (no retry). */
+        if (kr == KERN_SUCCESS) break;
+        if (!hurd_pdeath_kr_is_parent_gone(kr)) break;
         /* 100ms back-off; 10 attempts = 1s wall budget total. */
         struct timespec ts = { 0, 100 * 1000 * 1000 };
         (void)nanosleep(&ts, NULL);
     }
     if (kr != KERN_SUCCESS) {
-        if (kr == KERN_INVALID_NAME || kr == KERN_FAILURE) {
+        if (hurd_pdeath_kr_is_parent_gone(kr)) {
             /* ESRCH short-circuit: parent really is gone (or proc
              * server permanently lost the pid; either way the death-
              * link semantics are "parent is no longer reachable").
@@ -2461,21 +2521,22 @@ hurd_arm_parent_death(int sig)
              * same hazard as the watcher path.  then return -1/ESRCH
              * per the spec.
              *
-             * v0.9.9 v2.1 empirical: gnumach 1.8+git20260224 on
-             * Debian GNU/Hurd 0.9 returns KERN_FAILURE (0x40000003),
-             * NOT KERN_INVALID_NAME (0xf), when proc_pid2task is
-             * called with a pid the proc server has no live task
-             * for.  the C probe confirmed this for both bogus pids
-             * (999999) and just-reaped child pids; only the success
-             * paths returned KERN_SUCCESS (0x0).  the KERN_INVALID_
-             * NAME arm of the guard is kept for theoretical kernels
-             * that DO surface the textbook code; without the KERN_
-             * FAILURE arm the race-window caller (parent dies
-             * between getppid() and proc_pid2task) currently gets
-             * -1/EIO via the fall-through and the signal is never
-             * raised.  one ESRCH errno for both arms keeps the
-             * caller contract stable across whichever Mach code the
-             * kernel happens to surface. */
+             * v0.9.9 empirical: gnumach 1.8+git20260224 on Debian
+             * GNU/Hurd 0.9 returns proc_pid2task errors WRAPPED in
+             * the err_kern subsystem (high bits 0x40000000) rather
+             * than as bare KERN_* constants.  two values observed
+             * from the v2.1 standalone probe: 0x40000003 =
+             * err_kern|KERN_NO_SPACE and 0x40000005 = err_kern|
+             * KERN_FAILURE.  err_get_code() (via the decode helper)
+             * recovers the low-order code; the is_parent_gone helper
+             * recognises all three of {INVALID_NAME, FAILURE,
+             * NO_SPACE} so the guard fires on whichever the kernel
+             * happens to surface.  before v2.2 the guard compared
+             * the raw 0x40000005 against the bare value 5 (or 15),
+             * never matched, and the fall-through silently returned
+             * -1/EIO without raising the signal.  one ESRCH errno
+             * for every arm keeps the caller contract stable across
+             * whichever Mach code the kernel surfaces. */
             (void)pthread_kill(pthread_self(), sig);
             errno = ESRCH;
             return -1;
@@ -2644,12 +2705,26 @@ hurd_arm_parent_death(int sig)
  * the parent-gone branches it raises sig on the calling thread and
  * returns -1/ESRCH; on every other Mach code it returns -1 with the
  * same hurd_pdeath_errno_from_kr mapping.  this is the only mechanism
- * the probe harness has to reach the KERN_FAILURE arm of the guard
- * deterministically, because gnumach 1.8 returns KERN_FAILURE for
- * bogus / reaped pids and a real arm path would otherwise need a
- * fork-and-die race to surface it.  symbol is gated by
- * PID1_TEST_HELPER so it never compiles into the production module
- * or the standalone pid1 binary. */
+ * the probe harness has to reach the err_kern-wrapped parent-gone arm
+ * of the guard deterministically, because gnumach 1.8 returns
+ * err_kern|KERN_FAILURE / err_kern|KERN_NO_SPACE for bogus or reaped
+ * pids and a real arm path would otherwise need a fork-and-die race
+ * to surface it.  symbol is gated by PID1_TEST_HELPER so it never
+ * compiles into the production module or the standalone pid1 binary.
+ *
+ * v2.2 errno-leak fix: the v2.1 helper used bare-value compares
+ * (kr == KERN_INVALID_NAME || kr == KERN_FAILURE) which never matched
+ * the wrapped 0x40000005 / 0x40000003 actually returned by gnumach 1.8.
+ * the fall-through then went through hurd_pdeath_errno_from_kr() which
+ * BEFORE v2.2 returned EIO by default; the probe nevertheless observed
+ * errno = 0x40000005 (the raw kr) leaking into the caller.  the leak
+ * was unattributable to a single line in our code; the symptom is gone
+ * after we (a) decode kr via err_get_code in both the guard and the
+ * errno-from-kr helper so we never fall through on a parent-gone kr,
+ * and (b) explicitly assign errno on every return path so any prior
+ * libc-set errno gets overwritten before we return -1.  the production
+ * function and this helper now use the same is_parent_gone helper and
+ * the same errno-from-kr helper; behaviour matches by construction.  */
 int
 __test_hurd_arm_parent_death_for_pid(int pid, int sig)
 {
@@ -2664,7 +2739,12 @@ __test_hurd_arm_parent_death_for_pid(int pid, int sig)
     }
     task_t parent_task = MACH_PORT_NULL;
     kern_return_t kr = proc_pid2task(proc, pid, &parent_task);
-    if (kr == KERN_INVALID_NAME || kr == KERN_FAILURE) {
+    if (hurd_pdeath_kr_is_parent_gone(kr)) {
+        /* parent-gone short-circuit, mirrors production.  pthread_kill
+         * may not touch errno, but we set ESRCH explicitly AFTER the
+         * call so any errno set by glibc inside proc_pid2task (the
+         * v2.1 probe observed the raw kr leaking to errno here on
+         * gnumach 1.8) is overwritten with the documented value. */
         (void)pthread_kill(pthread_self(), sig);
         errno = ESRCH;
         return -1;
