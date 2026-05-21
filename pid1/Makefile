@@ -166,11 +166,24 @@ PORT_DEFS := -DPORT_HURD
 # slice 3 hurd_publish_auth_port body calls ports_create_bucket /
 # ports_create_class / ports_create_port / ports_get_send_right /
 # ports_notify_server; hurd_auth_drain reads auth_bucket->portset
-# directly.  libports' own NEEDED transitively pulls libihash and
-# libpthread.  ordering: -lports before -lfshelp because libfshelp's
+# directly.  ordering: -lports before -lfshelp because libfshelp's
 # helpers in turn call into libports.
-PORT_BOOT_LIBS   := -lports -lfshelp -lhurduser -lmachuser
-PORT_MODULE_LIBS := -lports -lfshelp -lhurduser -lmachuser
+#
+# -lpthread is named explicitly.  v0.9.9 added pthread_create to
+# port_hurd.c (the dead-name watcher thread), and the v0.9.9
+# VM-verify on Debian GNU/Hurd 0.9 (binutils 2.45-ish, gcc 15.2.0)
+# caught that this toolchain no longer chases libports' NEEDED chain
+# for transitive pthread symbols at link time: the final cc fails
+# with "undefined reference to symbol 'pthread_create@@GLIBC_2.38' /
+# DSO missing from command line" unless -lpthread is on the link
+# line.  an older comment here used to claim libports' NEEDED pulled
+# libpthread transitively for free.  it does at runtime (the .so is
+# loaded), but not at link time on a stock modern binutils; new ld
+# defaults toward --no-copy-dt-needed-entries, so a symbol used
+# directly by our TU must be resolved from a library we name
+# ourselves.  do not delete -lpthread to "simplify" the link line.
+PORT_BOOT_LIBS   := -lports -lfshelp -lhurduser -lmachuser -lpthread
+PORT_MODULE_LIBS := -lports -lfshelp -lhurduser -lmachuser -lpthread
 # generated MIG sources for the fsys subsystem.  slice 3 needs an
 # fsys_server() demuxer so libdiskfs's fsys_getroot request (issued by
 # every file_name_lookup("/servers/geos-auth", ...)) reaches our

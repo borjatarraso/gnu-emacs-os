@@ -31,12 +31,14 @@ LDFLAGS ?=
 # directly and therefore needs the same libs that pid1's PORT=hurd
 # build pulls in).
 #
-# -lpthread is added explicitly here because we use pthread_create
-# in hurd-mach-sidechannel.c and the watcher in port_hurd.c uses
-# pthread_mutex / pthread_create as well.  pid1/Makefile does not
-# need to name -lpthread because libports' NEEDED chain transitively
-# pulls it in for the link, but C-level probes that do not pull
-# libports still need it via -pthread.
+# -lpthread (here as -pthread for the driver flag) is named on every
+# link line that touches port_hurd.c or any probe that calls
+# pthread_create directly.  pid1/Makefile now also names -lpthread
+# explicitly on its PORT=hurd link lines; the historical claim that
+# libports' NEEDED chain pulled libpthread transitively at link time
+# stopped being true on Debian GNU/Hurd 0.9's binutils 2.45-ish +
+# gcc 15.2.0 toolchain (see the comment over PORT_BOOT_LIBS in
+# pid1/Makefile for the full forensic).
 PORT_LIBS := -lports -lfshelp -lhurduser -lmachuser
 PTHREAD   := -pthread
 
@@ -50,11 +52,28 @@ all: pdeath sidechannel pflocal-cmsg client-handshake publish-auth-port
 # distinguishing macro in case a future port_hurd.c body wants to
 # tweak its behaviour under the probe; today nothing keys off it,
 # but defining it documents intent.
+#
+# port_hurd.c's hurd_auth_drain references the MIG-generated
+# fsys_server_routines / fsys_server symbols (the v0.8 design-2.2
+# auth translator demuxer).  pid1/Makefile generates fsysServer.c /
+# fsys_S.h from /usr/include/x86_64-gnu/hurd/fsys.defs; we mirror
+# that rule here so the probe link does not fail with
+# "undefined reference to fsys_server_routines / fsys_server".  the
+# mig invocation matches pid1/Makefile's verbatim (same -DSEQNOS,
+# same /dev/null discard for the unused user side).
+fsysServer.c fsys_S.h: /usr/include/x86_64-gnu/hurd/fsys.defs
+	mig -DSEQNOS \
+	    -sheader fsys_S.h \
+	    -server fsysServer.c \
+	    -header /dev/null \
+	    -user /dev/null \
+	    /usr/include/x86_64-gnu/hurd/fsys.defs
+
 pdeath: hurd-pdeath-probe
-hurd-pdeath-probe: hurd-pdeath-probe.c ../pid1/port_hurd.c ../pid1/port_layer.h
+hurd-pdeath-probe: hurd-pdeath-probe.c ../pid1/port_hurd.c ../pid1/port_layer.h fsysServer.c fsys_S.h
 	$(CC) $(CFLAGS) $(PTHREAD) -DPORT_HURD -DPID1_TEST_HELPER \
-	    -I../pid1 \
-	    -o $@ hurd-pdeath-probe.c ../pid1/port_hurd.c \
+	    -I../pid1 -I. \
+	    -o $@ hurd-pdeath-probe.c ../pid1/port_hurd.c fsysServer.c \
 	    $(LDFLAGS) $(PORT_LIBS)
 
 # pre-existing probes; one rule each so a make-all is honest about
@@ -77,4 +96,5 @@ hurd-publish-auth-port: hurd-publish-auth-port.c
 
 clean:
 	rm -f hurd-pdeath-probe hurd-mach-sidechannel hurd-pflocal-cmsg \
-	      hurd-client-handshake hurd-publish-auth-port
+	      hurd-client-handshake hurd-publish-auth-port \
+	      fsysServer.c fsys_S.h
