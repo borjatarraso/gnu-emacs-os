@@ -39,6 +39,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -432,6 +433,26 @@ linux_disk_size_bytes(const char *name, uint64_t *out)
     return 0;
 }
 
+/* arm a "die when parent dies" link on the calling process.  intended
+ * to be called from the child of a fork()+exec() sequence after
+ * setsid() and before execve(), so when pid1 dies the child gets the
+ * requested signal instead of being reparented.  the prctl call is
+ * inheritable across exec, so the link survives into the new image.
+ *
+ * SIGNAL is a POSIX signal number (typically SIGTERM).  the prctl
+ * fourth/fifth args are unused per the prctl(2) man page and must be
+ * zero.  errno from prctl is left untouched on failure (EINVAL for an
+ * out-of-range signal, EPERM if the kernel is configured to reject the
+ * call from this context). */
+static int
+linux_arm_parent_death(int signal)
+{
+    if (prctl(PR_SET_PDEATHSIG, (unsigned long)signal, 0, 0, 0) < 0) {
+        return -1;  /* errno already set by prctl */
+    }
+    return 0;
+}
+
 /* the table.  one assignment per slot, no NULLs.  the Hurd backend
  * will provide a parallel const port_caps port_hurd_impl with the
  * same shape. */
@@ -449,6 +470,7 @@ const port_caps port_linux_impl = {
     .publish_auth_port     = linux_publish_auth_port,
     .auth_drain            = linux_auth_drain,
     .disk_size_bytes       = linux_disk_size_bytes,
+    .arm_parent_death      = linux_arm_parent_death,
 };
 
 /* the active pointer.  starts NULL; main() and emacs_module_init()

@@ -224,6 +224,23 @@
 (require 'session nil 'noerror)
 (require 'passwd nil 'noerror)
 
+;; v0.9.x test files live under iso-build/freeze-tests/.  put that
+;; directory on the load-path so subsequent `require' calls resolve
+;; the per-slice files by feature symbol.  `load-file-name' is bound
+;; when this file is loaded via load-file or -l on the command line;
+;; on M-x eval-buffer it is nil, in which case we fall back to
+;; default-directory.  noerror requires are below so a stripped image
+;; that ships only freeze-tests.el (no subdir) still loads.
+(let* ((here (or (and load-file-name (file-name-directory load-file-name))
+                 default-directory))
+       (subdir (and here (expand-file-name "freeze-tests/" here))))
+  (when (and subdir (file-directory-p subdir))
+    (add-to-list 'load-path subdir)))
+
+;; v0.9.8 arm_parent_death freeze-tests live in the subdir; require
+;; with noerror so a stripped image without the subdir still loads.
+(require 'freeze-test-arm-parent-death nil 'noerror)
+
 (defvar freeze-test-results nil
   "Alist of (TEST-NAME . RESULT) entries.  RESULT is one of
 'pass, 'fail, or a string describing what went wrong.")
@@ -3811,6 +3828,11 @@ back via state-read to confirm the persist landed."
   (freeze-test-services-client-render)
   (freeze-test-journal-client-render)
   (freeze-test-port-hurd)
+  ;; v0.9.8 arm_parent_death.  guarded on fboundp so a stripped image
+  ;; (no subdir, the require above no-op'd) records nothing rather
+  ;; than crashing the run.
+  (when (fboundp 'freeze-test-arm-parent-death)
+    (freeze-test-arm-parent-death))
   (freeze-test-kill-emacs)
   (freeze-test-report))
 

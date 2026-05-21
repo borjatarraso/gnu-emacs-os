@@ -33,10 +33,11 @@ when the underlying module is absent (`emacs -Q -batch` dev host)
 so CI can distinguish "module unbound" from "regression".
 
 The dynamic module under `pid1/` had a small Linux dependency
-surface (`reboot(2)`, `mount(2)`, `prctl(PR_SET_NAME)`,
-`sethostname(2)`, the `/dev/kmsg` reader, the network ioctls, and
-the `SO_PEERCRED` getsockopt that authenticates the supervisor RPC
-channel). That surface is now a function-pointer struct:
+surface (`reboot(2)`, `mount(2)`, `prctl(PR_SET_NAME)` (cited as
+future surface; pid1 does not currently call it, see
+`port_layer.h:32-36`), `sethostname(2)`, the `/dev/kmsg` reader, the
+network ioctls, and the `SO_PEERCRED` getsockopt that authenticates
+the supervisor RPC channel). That surface is now a function-pointer struct:
 `pid1/port_layer.h` declares `port_caps`, `pid1/port_linux.c` holds
 every Linux syscall body that used to live inline in
 `emacs-init.c`, and the module calls through `port->X()`. The
@@ -58,11 +59,30 @@ GNU/Hurd 0.9, so the Hurd side is now exercised in production
 shape on its branch, not just written against the public Hurd
 headers.
 
-EXWM assumes an Xorg server. Hurd ships Xorg too, so this part is
-fine; what differs is how PID 1 spawns it. The Linux side fork+execs
-with prctl; the Hurd side has no prctl and uses `proc_setowner` to
-the same effect. That spawn path is not yet wired into
-`port_hurd.c`.
+EXWM assumes an X server. Hurd ships Xorg too, but native Xorg
+is blocked on the input-driver gap on hurd-amd64 today: `kbd_drv.so`
+issues a Linux-style "set event mode" ioctl against `/dev/cons/kbd`
+that the gnumach console translator returns EBADF for, and there
+is no `evdev_drv.so` or `libinput_drv.so` in the hurd-amd64
+package set to fall back to (see
+`docs/runlogs/2026-05-21-hurd-xorg-probe.md` probes E3, E4, I).
+v0.9.8 wires the Xvfb spawn path on Hurd instead: pid1 spawns
+`/usr/bin/Xvfb :0 -screen 0 1024x768x24` the same way it spawns
+Xvfb in Linux dev hosts. EXWM hosts emacs against the virtual
+framebuffer; the userland code does not branch on kernel.
+
+The "die when parent dies" link that Linux gets via
+`prctl(PR_SET_PDEATHSIG)` is abstracted through the new
+`port->arm_parent_death(signal)` slot in `port_layer.h`. The
+Linux body calls prctl; the Hurd body returns ENOSYS in v0.9.8
+and gets the real `MACH_NOTIFY_DEAD_NAME` watcher-thread
+implementation in v0.9.9 (cited above). Note: `proc_setowner`,
+which an earlier draft of this doc and the v0.9.7 release memory
+incorrectly named as the Hurd analogue, is marked Deprecated at
+`/usr/include/x86_64-gnu/hurd/process.defs:127` and is not the
+right primitive. The right primitive is `MACH_NOTIFY_DEAD_NAME`
+requested via `mach_port_request_notification` at
+`mach_port.defs:247`.
 
 ## CI shape
 
@@ -196,6 +216,7 @@ The verification levels in the last column:
 | `install/disk.el` Hurd not-implemented banner | implemented | **YES (live-verified)** on 2026-05-20 (v0.9.5; Hurd arm enumerates whole disks the same way, parses `/proc/mounts` for mounted-p, and `install-disk--size-bytes-hurd` now calls `(pid1-disk-size-bytes name)` via the same RPC path as the disks buffer; install wizard's partition/format/grub steps remain Linux-only and refused on Hurd by `buffers/install.el`; live-verified at `(install-disk--size-bytes-hurd "wd0") -> 4194304000`, runlog `docs/runlogs/2026-05-20-v095-disk-size-verify.md`) |
 | `services/journal-tail.el` Hurd kmsg source | implemented | **YES (live-verified)** on 2026-05-21 (v0.9.6; Hurd arm runs `tail -F --lines=+1 /var/log/kern.log` under supervise.el and dispatches per-line to a new `journal-buffer--parse-syslog-record` that parses the BSD/inetutils one-line format into the standard journal record plist (`:source 'syslog`, `:sev "info"` defaulted since kern.log is implicitly kern.*, `:time` parsed from `MMM DD HH:MM:SS` with current-year defaulting).  no port_caps slot needed: the v0.9.6 probe receipt at `docs/runlogs/2026-05-21-hurd-kmsg-probe.md` confirmed `/dev/klog` is a `/hurd/streamio kmsg` translator that blocks and has no history replay, and Debian Hurd 0.9 ships `inetutils-syslogd` running by default which drains it into `/var/log/kern.log`.  live end-to-end verified at runlog `docs/runlogs/2026-05-21-v096-kmsg-verify.md`: `(supervise-start 'journal-kmsg)` spawned tail, backlog replayed, synthetic appended line landed live in `*journal*`; 100-call leak smoke clean (VmSize delta 0).  one caveat documented in the verify receipt: on this Debian Hurd 0.9 snapshot kern.log is 0 bytes at boot because gnumach boot printfs land in `/var/log/dmesg` (read direct from the gnumach printbuf by `dmesg(8)`) rather than via the /dev/klog -> syslogd -> kern.log path; the pipeline is correct, future runtime kernel events would flow through.  **dmesg-prime follow-on shipped at main/3d4a88b and live-verified on 2026-05-21** (v0.9.7; `journal-tail--prime-from-dmesg` reads /var/log/dmesg at load time on Hurd and appends each non-empty line as a `:source 'dmesg` record so the day-zero buffer carries the boot transcript; 61 dmesg lines = 61 journal records, exact match; runlog `docs/runlogs/2026-05-21-v096-dmesg-prime-verify.md`)) |
 | `user/userland/audio.el` Hurd not-implemented banner | implemented | YES on 2026-05-20 (v0.9.4 doc-flip; `audio-list-cards' on Hurd routes through `geos-port-unimplemented' and returns nil so the `*audio*' buffer renders "no cards visible" cleanly.  Hurd has no ALSA, no `/proc/asound', no audio translator under `/hurd/'; a native sink (OSS-style or Mach-RPC once a Hurd audio translator exists) is a later slice).  **Native audio translator surface: deferred at translator level** (v0.9.7 probe 2026-05-21 confirmed Debian GNU/Hurd 0.9 ships no /hurd/audio*, no settrans-attached /dev/dsp /dev/audio /dev/mixer /dev/snd nodes, no audio entry under /servers, no /proc/asound analogue, zero audio enumeration in the gnumach boot transcript, and `dpkg -L hurd` matches zero files with audio names; H1-H4 all falsified.  pulseaudio 17.0+dfsg1-2.1 and the sndio family are installable from debian-ports sid/main hurd-amd64 but not bundled in the canonical image, so a future v1.x slice would wire `userland/audio.el` to a pulseaudio daemon path gated on user `apt install pulseaudio`; out of scope for v0.9.x.  runlog `docs/runlogs/2026-05-21-hurd-audio-probe.md`) |
+| `port->arm_parent_death` (Linux: `prctl(PR_SET_PDEATHSIG)`; Hurd: `MACH_NOTIFY_DEAD_NAME` via `mach_port_request_notification`) | v0.9.8 slot landed on main; Linux body calls `prctl` directly; Hurd body returns ENOSYS as a partial slot, the real `MACH_NOTIFY_DEAD_NAME` watcher-thread implementation is the v0.9.9 follow-on (see receipt for the design); call site is `spawn_xorg()`'s post-fork child, which tolerates ENOSYS as a defence-in-depth gap and logs to /dev/console.  same commit removed the v0.7.x force-console block under `PORT_HURD` and added the `/usr/bin/Xvfb` default for Hurd UI mode (probe C+D confirmed Xvfb 2:21.1.22-1 works) | YES on Linux (prctl shipped, freeze-test `freeze-test-arm-parent-death.el` covers slot-bound + linux-prctl-call + hurd-enosys-tolerated); PARTIAL on Hurd (ENOSYS placeholder; v0.9.9 real impl pending; receipt `docs/runlogs/2026-05-21-hurd-xorg-probe.md`) |
 
 The 2026-05-17 verification pass ran `docs/HURD_BOOT.md` steps 1-3
 end-to-end on a fresh Debian GNU/Hurd 2026-03 snapshot VM.  the
