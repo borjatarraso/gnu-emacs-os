@@ -288,29 +288,70 @@ typedef struct port_caps {
      * SIGNAL is the POSIX signal number to deliver to the child (typically
      * SIGTERM) when the parent process (pid1) dies.
      *
-     * Linux backend: prctl(PR_SET_PDEATHSIG, signal).  see
+     * Linux backend: prctl(PR_SET_PDEATHSIG, signal).  re-arm with any
+     * signal is a kernel-level write, no contract concern.  see
      * docs/runlogs/2026-05-21-hurd-xorg-probe.md probe F.
      *
-     * Hurd backend: returns -1 with errno=ENOSYS in v0.9.8.  the real
-     * implementation is the v0.9.9 follow-on slice:
-     *   proc_pid2task(getproc(), 1, &parent_task);
-     *   mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &notify_port);
+     * Hurd backend (v0.9.9, side branch): the real Mach dead-name
+     * notify path.  call sequence:
+     *   proc_pid2task(getproc(), getppid(), &parent_task) with a
+     *     10x100ms retry loop on parent-gone codes (covers the
+     *     freshly-forked-caller race),
+     *   mach_port_allocate(self, RECEIVE, &notify_port),
      *   mach_port_request_notification(self, parent_task,
-     *       MACH_NOTIFY_DEAD_NAME, 0, notify_port,
-     *       MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
-     *   pthread_create(watcher) which mach_msg_recv's the dead-name and
-     *       kill(getpid(), signal) on receipt.
-     * cited in docs/runlogs/2026-05-21-hurd-xorg-probe.md probes F2/G and
-     * decision-relevant points.
+     *     MACH_NOTIFY_DEAD_NAME, 0, notify_port, MAKE_SEND_ONCE,
+     *     &prev), drop prev if VALID,
+     *   pthread_create(watcher, DETACHED) blocking in mach_msg on
+     *     notify_port until the dead-name message arrives, then
+     *     pthread_kill(main_thread, signal).
+     * parent_task SEND right ownership transfers to the watcher; the
+     * watcher deallocates both parent_task and notify_port on exit.
+     * the armer does NOT deallocate parent_task on success: the kernel
+     * binds the notification record to the ipc_entry in our ipc_space
+     * per mach_port.defs:228-251, so eagerly dropping the send right
+     * frees the entry and silently consumes the notification.
      *
-     * callers tolerate ENOSYS: the death-link is defence-in-depth, the
-     * Hurd spawn path still works without it (pid1 dying causes the
-     * kernel to reboot anyway).  caller logs ENOSYS at INFO and
-     * continues; any other errno is panic-routed.  matches the
-     * publish_auth_port / get_peer_cred ENOSYS-tolerance pattern from
-     * v0.8.
+     * re-entrancy contract: IDEMPOTENT on same signal, EALREADY on
+     * different signal.  a second call with the same signal as the
+     * live arm returns 0 with no side effects; a different signal
+     * returns -1/EALREADY and the FIRST arm stays live.  never more
+     * than one watcher pthread per process.  callers that genuinely
+     * need to change the death-link signal must exec into a new
+     * process (Mach receive rights and pthreads do not survive exec).
      *
-     * returns 0 on success, -1 with errno set on failure. */
+     * the watcher targets the main thread by pthread_kill, not the
+     * process by kill(getpid()): on multi-threaded Hurd, kill() can
+     * land on any thread including the watcher itself, leaving the
+     * intended target unsignalled.
+     *
+     * exec divergence: Mach receive rights and pthreads do not survive
+     * exec, so the link silently breaks on the exec'd image; caller
+     * re-arms post-exec if needed.  cited in docs/runlogs/2026-05-21-
+     * v099-vm-verify.md and in mach_port.defs:247 + notify.defs:106.
+     *
+     * callers tolerate ENOSYS for parity with the Linux-only spawn
+     * path's defence-in-depth gap; EALREADY is treated as success by
+     * spawn_xorg-style call sites (first arm wins); any other errno
+     * is panic-routed.
+     *
+     * return values:
+     *   0          : success, OR idempotent second arm with same signal
+     *                on Hurd (Linux always treats as success).
+     *   -1/EINVAL  : signal out of range.
+     *   -1/ENOMEM  : malloc/pthread_create resource failure (Hurd).
+     *   -1/EALREADY: Hurd, second arm with different signal; first
+     *                arm stays live.
+     *   -1/ESRCH   : Hurd, parent already dead after retry loop;
+     *                in-process pthread_kill(self, signal) has fired
+     *                before this return.  fires when proc_pid2task
+     *                returns ESRCH or EIO (the wire values
+     *                gnumach 1.8+git20260224 surfaces for "no such
+     *                task"; Hurd's <errno.h> encodes errno macros as
+     *                err_hurd|unix_errno, so the kr arrives at our
+     *                handler bit-equal to the POSIX errno) or
+     *                KERN_INVALID_NAME (retained as a portability
+     *                defence for textbook-Mach kernels).
+     *   -1/EIO     : Hurd, unknown kern_return_t. */
     int (*arm_parent_death)(int signal);
 } port_caps;
 
