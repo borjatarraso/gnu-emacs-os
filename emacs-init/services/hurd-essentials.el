@@ -162,6 +162,44 @@ services/hurd-essentials.el loads."
     :group 'network
     :type 'boolean)
 
+  ;; slice 11 (v0.9.12): settrans /hurd/pfinet onto /servers/socket/2
+  ;; BEFORE the static address ioctl.  on Debian GNU/Hurd 0.9 the base
+  ;; image ships pfinet as a passive translator declared in
+  ;; /etc/network/interfaces, but the rc.d chain that actually starts
+  ;; it lives downstream of /sbin/init and never runs once pid1
+  ;; replaces /sbin/init.  slice 10 VM-verify caught this: the bind
+  ;; point /servers/socket/2 was a plain 0-byte file, no translator
+  ;; attached, so pid1-set-address opened it, got back a port to a
+  ;; non-translator inode, and the SIOCSIFADDR ioctl surfaced as
+  ;; ENODEV = "No such device".
+  ;;
+  ;; the settrans here mirrors what /etc/init.d/hurd would have done:
+  ;; force-attach pfinet to the canonical SLIRP iface (/dev/eth0) so
+  ;; the subsequent ioctl path through /servers/socket/2 actually
+  ;; reaches a live pfinet.  -fgap = force (replace any existing
+  ;; translator), group leader (so a future shutdown kills the whole
+  ;; pgrp), active+passive (start now AND auto-restart on demand).
+  ;; we deliberately do NOT pass -a/-m/-g to pfinet itself: the static
+  ;; address still goes via pid1-set-address below so the single
+  ;; canonical bring-up path is the C-side ioctl, not a duplicate
+  ;; configuration via settrans args.  bare-metal Hurd that uses a
+  ;; real DHCP server still benefits from this settrans step; the
+  ;; operator just sets `geos-hurd-static-eth0' to nil so the address
+  ;; call below is skipped, then runs their own dhcp client against
+  ;; the now-live pfinet.
+  (when (and (file-executable-p "/bin/settrans")
+             (file-executable-p "/hurd/pfinet"))
+    (supervise--console "hurd-essentials: settrans /hurd/pfinet -i /dev/eth0 on /servers/socket/2")
+    (let ((exit (condition-case err
+                    (call-process "/bin/settrans" nil nil nil
+                                  "-fgap" "/servers/socket/2"
+                                  "/hurd/pfinet" "-i" "/dev/eth0")
+                  (error
+                   (supervise--console
+                    "hurd-essentials: settrans pfinet FAILED %S" err)
+                   -1))))
+      (supervise--console "hurd-essentials: settrans pfinet exit=%S" exit)))
+
   (when geos-hurd-static-eth0
     (condition-case err
         (cond
