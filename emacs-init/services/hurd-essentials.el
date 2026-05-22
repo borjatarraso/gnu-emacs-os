@@ -2,7 +2,7 @@
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;; Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 
-;; two daemons GEOS cannot afford to lose on a Hurd VM, parked under
+;; three daemons GEOS cannot afford to lose on a Hurd VM, parked under
 ;; the supervisor so they come back across `(pid1-reboot)` without an
 ;; operator logging in to nudge them.
 ;;
@@ -21,6 +21,23 @@
 ;; `inetutils-syslogd' but it installs the binary at /usr/sbin/syslogd
 ;; (no `inetutils-' prefix); v0.9.11 had the package name in the
 ;; :command path by mistake and slice 6 VM verify caught the gap.
+;;
+;; why dhclient: on Debian GNU/Hurd 0.9 the pfinet translator is
+;; already settrans'd at /servers/socket/2 by the base image, but
+;; nothing in the default boot path actually requests an IP lease for
+;; eth0 once /etc/init.d/networking is bypassed (pid1 replaced
+;; /sbin/init, so the rc.d chain is gone).  without dhclient the
+;; pfinet stack stays bound to nothing and no inbound packet can
+;; reach sshd, even though sshd's socket is on 0.0.0.0:22.  slice 6
+;; VM verify proved sshd binds correctly but the QEMU SLIRP forward
+;; could not complete the three-way handshake; the fix is to acquire
+;; the lease at boot.  we use `-d' (debug mode, no daemonize) so the
+;; sentinel sees the foreground process; dhclient handles its own
+;; lease renewal in that mode.  :restart 'on-crash because a clean
+;; SIGTERM at shutdown is not a failure.  the binary path is
+;; /sbin/dhclient on Debian; if the operator installed isc-dhcp-client
+;; into a non-standard prefix the path will need an apt-discovered
+;; override once that scenario actually appears.
 ;;
 ;; design contract: this file is a strict no-op on Linux.  the entire
 ;; defservice block is wrapped in `(when (eq geos-kernel 'hurd) ...)`
@@ -100,10 +117,23 @@
     :buffer " *supervise:hurd-syslogd*"
     :env nil)
 
+  (defservice hurd-dhclient
+    ;; -d keeps dhclient in the foreground so the sentinel can watch.
+    ;; in foreground mode dhclient still handles lease renewal on its
+    ;; own timer; we do not need a separate renewal service.  eth0 is
+    ;; the canonical interface name pfinet exposes for the first
+    ;; ethernet device; on a multi-NIC machine the operator can
+    ;; supplement this service rather than replace it.
+    :command ("/sbin/dhclient" "-d" "eth0")
+    :restart on-crash
+    :autostart t
+    :buffer " *supervise:hurd-dhclient*"
+    :env nil)
+
   (condition-case _
       (let ((write-region-inhibit-fsync t))
         (write-region
-         "hurd-essentials: defservice hurd-sshd + hurd-syslogd registered\n"
+         "hurd-essentials: defservice hurd-sshd + hurd-syslogd + hurd-dhclient registered\n"
          nil "/dev/console" 'append 'nomsg))
     (error nil)))
 

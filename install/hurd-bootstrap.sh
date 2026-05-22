@@ -300,7 +300,7 @@ fi
 ###############################################################################
 log "done."
 log "next steps:"
-log "  apt install ssh inetutils-syslogd   # required for hurd-essentials supervisor"
+log "  apt install ssh inetutils-syslogd isc-dhcp-client   # required for hurd-essentials supervisor"
 log "  apt install xvfb emacs-lucid elpa-exwm elpa-xelb   # optional, for EXWM X mode"
 log "  reboot"
 
