@@ -1703,6 +1703,29 @@ main(int argc, char **argv)
      * log line on every boot for no gain.  /run and /tmp stay because
      * port->mount routes those through the Hurd translator path that
      * the 2026-05-17 runtime sweep promoted to YES in HURD_PORT.md. */
+#ifdef PORT_HURD
+    /* / boots read-only on Debian GNU/Hurd; checkroot.sh would normally
+     * fsysopts-remount it rw but we replaced /sbin/init so it never
+     * runs.  do the flip ourselves before the mount block, otherwise
+     * every tmpfs mount EIO's and sethostname EROFS's.  see v0.9.11
+     * VM-verify round 8 and docs/runlogs/2026-05-18-hurd-pid1-boot-
+     * result.md.  log and continue on failure: degraded boot beats no
+     * boot.
+     *
+     * invariant for the call site: port is non-NULL (port_require_or_-
+     * abort has run by here), console() is wired (the banner two
+     * blocks up already used it), umask is set; no other state is
+     * required.  do not move this above port_require_or_abort. */
+    if (port->remount_root_rw() < 0) {
+        char buf[128];
+        snprintf(buf, sizeof buf,
+                 "pid1: remount-rw / failed: %s (mount block will degrade)",
+                 strerror(errno));
+        console(buf);
+    } else {
+        console("pid1: / remounted read-write");
+    }
+#endif
 #ifndef PORT_HURD
     do_mount("proc",     "/proc",    "proc",     MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL);
     do_mount("sysfs",    "/sys",     "sysfs",    MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL);
