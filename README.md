@@ -188,9 +188,9 @@ version:
     brings eth0 up via `settrans /hurd/pfinet` with the full
     SLIRP address shape inline.  receipt at
     [docs/runlogs/2026-05-22-hurd-end-to-end-ssh.md](docs/runlogs/2026-05-22-hurd-end-to-end-ssh.md).
-  - v0.9.13 (in flight): journal-kmsg defservice autostart on
-    Hurd.  pid1 supervisor + Emacs respawn-on-crash verified by
-    a 6-cycle `kill -SEGV` exercise; the journal-kmsg `tail`
+  - v0.9.13: tagged. journal-kmsg defservice autostart on Hurd.
+    pid1 supervisor + Emacs respawn-on-crash verified by a
+    6-cycle `kill -SEGV` exercise; the journal-kmsg `tail`
     follower now comes up live at first boot via a touch +
     `make-directory` for `/var/log/kern.log` and a Hurd-side
     `exec-path` extension so `make-process` can resolve
@@ -198,6 +198,16 @@ version:
     [docs/runlogs/2026-05-22-hurd-emacs-respawn-verify.md](docs/runlogs/2026-05-22-hurd-emacs-respawn-verify.md)
     and
     [docs/runlogs/2026-05-22-v0913-journal-kmsg-verify.md](docs/runlogs/2026-05-22-v0913-journal-kmsg-verify.md).
+  - v0.9.14: tagged. live verification of the v0.9 Hurd surface.
+    v0.8 multi-user peer-cred handshake re-verified against the
+    v0.9.13 stack (all nine slice-5 markers fire in 2.15s wall);
+    live kmsg flow proven end-to-end through the v0.9.6
+    `tail -F` + `journal-buffer--parse-syslog-record` pipeline,
+    with a bonus respawn-and-rebackfill confirmation across an
+    emacs respawn mid-probe.  no code shipped.  receipts at
+    [docs/runlogs/2026-05-22-v0914-multiuser-reverify.md](docs/runlogs/2026-05-22-v0914-multiuser-reverify.md)
+    and
+    [docs/runlogs/2026-05-22-v0914-live-kmsg-probe.md](docs/runlogs/2026-05-22-v0914-live-kmsg-probe.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
