@@ -453,6 +453,15 @@ linux_arm_parent_death(int signal)
     return 0;
 }
 
+/* no-op stub: the Linux initrd mounts / read-write before handing off
+ * to pid1, so there is nothing to do here.  the slot exists only to
+ * keep port_caps shape-symmetric with the Hurd backend. */
+static int
+linux_remount_root_rw(void)
+{
+    return 0;
+}
+
 /* the table.  one assignment per slot, no NULLs.  the Hurd backend
  * will provide a parallel const port_caps port_hurd_impl with the
  * same shape. */
@@ -471,6 +480,7 @@ const port_caps port_linux_impl = {
     .auth_drain            = linux_auth_drain,
     .disk_size_bytes       = linux_disk_size_bytes,
     .arm_parent_death      = linux_arm_parent_death,
+    .remount_root_rw       = linux_remount_root_rw,
 };
 
 /* the active pointer.  starts NULL; main() and emacs_module_init()

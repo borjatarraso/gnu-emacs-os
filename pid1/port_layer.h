@@ -353,6 +353,46 @@ typedef struct port_caps {
      *                defence for textbook-Mach kernels).
      *   -1/EIO     : Hurd, unknown kern_return_t. */
     int (*arm_parent_death)(int signal);
+
+    /* remount the root filesystem read-write.
+     *
+     * Linux backend: no-op returning 0, no syscalls.  the initrd has
+     * already mounted / read-write by the time pid1 runs, so there is
+     * nothing to do.  the slot exists only to keep the port_caps shape
+     * symmetric across kernels; emacs-init.c calls it from inside an
+     * #ifdef PORT_HURD precisely because the Linux call would only
+     * burn a log line for no gain.
+     *
+     * Hurd backend: calls fsys_set_options on / with "--writable" to
+     * flip the root filesystem read-write.  on Debian GNU/Hurd, / boots
+     * read-only at init time; Debian's /etc/init.d/checkroot.sh is what
+     * fsysopts-remounts it rw on a normal boot.  pid1 replaced
+     * /sbin/init, so checkroot.sh never runs, and every downstream
+     * write fails: tmpfs mounts on /run and /tmp return EIO because
+     * the underlying / cannot be written through, sethostname returns
+     * EROFS, emacs's native-comp aborts because /tmp is RO.  see
+     * v0.9.11 VM-verify round 8 and docs/runlogs/2026-05-18-hurd-pid1-
+     * boot-result.md for the diagnostic trail.
+     *
+     * returns 0 on success, -1 with errno set on failure.
+     *
+     * called BEFORE the do_mount block on PORT_HURD; the ordering is
+     * load-bearing.  without this call, every tmpfs mount in that
+     * block EIO's, sethostname fails EROFS, and the rest of boot
+     * cascades into degraded mode.
+     *
+     * second-call behaviour is backend-defined; callers SHOULD treat
+     * this as one-shot.  on Hurd fsys_set_options on an already-rw root
+     * is expected to be a no-op, but the failure modes of "set options
+     * to current value" vary across translator builds (ext2fs vs
+     * tmpfs vs unionfs) and pid1 has no VM-verified guarantee here.
+     * the v0.9.12 boot path calls this exactly once before do_mount,
+     * which is the only contract pid1 itself depends on.
+     *
+     * pid1 logs success or failure to /dev/console and does NOT abort
+     * boot on failure.  degraded boot beats no boot; the log-and-
+     * continue posture matches the existing do_mount discipline. */
+    int (*remount_root_rw)(void);
 } port_caps;
 
 /* the active backend.  starts NULL.  exactly one assignment per
