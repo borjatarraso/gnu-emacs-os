@@ -176,24 +176,39 @@ services/hurd-essentials.el loads."
   ;; the settrans here mirrors what /etc/init.d/hurd would have done:
   ;; force-attach pfinet to the canonical SLIRP iface (/dev/eth0) so
   ;; the subsequent ioctl path through /servers/socket/2 actually
-  ;; reaches a live pfinet.  -fgap = force (replace any existing
-  ;; translator), group leader (so a future shutdown kills the whole
-  ;; pgrp), active+passive (start now AND auto-restart on demand).
-  ;; we deliberately do NOT pass -a/-m/-g to pfinet itself: the static
-  ;; address still goes via pid1-set-address below so the single
-  ;; canonical bring-up path is the C-side ioctl, not a duplicate
-  ;; configuration via settrans args.  bare-metal Hurd that uses a
-  ;; real DHCP server still benefits from this settrans step; the
-  ;; operator just sets `geos-hurd-static-eth0' to nil so the address
-  ;; call below is skipped, then runs their own dhcp client against
-  ;; the now-live pfinet.
+  ;; reaches a live pfinet.  -fgap = force, goaway any existing
+  ;; translator, active+passive (start now AND register passively so
+  ;; the auto-restart machinery brings it back on demand).
+  ;;
+  ;; slice 11 passed JUST `-i /dev/eth0' to pfinet and settrans returned
+  ;; exit=5 after netdde successfully registered its IRQ delivery port:
+  ;; pfinet refused to attach without a full address spec, then the
+  ;; subsequent pid1-set-address ioctl could not find a translator on
+  ;; /servers/socket/2.  slice 12 passes the full SLIRP address shape
+  ;; inline (-a/-m/-g) so pfinet attaches cleanly, matching the
+  ;; canonical Debian GNU/Hurd 0.9 installer incantation.  the
+  ;; pid1-set-address call below then becomes a reconcile/verify step:
+  ;; the ioctl asserts the same address we just told settrans about,
+  ;; so on a healthy boot it is either a no-op (kernel already has the
+  ;; intended value) or surfaces EEXIST (also fine, our condition-case
+  ;; treats it as success).  bare-metal Hurd with real DHCP still
+  ;; benefits from this settrans step: operator sets
+  ;; `geos-hurd-static-eth0' nil so the address ioctl is skipped, then
+  ;; runs their own dhcp client against the now-live pfinet (and
+  ;; ideally overrides the address args here too via a defcustom in a
+  ;; follow-up slice once a bare-metal deployment actually appears).
   (when (and (file-executable-p "/bin/settrans")
              (file-executable-p "/hurd/pfinet"))
-    (supervise--console "hurd-essentials: settrans /hurd/pfinet -i /dev/eth0 on /servers/socket/2")
+    (supervise--console
+     "hurd-essentials: settrans /hurd/pfinet -i /dev/eth0 -a 10.0.2.15 -m 255.255.255.0 -g 10.0.2.2")
     (let ((exit (condition-case err
                     (call-process "/bin/settrans" nil nil nil
                                   "-fgap" "/servers/socket/2"
-                                  "/hurd/pfinet" "-i" "/dev/eth0")
+                                  "/hurd/pfinet"
+                                  "-i" "/dev/eth0"
+                                  "-a" "10.0.2.15"
+                                  "-m" "255.255.255.0"
+                                  "-g" "10.0.2.2")
                   (error
                    (supervise--console
                     "hurd-essentials: settrans pfinet FAILED %S" err)
