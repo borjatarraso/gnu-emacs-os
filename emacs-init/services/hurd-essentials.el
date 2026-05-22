@@ -13,11 +13,14 @@
 ;; covers the "clean exit" case too, because on this host a clean sshd
 ;; exit means somebody fat-fingered something.
 ;;
-;; why inetutils-syslogd: v0.9.6's journal-kmsg source on Hurd tails
+;; why syslogd: v0.9.6's journal-kmsg source on Hurd tails
 ;; /var/log/kern.log, and that file only grows because syslogd is
 ;; draining /dev/klog into it.  if syslogd dies, *journal* silently
 ;; stops scrolling and the next kernel event is invisible.  same
-;; :restart 'always reasoning as sshd.
+;; :restart 'always reasoning as sshd.  the package name in apt is
+;; `inetutils-syslogd' but it installs the binary at /usr/sbin/syslogd
+;; (no `inetutils-' prefix); v0.9.11 had the package name in the
+;; :command path by mistake and slice 6 VM verify caught the gap.
 ;;
 ;; design contract: this file is a strict no-op on Linux.  the entire
 ;; defservice block is wrapped in `(when (eq geos-kernel 'hurd) ...)`
@@ -85,12 +88,13 @@
     :env nil)
 
   (defservice hurd-syslogd
-    ;; --no-detach is the inetutils-syslogd equivalent of sshd -D:
-    ;; stay attached so the sentinel can actually watch us.  no -e
-    ;; equivalent because syslogd's own job is to be the sink, so
-    ;; whatever it writes to stderr stays in the work buffer and
-    ;; does not get reflected into its own log.
-    :command ("/usr/sbin/inetutils-syslogd" "--no-detach")
+    ;; --no-detach is syslogd's equivalent of sshd -D: stay attached so
+    ;; the sentinel can actually watch us.  no -e equivalent because
+    ;; syslogd's own job is to be the sink, so whatever it writes to
+    ;; stderr stays in the work buffer and does not get reflected into
+    ;; its own log.  binary path is /usr/sbin/syslogd (no
+    ;; `inetutils-' prefix; that is the package name only).
+    :command ("/usr/sbin/syslogd" "--no-detach")
     :restart always
     :autostart t
     :buffer " *supervise:hurd-syslogd*"
