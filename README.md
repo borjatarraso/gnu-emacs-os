@@ -188,6 +188,16 @@ version:
     brings eth0 up via `settrans /hurd/pfinet` with the full
     SLIRP address shape inline.  receipt at
     [docs/runlogs/2026-05-22-hurd-end-to-end-ssh.md](docs/runlogs/2026-05-22-hurd-end-to-end-ssh.md).
+  - v0.9.13 (in flight): journal-kmsg defservice autostart on
+    Hurd.  pid1 supervisor + Emacs respawn-on-crash verified by
+    a 6-cycle `kill -SEGV` exercise; the journal-kmsg `tail`
+    follower now comes up live at first boot via a touch +
+    `make-directory` for `/var/log/kern.log` and a Hurd-side
+    `exec-path` extension so `make-process` can resolve
+    coreutils.  receipts at
+    [docs/runlogs/2026-05-22-hurd-emacs-respawn-verify.md](docs/runlogs/2026-05-22-hurd-emacs-respawn-verify.md)
+    and
+    [docs/runlogs/2026-05-22-v0913-journal-kmsg-verify.md](docs/runlogs/2026-05-22-v0913-journal-kmsg-verify.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
