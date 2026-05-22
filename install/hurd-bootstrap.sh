@@ -143,6 +143,28 @@ chmod 0755 "${PID1_MODULE_DST}"
 log "installed ${PID1_MODULE_SRC} -> ${PID1_MODULE_DST} (0755)"
 
 ###############################################################################
+# step 5b: install early-init.el into user-emacs-directory (v0.9.12 slice 6)
+###############################################################################
+# Emacs only loads early-init.el from user-emacs-directory (~/.emacs.d/
+# by default) and ONLY when init-file-user is non-nil.  -Q expands to
+# --no-init-file --no-site-file --no-splash --no-site-lisp, and the first
+# flag sets init-file-user to nil, which skips early-init.el loading
+# entirely.  passing the file via `-l` only loads it during command-line-1,
+# which fires AFTER tty-setup-hook -- by that point term/linux.el has
+# already invoked gpm-mouse-mode which on Hurd triggers a native-comp
+# trampoline build that wedges because `as(1)' is missing from the
+# canonical image.  v0.9.12 slice 4 set the right variables but in the
+# wrong place; this slice puts the file where emacs actually looks.
+#
+# the link target is the staged copy under ${EMACS_INIT_DST}, so a re-run
+# of step 4 (which rewrites the staged tree) is picked up automatically.
+# symlink rather than copy so the file stays authoritative in one place.
+log "step 5b: link early-init.el into /root/.emacs.d"
+mkdir -p /root/.emacs.d
+ln -sfn "${EMACS_INIT_DST}/early-init.el" /root/.emacs.d/early-init.el
+log "linked /root/.emacs.d/early-init.el -> ${EMACS_INIT_DST}/early-init.el"
+
+###############################################################################
 # step 6: write /etc/geos/init.args
 ###############################################################################
 # the file has one argv slot per line. blanks and '#' lines are
@@ -179,9 +201,23 @@ cat > "${INIT_ARGS_PATH}" <<'INIT_ARGS_EOF'
 # this spec.  see docs/HURD_BOOT.md for the v0.9.10 Xvfb workflow.
 :
 # slot 4+: forwarded into emacs's own argv as the -l chain.
--Q
--l
-/usr/share/geos/emacs-init/early-init.el
+# v0.9.12 slice 6: NOT -Q.  -Q expands to --no-init-file --no-site-file
+# --no-splash --no-site-lisp; the --no-init-file part sets init-file-user
+# to nil which skips early-init.el loading entirely.  on Hurd that means
+# the native-comp opt-out in early-init.el never runs before tty-setup-
+# hook fires, gpm-mouse-mode triggers a trampoline build, gcc spawns a
+# missing as(1), emacs wedges.  we use the three explicit flags that -Q
+# also expands to, MINUS --no-init-file, so emacs loads
+# /root/.emacs.d/early-init.el (symlinked to ${EMACS_INIT_DST}/early-init.el
+# by step 5b above) BEFORE tty setup.  early-init.el's body short-circuits
+# on a non-Hurd kernel via the GEOS_KERNEL env check, so this is safe to
+# share with the Linux Guix gexp once it picks up the same pattern.
+# /root/.emacs.d/init.el is not shipped, so emacs's natural init.el load
+# is a no-op and the explicit -l chain below remains the source of truth
+# for what loads.
+--no-site-file
+--no-splash
+--no-site-lisp
 -l
 /usr/share/geos/emacs-init/core/panic.el
 -l
