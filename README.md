@@ -181,6 +181,13 @@ version:
   - v0.9.11: tagged. GEOS boots end-to-end on Debian GNU/Hurd
     0.9 via the `/etc/geos/init.args` fallback and a supervised
     sshd + syslogd pair.
+  - v0.9.12: tagged. End-to-end SSH on Debian GNU/Hurd 0.9:
+    pid1 remounts `/` rw via `fsys_set_options`, early-init.el
+    opts out of native-comp on Hurd, supervise.el mirrors state
+    transitions onto `/dev/console`, and `hurd-essentials.el`
+    brings eth0 up via `settrans /hurd/pfinet` with the full
+    SLIRP address shape inline.  receipt at
+    [docs/runlogs/2026-05-22-hurd-end-to-end-ssh.md](docs/runlogs/2026-05-22-hurd-end-to-end-ssh.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.

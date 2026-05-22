@@ -18,6 +18,27 @@ sshd and inetutils-syslogd on Hurd (no-op on Linux).  The
 operator-side recipe lives in `docs/HURD_BOOT.md`; the
 installer-side script is `install/hurd-bootstrap.sh`.
 
+v0.9.12 (2026-05-22) closes the end-to-end SSH gap.  twelve
+slices: a `port->remount_root_rw` slot (Linux no-op, Hurd
+`fsys_set_options "--writable"` against the root file_t) so the
+underlying ext2 `/tmp` is writable for emacs's native-comp
+trampoline path; a native-comp opt-out in early-init.el gated
+on `GEOS_KERNEL == "hurd"` (belt + suspenders); a
+`supervise--console` helper that mirrors supervisor state
+transitions onto `/dev/console` so silent autostart failures
+stop being invisible mid-boot; install-side
+`/root/.emacs.d/early-init.el` install so early-init actually
+runs before tty setup; a one-line syslogd path fix; and the
+five-slice network bring-up arc that ended in a static eth0
+configuration via `settrans /hurd/pfinet` with the full SLIRP
+address shape (`-a 10.0.2.15 -m 255.255.255.0 -g 10.0.2.2`)
+inline, plus a `pid1-set-address` reconcile/verify call below
+it gated on a new `geos-hurd-static-eth0` defcustom (default
+`t`; flip to `nil` for a bare-metal DHCP deployment).  the host
+now opens an interactive ssh session into the guest and the
+supervisor stays up across the session.  receipt:
+`docs/runlogs/2026-05-22-hurd-end-to-end-ssh.md`.
+
 ## What's portable today
 
 Everything in `emacs-init/` is portable as-is, and the v0.7.x cycle
@@ -260,6 +281,11 @@ The verification levels in the last column:
 | EXWM attaches to Xvfb on Hurd (userland surface, no port_caps slot) | EXWM 0.33 + xelb 0.20 on emacs-lucid 30.2 attach to the v0.9.8-spawned Xvfb on Hurd unchanged from the Linux path; the userland code does not branch on kernel.  packaging gap on the canonical image: `xvfb`, `emacs-lucid`, `elpa-exwm`, `elpa-xelb` must be `apt install`ed (canonical ships emacs-nox only; `x11-utils`, `xterm`, `xdotool`, `x11-apps` are already in the canonical set).  a future v1.x apt-image flavor bundles them | **YES (live-verified)** on 2026-05-21 (v0.9.10: Xvfb 21.1.22 live on `:99`; emacsclient eval reports `connection=t workspaces=2 managed=1 buffers=1`; root window has the EXWM identity / wmsn / timestamp / workspace-container family; `_NET_SUPPORTING_WM_CHECK` on the root points at the `"EXWM"` window in the same tree; xclock captured as a managed top-level with `WM_CLASS = "xclock","XClock"` and `_NET_WM_PID = 1770`; *Messages* clean of `pid1-error`/`exwm-error`; runlog `docs/runlogs/2026-05-21-v0910-exwm-xvfb-hurd.md`) |
 | pid1 args-file fallback (`/etc/geos/init.args`) | argv[1] non-absolute -> read `/etc/geos/init.args` (O_NOFOLLOW + fstat root-owned regular file); covers the `/hurd/startup argc==1` case and the sysvinit-runlevel-token case (e.g. argv[1]=="6"); Linux/Guix passes argv[1]=/gnu/store/.../emacs and the file is never opened.  parse_init_args at `pid1/emacs-init.c` is the source of truth for the failure-mode contract (open errno, non-regular, non-root, short read, empty file, file > 8 KiB, slot-cap overflow; all fall through to the default argv with one-line console log).  installer wrapper at `install/hurd-bootstrap.sh` writes the file as root:root 0644 with explicit chown after chmod | **YES (v0.9.11)** on 2026-05-21 |
 | GEOS supervisor for sshd + syslogd on Hurd (`emacs-init/services/hurd-essentials.el`) | defines `hurd-sshd` (`:restart on-crash`, `/usr/sbin/sshd -D -e`) and `hurd-syslogd` (`:restart always`, `/usr/sbin/inetutils-syslogd --no-detach`); both autostarted via the supervise.el sentinel.  top-level `(when (eq geos-kernel 'hurd) ...)` guard makes the file a strict no-op on Linux even though the Linux boot gexp also passes `-l services/hurd-essentials.el`.  closes the prior v1.0 design item "GEOS-side service supervisor on the Hurd side" for the two daemons that actually matter today (sshd to keep the box reachable across `(pid1-reboot)`, syslogd to keep `/var/log/kern.log` growing for the journal-kmsg source) | **YES (v0.9.11)** on 2026-05-21 |
+| `port->remount_root_rw` (Linux: no-op; Hurd: `fsys_set_options "--writable"` against the root file_t) | slot lives at `pid1/port_layer.h`; Linux body is a `return 0` (the GEOS Linux image already mounts `/` rw and would silently regress on a future image change); Hurd body opens `/`, gets the underlying control port via `file_getcontrol`, then `fsys_set_options(rootctl, "--writable", 1, &options, sizeof options)`.  called from `emacs-init.c` in the post-mount block, before the `/run/sshd` mkdir; failure logs to `/dev/console` and continues (downstream native-comp opt-out covers the regression case) | **YES (v0.9.12)** on 2026-05-22 (`pid1: remount / rw OK` on serial; underlying ext2 `/tmp` writable; native-comp trampoline write no longer aborts emacs at startup) |
+| native-comp opt-out on Hurd (`emacs-init/early-init.el`) | `GEOS_KERNEL == "hurd"` branch sets `native-comp-jit-compilation nil` and `native-comp-enable-subr-trampolines nil`.  read env directly here because native-comp can fire before core/port.el loads.  belt + suspenders against any future image where the remount-rw path fails or `/tmp` becomes RO again | **YES (v0.9.12)** on 2026-05-22 (no `kill_emacs` trampoline-loop on Hurd; emacs reaches the supervisor loop and registers `hurd-sshd` + `hurd-syslogd`) |
+| supervisor `/dev/console` breadcrumbs (`emacs-init/core/supervise.el`) | `supervise--console` helper writes one line per state transition (`supervise--spawn` pre/post-make-process, `supervise--sentinel` entry, `supervise-autostart` per-service START/SKIP-held/ERROR).  `supervise-finalize` refactored onto the same helper.  makes silent autostart failures (the v0.9.12 slice-8 dhclient dead end was discovered by this) visible on the serial log without changing supervisor semantics | YES on Linux (helper inert if `/dev/console` is missing or unwritable; condition-case swallows the errno); **YES (v0.9.12)** on 2026-05-22 (verbatim breadcrumb lines `hurd-essentials: settrans pfinet exit=0` + `hurd-essentials: eth0 static OK` + per-service START lines captured on serial during slice 12 VM-verify) |
+| static eth0 bring-up on Hurd (`emacs-init/services/hurd-essentials.el`) | `geos-hurd-static-eth0` defcustom (default `t`); when set, runs `/bin/settrans -fgap /servers/socket/2 /hurd/pfinet -i /dev/eth0 -a <addr> -m <mask> -g <gw>` to attach pfinet with the full SLIRP address shape inline, then calls `pid1-set-address` + `pid1-set-route-default` as reconcile/verify.  flip the defcustom to `nil` for bare-metal DHCP; the settrans pre-step still runs so an apt-installed dhcp client has a live pfinet to bind to | **YES (v0.9.12)** on 2026-05-22 (`inetutils-ifconfig` inside the guest shows `/dev/eth0` with inet 10.0.2.15 netmask 255.255.255.0; route table has the SLIRP default 10.0.2.2) |
+| end-to-end SSH on Hurd (host -> guest interactive session) | downstream surface, no new slot; depends on remount-rw + native-comp opt-out + static eth0 + the v0.9.11 supervisor + the v0.9.11 `/run/sshd` privsep chroot fix.  no GEOS-side code beyond what the previous rows shipped; this row exists to anchor the load-bearing release claim | **YES (v0.9.12)** on 2026-05-22 (host runs `ssh -p 2266 root@127.0.0.1 'uname -a'` and gets back `GNU geos-hurd 0.9 GNU-Mach 1.8+git20260224/Hurd-0.9 i686-AT386 GNU`; banner string `SSH-2.0-OpenSSH_10.2p1 Debian-5` on `nc 127.0.0.1 2266`; full interactive session opens and closes cleanly; supervisor stays up; runlog `docs/runlogs/2026-05-22-hurd-end-to-end-ssh.md`) |
 
 The 2026-05-17 verification pass ran `docs/HURD_BOOT.md` steps 1-3
 end-to-end on a fresh Debian GNU/Hurd 2026-03 snapshot VM.  the
