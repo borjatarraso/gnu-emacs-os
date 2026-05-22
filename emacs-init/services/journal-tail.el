@@ -181,6 +181,39 @@ still come up regardless."
 ;; kernel predicate.
 (journal-tail--prime-from-dmesg)
 
+;; v0.9.13 follow-on: pre-create /var/log/kern.log on Hurd so the
+;; supervised `tail -F --lines=+1` does not race syslogd's first
+;; write.  the race window matters: hurd-syslogd is a sibling
+;; service in hurd-essentials.el, the supervisor brings both up in
+;; one autostart pass, and tail spawning before syslogd's first
+;; kern.log write was burning the on-crash respawn cap during VM
+;; verify.  GNU coreutils `tail -F` is supposed to retry-on-missing
+;; via --retry, but combined with `--lines=+1` (which wants to read
+;; from byte 1) the early-window behaviour is fragile; creating a
+;; zero-byte file makes the contract trivial.
+;;
+;; pure elisp, no shell-out: write-region of "" to the path with
+;; nomsg + a no-fsync inhibit so this stays cheap during boot.
+;; best-effort: any error routes through panic-handle and the
+;; supervisor still spawns tail (where it may then crashloop until
+;; syslogd creates the file the hard way, which is the same failure
+;; mode as today).
+(defun journal-tail--ensure-kern-log-hurd ()
+  "Touch /var/log/kern.log on Hurd if it does not exist.
+No-op on Linux (the kmsg path does not need this), no-op on Hurd
+if the file already exists from a previous syslogd run.  Returns
+non-nil on success or no-op; nil and panic-handle on failure."
+  (when (and (not (geos-kernel-linux-p))
+             (not (file-exists-p "/var/log/kern.log")))
+    (condition-case err
+        (let ((write-region-inhibit-fsync t))
+          (write-region "" nil "/var/log/kern.log" 'append 'nomsg)
+          t)
+      (error (panic-handle err 'journal-tail--ensure-kern-log-hurd)
+             nil))))
+
+(journal-tail--ensure-kern-log-hurd)
+
 ;; the `dd' we spawn on linux here is the same coreutils binary the
 ;; lazy in-buffer follower used.  bs=8192 is generous for kmsg
 ;; (records are typically << 1 KiB), status=none silences the
