@@ -32,6 +32,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -40,7 +41,42 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/random.h>
+#ifdef PORT_HURD
+/* Hurd has no <sys/mount.h>: mount() is not a Hurd syscall (translators
+ * replace the role of mount in the file-system namespace).  the MS_*
+ * flag literals are still constructed at call sites in emacs-init.c
+ * and dispatched through port->mount(); port_hurd.c's mount slot
+ * ignores most flag bits because translator semantics map differently.
+ * we define the same numeric values Linux uses so the bits on the wire
+ * keep their meaning across backends, even though the Hurd backend
+ * does not act on them today. */
+#define MS_RDONLY  1
+#define MS_NOSUID  2
+#define MS_NODEV   4
+#define MS_NOEXEC  8
+#define MS_REMOUNT 32
+#else
+#include <sys/mount.h>
+#endif
+#include <sys/reboot.h>
+#ifdef PORT_HURD
+/* Hurd's <sys/reboot.h> defines RB_AUTOBOOT (0), RB_HALT, RB_SINGLE,
+ * RB_KDB, RB_DEBUGGER, but not RB_POWER_OFF.  pid1's Fpid1_reboot /
+ * Fpid1_poweroff dispatch the command word through port->reboot(),
+ * which on Hurd is the host_reboot Mach RPC: port_hurd_impl translates
+ * our command word into the appropriate Mach reboot command, so the
+ * literal values here only need to be distinguishable bit patterns.
+ * the Linux RB_AUTOBOOT macro is a magic 0x01234567 and RB_POWER_OFF
+ * is 0x4321fedc; we use the same so the wire shape stays identical
+ * across kernels and a future tcpdump-style debug dump would not
+ * look different on Hurd. */
+#ifndef RB_AUTOBOOT
+#define RB_AUTOBOOT  0x01234567
+#endif
+#ifndef RB_POWER_OFF
+#define RB_POWER_OFF 0x4321fedc
+#endif
+#endif
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -49,52 +85,17 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Linux-kernel headers carry constants and types we pass through to
- * port->mount / port->reboot / Fpid1_set_address.  on Hurd these
- * headers do not exist (and net/route.h pulls in linux/if.h
- * transitively via glibc on the Linux path).  the Hurd build path
- * gets fallback definitions just below; the Linux backend ignores
- * them in favour of the real kernel headers. */
-#ifndef PORT_HURD
-#include <linux/if.h>
-#include <net/route.h>
-#include <sys/mount.h>
-#include <sys/reboot.h>
-#else
-/* Hurd compat shims.  these constants leak from Linux into emacs-init.c
- * because the same source compiles for both kernels; the Hurd port
- * backend (port_hurd.c) accepts the flag word and translates it (or
- * ignores it, in the case of mount flags that have no Hurd analogue).
- * the values are intentionally Linux-compatible so a port_hurd.c that
- * grows more semantics later can keep the wire-level ABI identical. */
-#ifndef IFNAMSIZ
-#define IFNAMSIZ 16
-#endif
-#ifndef MS_NOSUID
-#define MS_NOSUID  2
-#endif
-#ifndef MS_NODEV
-#define MS_NODEV   4
-#endif
-#ifndef MS_NOEXEC
-#define MS_NOEXEC  8
-#endif
-#ifndef RB_AUTOBOOT
-#define RB_AUTOBOOT  0x01234567
-#endif
-#ifndef RB_POWER_OFF
-#define RB_POWER_OFF 0x4321fedc
-#endif
-/* glibc on Hurd intentionally leaves PATH_MAX undefined (the Hurd
- * has no max path length).  pid1 still needs a finite stack buffer
- * size for its few path manipulations; 4096 matches Linux's value
- * and is enough for /run/current-system and /etc/hostname. */
+#include "port_layer.h"
+
+/* Hurd's libc deliberately does not define PATH_MAX: Hurd paths are
+ * unbounded, so any bound would be a lie.  Linux defines it via
+ * <linux/limits.h> (4096).  the call sites in this file all bound-
+ * check the result against PATH_MAX, so a synthetic 4096 here keeps
+ * the bound honest on Hurd too: a path longer than that gets the
+ * same "path too long" rejection it would on Linux. */
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
-#endif
-
-#include "port_layer.h"
 
 #ifdef PID1_MODULE
 #include <crypt.h>
@@ -1206,6 +1207,197 @@ spawn_emacs(void)
     return pid;
 }
 
+/* args-file fallback for kernels that do not give pid1 a useful argv.
+ *
+ * contract:
+ *   - only called when the kernel did not hand us a usable argv[1]
+ *     (no absolute path in slot 1, i.e. either /hurd/startup gave us
+ *     argc==1 or a sysvinit runlevel token).  when the kernel did
+ *     give us a usable chain (Linux/Guix passes argc >= 5 with
+ *     absolute store paths), this function is never reached.
+ *   - reads /etc/geos/init.args (path passed as PATH for testability).
+ *     file format: newline-delimited args, one per line, no quoting.
+ *     blank lines and lines starting with '#' are comments.  the first
+ *     non-comment line maps to argv[1] (emacs path), the second to
+ *     argv[2] (module path), the third to argv[3] (xorg spec), the
+ *     fourth onward becomes the extra_argv chain.
+ *   - slurps into a static buffer (BUF_BYTES, 8 KiB).  no malloc on
+ *     this path, per the project-wide "no malloc in pid1 hot paths"
+ *     invariant in the pid1 dir notes.
+ *   - populates the caller-supplied OUT_ARGV[OUT_CAP] with pointers
+ *     into the static buffer.  OUT_ARGV[0] is initialized to a
+ *     placeholder string up-front (BEFORE any failure check) so a
+ *     caller that mistakenly reads it after a -1 return gets a
+ *     well-formed string instead of garbage; correct callers always
+ *     overwrite slot 0 with the real argv[0] before exec().  *OUT_ARGC
+ *     receives the number of slots populated INCLUDING slot 0, i.e.
+ *     it has the same meaning as the kernel's argc.
+ *   - returns 0 on success (any number of args >= 1 parsed), -1 on
+ *     "fall through to the existing no-args path".
+ *
+ * failure modes (all log one console() line with a "pid1: init.args "
+ * prefix and a strerror() suffix where applicable, then return -1):
+ *   - open() ENOENT: silent fall-through.  no init.args means the
+ *     kernel argv path applies.  this is the Linux production case:
+ *     /etc/geos/init.args does not exist, the open() ENOENTs, we
+ *     return -1, and main() never touches synth_argv.
+ *   - open() other errno: logged with strerror, fall through.
+ *     (this includes ELOOP from O_NOFOLLOW when init.args is a
+ *     symlink: we refuse symlinks because a PID 1 boot file from /etc
+ *     should be a real root-owned regular file, not a hop into some
+ *     other directory an attacker may have written to.)
+ *   - fstat() non-regular or non-root-owned: logged "refusing", fall
+ *     through.  the installer must write init.args as root (uid 0,
+ *     mode 0644 is fine); an installer running as a non-root user
+ *     will not satisfy this check and the boot will silently use the
+ *     default argv instead.
+ *   - read() error or short read: logged, fall through.
+ *   - file empty (no non-comment lines): logged, fall through.
+ *   - file larger than BUF_BYTES: logged "too large" and we fall through.
+ *     8 KiB is the largest a sane args file should ever be; hitting
+ *     the cap means something is wrong upstream and silently parsing
+ *     a truncated buffer could exec a half-line path.
+ *   - more than OUT_CAP-1 args: logged "capping" and we keep the
+ *     first OUT_CAP-1 entries.
+ *
+ * the function MUST be safe to call before /dev/console redirection
+ * happens: console() opens fresh each time. */
+static char init_args_buf[8192];
+static int
+parse_init_args(const char *path, char **out_argv, int out_cap, int *out_argc)
+{
+    if (!path || !out_argv || out_cap < 2 || !out_argc) return -1;
+    out_argv[0] = (char *)"emacs-init";
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        /* ENOENT is the Linux production path: file just is not there,
+         * say nothing.  any other errno gets logged so a bad mode bit
+         * (or a symlink, which O_NOFOLLOW will refuse with ELOOP) on
+         * the file shows up in the boot log instead of being lost. */
+        if (errno == ENOENT) return -1;
+        int saved = errno;
+        char msg[256];
+        (void)snprintf(msg, sizeof msg,
+                       "pid1: init.args open failed (%s): %s",
+                       strerror(saved), path);
+        console(msg);
+        return -1;
+    }
+    {
+        struct stat st;
+        if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0) {
+            console("pid1: init.args is not a root-owned regular file, refusing");
+            (void)close(fd);
+            return -1;
+        }
+    }
+
+    /* read up to sizeof - 1 so we can always NUL-terminate.  loop the
+     * read because short reads from a regular file are rare but legal
+     * (interrupted by a signal, etc) and 1am-debugging me would rather
+     * have one robust loop than a single read() that "almost always
+     * works". */
+    size_t have = 0;
+    int truncated = 0;
+    for (;;) {
+        if (have >= sizeof init_args_buf - 1) {
+            /* buffer full.  drain the rest of the file to see if there
+             * was more; if so, log truncation.  this matters because a
+             * silently-truncated boot chain is the kind of bug that
+             * eats a whole afternoon. */
+            char drain[256];
+            ssize_t d = read(fd, drain, sizeof drain);
+            if (d > 0) truncated = 1;
+            if (d <= 0) break;
+            continue;
+        }
+        ssize_t n = read(fd, init_args_buf + have,
+                         sizeof init_args_buf - 1 - have);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            int saved = errno;
+            char msg[256];
+            (void)snprintf(msg, sizeof msg,
+                           "pid1: init.args read failed (%s): %s",
+                           strerror(saved), path);
+            console(msg);
+            (void)close(fd);
+            return -1;
+        }
+        if (n == 0) break;
+        have += (size_t)n;
+    }
+    (void)close(fd);
+
+    if (truncated) {
+        char msg[160];
+        (void)snprintf(msg, sizeof msg,
+                       "pid1: init.args too large (> %zu bytes), "
+                       "falling through to default argv",
+                       sizeof init_args_buf - 1);
+        console(msg);
+        return -1;
+    }
+
+    if (have == 0) {
+        console("pid1: init.args is empty, falling through");
+        return -1;
+    }
+    init_args_buf[have] = '\0';
+
+    /* walk the buffer.  NUL-terminate every line in place by replacing
+     * '\n' with '\0'.  slot 0 is reserved for argv[0] (caller fills it),
+     * so we start writing at slot 1.  cap at out_cap - 1 user args. */
+    int ai = 1;
+    int capped = 0;
+    int orig_count = 0;
+    char *line = init_args_buf;
+    while (line && *line) {
+        char *end = strchr(line, '\n');
+        if (end) *end = '\0';
+        /* trim a trailing CR so init.args files edited on a Windows
+         * host do not silently corrupt the first emacs_path lookup
+         * with a stray byte. */
+        size_t llen = strlen(line);
+        if (llen > 0 && line[llen - 1] == '\r') {
+            line[llen - 1] = '\0';
+            llen--;
+        }
+        /* skip blank and comment lines (no incrementing of ai). */
+        if (llen == 0 || line[0] == '#') {
+            line = end ? end + 1 : NULL;
+            continue;
+        }
+        orig_count++;
+        if (ai < out_cap) {
+            out_argv[ai++] = line;
+        } else {
+            capped = 1;
+            /* do not break; we want to count the overflow so the log
+             * line can name a real number. */
+        }
+        line = end ? end + 1 : NULL;
+    }
+
+    if (capped) {
+        char msg[160];
+        (void)snprintf(msg, sizeof msg,
+                       "pid1: init.args has %d args, capping at %d",
+                       orig_count, out_cap - 1);
+        console(msg);
+    }
+
+    if (ai <= 1) {
+        /* nothing parseable.  every line was blank or a comment. */
+        console("pid1: init.args has no non-comment lines, falling through");
+        return -1;
+    }
+
+    *out_argc = ai;
+    return 0;
+}
+
 /* split a colon-joined "Xorg:XKB:MOD:FONT:CONF" string in place. mutates
  * the buffer by writing NULs in place of ':' and stashes the start of
  * each field into the corresponding global. invariant: empty fields
@@ -1343,11 +1535,11 @@ main(int argc, char **argv)
      *
      * the PORT_HURD compile-time switch comes from the Makefile when
      * the operator runs `make PORT=hurd`.  Linux builds (the default,
-     * and the main branch) keep the existing `port_linux_impl`
-     * assignment; the Hurd side branch's pid1 picks `port_hurd_impl`
-     * by way of -DPORT_HURD on the cc line.  no runtime branch, no
-     * env lookup: the choice is baked at compile time and the binary
-     * carries exactly one backend. */
+     * and the main branch) keep the existing port_linux_impl symbol;
+     * the Hurd build (-DPORT_HURD set by the PORT block in pid1/Makefile)
+     * picks port_hurd_impl which port_hurd.c on the hurd branch
+     * defines.  no runtime branch, no env lookup: the choice is baked
+     * at compile time and the binary carries exactly one backend. */
 #ifdef PORT_HURD
     port = &port_hurd_impl;
 #else
@@ -1399,6 +1591,39 @@ main(int argc, char **argv)
      * otherwise land "1" / "3" in those slots.  caught on the
      * 2026-05-18 second boot, see
      * docs/runlogs/2026-05-18-hurd-pid1-boot-result.md. */
+
+    /* v0.9.11 args-file fallback for Hurd: when argv[1] is not an
+     * absolute path we treat that as "no boot chain" (this is what
+     * /hurd/startup hands us: argc==1, or a sysvinit runlevel token
+     * like "6" in argv[1]).  if the installer dropped
+     * /etc/geos/init.args we slurp it and synthesize an argv that the
+     * splice block below treats normally.  on Linux the file does not
+     * exist, parse_init_args ENOENTs silently, and the splice block
+     * runs against the original argv unchanged.  a partial-but-
+     * absolute kernel argv (e.g. argc==3 with a real store path in
+     * argv[1]) is still more authoritative than the file and is left
+     * alone.
+     *
+     * synth_argv is sized 1 (argv[0]) + 131 file lines = 132 slots.
+     * synth_argv[0] is the original argv[0] so /proc/self/cmdline and
+     * any future argv[0]-keyed code path keeps working.  the static
+     * lifetime is fine: main() never returns.  no malloc on this hot
+     * path, per the project-wide pid1 invariant. */
+    static char *synth_argv[132];
+    if (argc < 2 || !argv[1] || argv[1][0] != '/') {
+        int synth_argc = 0;
+        if (parse_init_args("/etc/geos/init.args",
+                            synth_argv,
+                            (int)(sizeof synth_argv / sizeof synth_argv[0]),
+                            &synth_argc) == 0) {
+            synth_argv[0] = (argc > 0 && argv && argv[0])
+                ? argv[0]
+                : (char *)"emacs-init";
+            argv = synth_argv;
+            argc = synth_argc;
+        }
+    }
+
     if (argc > 1 && argv[1] && argv[1][0] == '/') {
         emacs_path = argv[1];
     } else if (argc > 1 && argv[1] && argv[1][0] != '\0') {
@@ -1426,8 +1651,11 @@ main(int argc, char **argv)
         }
     }
     if (argc > 3 && argv[3] && argv[3][0] == '/') {
-        /* parse_xorg_spec mutates argv[3] in place. argv lives in the
-         * kernel-supplied region so this is fine, no copy needed. */
+        /* parse_xorg_spec mutates argv[3] in place. argv[3] points
+         * into either the kernel-supplied region or init_args_buf
+         * (when the v0.9.11 synth_argv path fired); both are
+         * writable for the lifetime of pid1, so the in-place mutate
+         * is safe either way. */
         if (parse_xorg_spec(argv[3]) == 0) {
             /* DISPLAY=:0 is fixed: spawn_xorg always launches :0. */
             display_env = "DISPLAY=:0";
@@ -1484,6 +1712,37 @@ main(int argc, char **argv)
     do_mount("tmpfs",    "/tmp",     "tmpfs",    MS_NOSUID|MS_NODEV,            NULL);
 #ifndef PORT_HURD
     do_mount("devpts",   "/dev/pts", "devpts",   MS_NOSUID|MS_NOEXEC,           "gid=5,mode=0620");
+#endif
+
+#ifdef PORT_HURD
+    /* post-mount runtime-dir creation block.  this is where we put
+     * back the Debian-postinst state that lived under /run on the
+     * underlying ext2 and got occluded by the tmpfs mount above.
+     * one entry today (sshd's privsep chroot); v0.9.12 will refactor
+     * this into a table driven by an /etc/geos/tmpfiles.d-equivalent
+     * once we have a second consumer (see task #168 in the runlog).
+     *
+     * /run/sshd, 0755 root:root, is openssh-server's privsep empty
+     * chroot.  OpenSSH 10.x sshd-session calls chroot("/run/sshd") as
+     * the very first step of its preauth sandbox, and a missing dir
+     * fatals the child before the SSH banner ever goes out (caught
+     * 2026-05-21 by v0.9.11 VM-verify round 6, auth.log "fatal:
+     * chroot(...): No such file or directory [preauth]" on every
+     * connection).  doing the mkdir here in C means it lands
+     * deterministically before emacs even starts and we do not have
+     * to litigate an elisp-side make-directory race against Hurd's
+     * tmpfs translator (round 7 tried that and still failed).  EEXIST
+     * is fine (idempotent on dev-loop re-runs), anything else just
+     * logs and continues because pid1 not booting over one sshd-only
+     * chroot dir is the wrong shape of failure. */
+    if (mkdir("/run/sshd", 0755) < 0 && errno != EEXIST) {
+        char buf[128];
+        snprintf(buf, sizeof buf,
+                 "pid1: mkdir /run/sshd failed: %s", strerror(errno));
+        console(buf);
+    } else {
+        console("pid1: /run/sshd 0755 ready (openssh privsep chroot)");
+    }
 #endif
 
     /* /var hosts the elisp state directory (see core/state.el). do this
@@ -3762,10 +4021,10 @@ emacs_module_init(struct emacs_runtime *ert)
      * once here, and port_require_or_abort() turns a missed
      * assignment into an abort at module-load time rather than a
      * NULL-deref crash on the first pid1-* call from elisp (B2,
-     * skeptic review 2026-05-12).  PORT_HURD is set on the cc line by
-     * `make PORT=hurd module`; the Linux module build (default and
-     * the main branch) sees neither the #ifdef true-arm nor the Hurd
-     * symbol. */
+     * skeptic review 2026-05-12).  PORT_HURD is set on the cc line
+     * by `make PORT=hurd module`; the Linux module build (default,
+     * and the main branch) sees neither the #ifdef true-arm nor the
+     * Hurd symbol. */
 #ifdef PORT_HURD
     port = &port_hurd_impl;
 #else

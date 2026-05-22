@@ -380,4 +380,14 @@ void port_require_or_abort(void);
 /* the Linux backend instance.  defined in port_linux.c. */
 extern const port_caps port_linux_impl;
 
+/* the Hurd backend instance.  defined in port_hurd.c on the side
+ * branch.  the conditional extern means the Linux build never names
+ * the symbol (so the static link does not need port_hurd.c on the
+ * command line); the Hurd build (cc -DPORT_HURD) sees the declaration
+ * and resolves it against the port_hurd.boot.o that PORT=hurd links
+ * in place of port_linux.boot.o. */
+#ifdef PORT_HURD
+extern const port_caps port_hurd_impl;
+#endif
+
 #endif /* GEOS_PID1_PORT_LAYER_H */
