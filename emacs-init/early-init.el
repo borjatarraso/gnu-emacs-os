@@ -31,7 +31,29 @@
 ;; still work via defvaralias but emit obsolescence warnings).
 (when (equal (getenv "GEOS_KERNEL") "hurd")
   (setq native-comp-jit-compilation nil)
-  (setq native-comp-enable-subr-trampolines nil))
+  (setq native-comp-enable-subr-trampolines nil)
+  ;; v0.9.13 slice 3: extend exec-path so make-process can resolve
+  ;; coreutils on Debian GNU/Hurd 0.9.  pid1 inherits a Guix-shaped
+  ;; PATH (/run/current-system/profile/{bin,sbin}); on a Debian Hurd
+  ;; host the real binaries live under /usr/bin and /sbin instead.
+  ;; supervise.el's `make-process' for `tail' (journal-kmsg source
+  ;; in services/journal-tail.el) resolves :command via exec-path
+  ;; before fork; without this fix the lookup returned nil and the
+  ;; spawn failed with file-missing "Searching for program".  use
+  ;; append so any future Guix-on-Hurd image where the profile path
+  ;; is real keeps its precedence.  also mirror into PATH so any
+  ;; child that re-execs (eshell -c, settrans's own children) sees
+  ;; the same shape.
+  (let ((extra '("/usr/bin" "/usr/sbin" "/bin" "/sbin")))
+    (dolist (d extra)
+      (unless (member d exec-path)
+        (setq exec-path (append exec-path (list d)))))
+    (let* ((cur (or (getenv "PATH") ""))
+           (parts (split-string cur ":" t))
+           (missing (seq-remove (lambda (d) (member d parts)) extra)))
+      (when missing
+        (setenv "PATH" (mapconcat #'identity
+                                  (append parts missing) ":"))))))
 
 ;; the C emacs-init forks emacs as a child, so emacs's pid is not 1
 ;; even when we are the supervised userland. the right signal that we
