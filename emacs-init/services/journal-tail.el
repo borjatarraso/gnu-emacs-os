@@ -194,6 +194,13 @@ still come up regardless."
 ;;
 ;; pure elisp, no shell-out: write-region of "" to the path with
 ;; nomsg + a no-fsync inhibit so this stays cheap during boot.
+;; we also `make-directory' the parent first because pid1 mounts a
+;; fresh tmpfs over `/var' on Hurd boot (see `pid1: /var on tmpfs'
+;; breadcrumb) so the on-disk `/var/log' is masked and the directory
+;; doesn't exist on the live FS.  this was the actual failure mode
+;; observed in the v0.9.13 slice-1 VM-verify (file-missing on
+;; write-region, routed through panic-handle, touch never happened).
+;;
 ;; best-effort: any error routes through panic-handle and the
 ;; supervisor still spawns tail (where it may then crashloop until
 ;; syslogd creates the file the hard way, which is the same failure
@@ -201,12 +208,16 @@ still come up regardless."
 (defun journal-tail--ensure-kern-log-hurd ()
   "Touch /var/log/kern.log on Hurd if it does not exist.
 No-op on Linux (the kmsg path does not need this), no-op on Hurd
-if the file already exists from a previous syslogd run.  Returns
-non-nil on success or no-op; nil and panic-handle on failure."
+if the file already exists from a previous syslogd run.  Ensures
+/var/log exists first because pid1 tmpfs-mounts /var on Hurd
+boot and the directory may be absent on the live FS.  Returns
+non-nil only when we actually created the file; the no-op paths
+and the panic-handle error path both return nil."
   (when (and (not (geos-kernel-linux-p))
              (not (file-exists-p "/var/log/kern.log")))
     (condition-case err
         (let ((write-region-inhibit-fsync t))
+          (make-directory "/var/log" t)
           (write-region "" nil "/var/log/kern.log" 'append 'nomsg)
           t)
       (error (panic-handle err 'journal-tail--ensure-kern-log-hurd)
