@@ -60,6 +60,26 @@ The single source of truth for what is supervised.  defservice and
 supervise-register populate it; the sentinel mutates the runtime
 slots; supervise--persist serialises it under /var/emacs/services/.")
 
+;; v0.9.12 slice 9 diagnostic helper.  the supervisor wraps every
+;; make-process / sentinel transition in panic-handle, which lands in
+;; the in-memory *panic* buffer.  that buffer is invisible to an
+;; operator who only has the serial console (the dhclient autostart
+;; failure from slice 8 VM-verify was the canonical example: registry
+;; said 4 entries, sshd + syslogd spawned, dhclient just did not, and
+;; nothing on /dev/console said why).  mirror every interesting
+;; transition to /dev/console here too, wrapped in condition-case so a
+;; permission-denied or device-missing failure cannot abort the
+;; supervisor.  on a dev host /dev/console writes usually need root and
+;; the EACCES is swallowed; on the booted OS image we are pid1's child
+;; and the writes land in the serial log.
+(defun supervise--console (fmt &rest args)
+  "Append FMT/ARGS to /dev/console as one line.  swallow all errors."
+  (condition-case _
+      (let ((write-region-inhibit-fsync t))
+        (write-region (apply #'format (concat fmt "\n") args)
+                      nil "/dev/console" 'append 'nomsg))
+    (error nil)))
+
 (defconst supervise-respawn-window-sec 60
   "Rolling window (seconds) over which `supervise-respawn-cap' applies.
 Mirrors XORG_RESPAWN_WINDOW_SEC in pid1/emacs-init.c so a service
@@ -258,6 +278,12 @@ PROC's plist carries :supervise-service back to us via process-get."
              (sig  (process-status proc))
              (prior-status (supervise-service-status svc))
              (user-stopped (memq prior-status '(stopped held))))
+        ;; slice 9 breadcrumb: every exit transition lands on /dev/console
+        ;; so the operator can see WHY a service died without attaching
+        ;; emacsclient to peek at the *panic* buffer.
+        (supervise--console
+         "supervise: sentinel name=%s status=%S code=%S prior=%S"
+         (supervise-service-name svc) sig code prior-status)
         (setf (supervise-service-last-exit svc)
               (if (eq sig 'signal) (cons 'signal code) code))
         (setf (supervise-service-pid svc) nil)
@@ -312,8 +338,13 @@ command shape; returns nil in that case so the caller can short."
   (let* ((name (symbol-name (supervise-service-name svc)))
          (cmd (supervise-service-command svc))
          (env-extra (supervise-service-env svc)))
+    ;; slice 9 breadcrumb: log the spawn attempt BEFORE make-process so
+    ;; the operator can tell a service that never tried to spawn
+    ;; (autostart never reached it) from one that tried and failed.
+    (supervise--console "supervise: spawn name=%s cmd=%S" name cmd)
     (cond
      ((not (and (listp cmd) (stringp (car cmd))))
+      (supervise--console "supervise: spawn name=%s BAD-COMMAND %S" name cmd)
       (panic-handle (list 'supervise--spawn-bad-command cmd) name)
       nil)
      (t
@@ -349,13 +380,28 @@ command shape; returns nil in that case so the caller can short."
         (when buf (setq proc-args (append proc-args (list :buffer buf))))
         (when filter-fn
           (setq proc-args (append proc-args (list :filter filter-fn))))
-        (let ((proc (apply #'make-process proc-args)))
-          (process-put proc :supervise-service svc)
-          (setf (supervise-service-process svc) proc)
-          (setf (supervise-service-pid svc) (process-id proc))
-          (setf (supervise-service-started-at svc) (current-time))
-          (setf (supervise-service-status svc) 'running)
-          proc))))))
+        (condition-case err
+            (let ((proc (apply #'make-process proc-args)))
+              (process-put proc :supervise-service svc)
+              (setf (supervise-service-process svc) proc)
+              (setf (supervise-service-pid svc) (process-id proc))
+              (setf (supervise-service-started-at svc) (current-time))
+              (setf (supervise-service-status svc) 'running)
+              ;; slice 9 breadcrumb: the spawn worked; record pid so a
+              ;; later "no log activity" complaint can be correlated
+              ;; against ps output.
+              (supervise--console "supervise: spawn name=%s pid=%S OK"
+                                  name (process-id proc))
+              proc)
+          (error
+           ;; slice 9 breadcrumb: make-process raised.  before this
+           ;; slice the error went straight to panic-handle and the
+           ;; operator saw nothing on /dev/console.  now we surface the
+           ;; error text first, then re-signal so the outer
+           ;; condition-case in supervise-start / supervise--sentinel
+           ;; can still route to panic-handle.
+           (supervise--console "supervise: spawn name=%s FAILED %S" name err)
+           (signal (car err) (cdr err)))))))))
 
 ;; --------------------------------------------------------------------
 ;; commands
@@ -445,11 +491,19 @@ hook AFTER all defservice forms have evaluated and after
 the persisted registry stay held until an operator resumes them."
   (maphash
    (lambda (name svc)
-     (unless (eq (supervise-service-status svc) 'held)
+     (cond
+      ((eq (supervise-service-status svc) 'held)
+       ;; slice 9 breadcrumb: a held service silently NOT starting at
+       ;; boot is the same operator-confusion failure mode as a service
+       ;; that fails to spawn.  log the skip so it is visible.
+       (supervise--console "supervise: autostart name=%s SKIP held" name))
+      (t
+       (supervise--console "supervise: autostart name=%s" name)
        (condition-case err
            (supervise-start name)
          (error
-          (panic-handle err (cons 'supervise-autostart name))))))
+          (supervise--console "supervise: autostart name=%s ERROR %S" name err)
+          (panic-handle err (cons 'supervise-autostart name)))))))
    supervise--registry))
 
 ;; --------------------------------------------------------------------
@@ -473,13 +527,8 @@ call honest.  do not loop on this."
       (error (panic-handle err 'supervise-finalize-restore)))
     (condition-case err (supervise-autostart)
       (error (panic-handle err 'supervise-finalize-autostart)))
-    (let ((write-region-inhibit-fsync t))
-      (condition-case _
-          (write-region
-           (format "supervise: registry loaded %d entries\n"
-                   (hash-table-count supervise--registry))
-           nil "/dev/console" 'append 'nomsg)
-        (error nil)))))
+    (supervise--console "supervise: registry loaded %d entries"
+                        (hash-table-count supervise--registry))))
 
 (provide 'supervise)
 ;;; supervise.el ends here
