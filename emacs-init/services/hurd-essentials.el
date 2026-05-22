@@ -34,7 +34,25 @@
 (require 'supervise)
 (require 'port)
 
+;; v0.9.12 slice 5 diagnostic.  /dev/console writes (not just messages)
+;; so the breadcrumb survives into the serial log even when *Messages*
+;; is invisible.  the file-load breadcrumb is unconditional; the gate-
+;; passed breadcrumb fires only when geos-kernel is 'hurd.  writes are
+;; wrapped in condition-case so a write failure cannot abort the load.
+(condition-case _
+    (let ((write-region-inhibit-fsync t))
+      (write-region
+       (format "hurd-essentials: file loaded, geos-kernel=%S\n" geos-kernel)
+       nil "/dev/console" 'append 'nomsg))
+  (error nil))
+
 (when (eq geos-kernel 'hurd)
+  (condition-case _
+      (let ((write-region-inhibit-fsync t))
+        (write-region
+         "hurd-essentials: geos-kernel=hurd gate passed, registering services\n"
+         nil "/dev/console" 'append 'nomsg))
+    (error nil))
 
   ;; sshd's /run/sshd privsep chroot dir is recreated by pid1
   ;; (emacs-init.c, after the /run tmpfs mount, #ifdef PORT_HURD).
@@ -76,7 +94,14 @@
     :restart always
     :autostart t
     :buffer " *supervise:hurd-syslogd*"
-    :env nil))
+    :env nil)
+
+  (condition-case _
+      (let ((write-region-inhibit-fsync t))
+        (write-region
+         "hurd-essentials: defservice hurd-sshd + hurd-syslogd registered\n"
+         nil "/dev/console" 'append 'nomsg))
+    (error nil)))
 
 (provide 'hurd-essentials)
 ;;; hurd-essentials.el ends here
