@@ -121,6 +121,65 @@ unconditionally.  There is no `argv[1]=path-to-init` hook.
 So the install path is: **replace /sbin/init in place**, after
 keeping a backup the maintenance shell can fall back to.
 
+### v0.9.11 install workflow (recommended)
+
+As of v0.9.11 the install is one script.  Prerequisite is a fresh
+Debian GNU/Hurd 0.9 image with a working network and root login.
+Get an apt mirror reachable first, then:
+
+```
+# inside the Hurd VM, as root
+apt install ssh inetutils-syslogd
+# optional, only if you want EXWM under Xvfb (v0.9.10 path):
+apt install xvfb emacs-lucid elpa-exwm elpa-xelb
+```
+
+sshd + inetutils-syslogd are not optional: the `hurd-essentials`
+supervisor expects both binaries to exist on disk, and v0.9.6's
+journal-kmsg source on Hurd tails `/var/log/kern.log` which only
+grows because syslogd is draining `/dev/klog` into it.
+
+Copy the GEOS source tree to the target under `/usr/local/src/geos/`
+(rsync, scp, git clone, whatever fits your workflow), then build
+pid1 and the dynamic module on the target itself:
+
+```
+cd /usr/local/src/geos/pid1
+make PORT=hurd STATIC=0
+make pid1-module.so PORT=hurd STATIC=0
+```
+
+`STATIC=0` is required on Debian Hurd; see Step 3 above for the
+reason.  If you are unsure which targets the Makefile actually
+exposes, read `pid1/Makefile`; the PORT=hurd branch is the source
+of truth.
+
+Then run the bootstrap:
+
+```
+/usr/local/src/geos/install/hurd-bootstrap.sh
+```
+
+The script is idempotent.  It refuses to run unless `uname` says
+`GNU` and euid is 0, backs up `/sbin/init` to
+`/sbin/init.debian-stock` (only on the first run, never overwrites
+itself on re-runs), copies the freshly-built pid1 binary into
+`/sbin/init`, stages the elisp tree under
+`/usr/share/geos/emacs-init/`, drops the dynamic module at
+`/usr/lib/geos/pid1-module.so`, and writes the boot chain to
+`/etc/geos/init.args`.  Reboot and the next boot lands in Emacs
+PID 1 mode.
+
+Rollback path: boot into the GRUB rescue / maintenance shell, then
+`mv /sbin/init.debian-stock /sbin/init`.  Reboot once more and you
+are back on stock Debian sysvinit.
+
+### legacy manual install (pre-v0.9.11)
+
+The hand-rolled version of the same steps, kept here because it
+documents what the bootstrap script does under the hood and is
+sometimes useful when debugging a half-bricked image.
+
 ```
 # inside the Hurd VM, as root
 cp /sbin/init /sbin/init.debian-orig
@@ -130,6 +189,44 @@ mkdir -p /etc /var/log /run
 echo "geos-hurd" > /etc/hostname
 sync
 ```
+
+### /etc/geos/init.args file format
+
+pid1 reads `/etc/geos/init.args` only when `argv[1]` is not an
+absolute path.  That is the Hurd case: `/hurd/startup` execs
+`/sbin/init` with `argc==1` (or with a sysvinit-style runlevel
+token like `"6"` in `argv[1]`, which is also not absolute).  On
+Linux the Guix gexp passes an absolute store path in `argv[1]`
+(`/gnu/store/.../emacs`), so the file is never opened.
+
+The file is one argv slot per line.  `#` lines and blank lines are
+stripped.  pid1 walks the file in order: slot 1 is the emacs
+binary, slot 2 is the pid1 dynamic module, slot 3 is the Xorg spec
+(empty path field disables X spawn on Hurd), slot 4+ are forwarded
+into emacs's own argv as the `-l` chain.  Example (trimmed from
+what `hurd-bootstrap.sh` writes; see the script for the full
+canonical load order):
+
+```
+# /etc/geos/init.args -- v0.9.11 Hurd boot chain
+/usr/bin/emacs
+/usr/lib/geos/pid1-module.so
+:
+-Q
+-l
+/usr/share/geos/emacs-init/early-init.el
+-l
+/usr/share/geos/emacs-init/core/panic.el
+```
+
+The file must be a root-owned regular file.  pid1 opens it with
+`O_NOFOLLOW` and rejects symlinks; an `fstat` after open confirms
+`S_ISREG` and `st_uid == 0` before any line is parsed.  Failure
+modes (open errno, non-regular, non-root, short read, empty file,
+file larger than 8 KiB, more args than the slot cap) all fall
+through to the default argv and log a one-line diagnostic to
+`/dev/console`.  See the `parse_init_args` docstring at
+`pid1/emacs-init.c` for the full contract.
 
 Then reboot the VM **cleanly** from inside Hurd (`shutdown -r
 now`).  Do NOT use QEMU's `system_reset` monitor command for the

@@ -10,6 +10,13 @@ side branch. As of v0.8 (2026-05-18) both the single-user PID-1
 boot and the multi-user peer-cred dance are verified end-to-end on
 a canonical Debian GNU/Hurd 0.9 VM; the elisp dispatch arms for
 the kernel-aware userland buffers are the open work for v0.9.
+v0.9.11 (2026-05-21) closes the last two end-to-end install-side
+gaps: the `/etc/geos/init.args` fallback so pid1 boots under
+`/hurd/startup`'s argc==1 contract, and the
+`emacs-init/services/hurd-essentials.el` supervisor that respawns
+sshd and inetutils-syslogd on Hurd (no-op on Linux).  The
+operator-side recipe lives in `docs/HURD_BOOT.md`; the
+installer-side script is `install/hurd-bootstrap.sh`.
 
 ## What's portable today
 
@@ -161,14 +168,35 @@ rollback.
     libhurd-dev).
   - CI gate: host-side text checks only, see above. KVM-gated
     boot smoke is v0.8.
-  - service supervision after host_reboot: pid1 only supervises
-    emacs.  Debian's sysvinit-spawned services (sshd, syslogd)
-    do NOT come back after a `(pid1-reboot)` because /sbin/init
-    is now emacs-init, not sysvinit.  v0.8 design item: a
-    GEOS-side service supervisor on the Hurd side that reads
-    /etc/geos/services.d/*.scm the way the Linux side will
-    once `core/supervise.el` learns to read disk-backed service
-    definitions.
+  - service supervision after host_reboot: closed in v0.9.11.
+    Until v0.9.11 pid1 only supervised emacs, so Debian's
+    sysvinit-spawned services (sshd, syslogd) did not come back
+    after a `(pid1-reboot)` because /sbin/init is now emacs-init,
+    not sysvinit.  `emacs-init/services/hurd-essentials.el`
+    closes the gap by defining `hurd-sshd` (`:restart on-crash`)
+    and `hurd-syslogd` (`:restart always`) under `supervise.el`;
+    both autostart.  The whole file is a top-level
+    `(when (eq geos-kernel 'hurd) ...)` guard so it is a strict
+    no-op on Linux even though the Linux boot gexp now also
+    passes `-l services/hurd-essentials.el`.  The old v0.8 design
+    item ("GEOS-side service supervisor on the Hurd side that
+    reads /etc/geos/services.d/*.scm") is closed for the two
+    daemons that matter today; the broader disk-backed
+    service-definition story remains future work on the Linux
+    side too.
+  - args-file fallback for /hurd/startup argc==1: closed in
+    v0.9.11.  `/hurd/startup` execs `/sbin/init` with `argc==1`
+    (or with a sysvinit runlevel token in argv[1]); neither is
+    an absolute path, so pid1 cannot derive its boot chain from
+    kernel argv the way the Guix gexp gives it on Linux.
+    `parse_init_args` in `pid1/emacs-init.c` reads
+    `/etc/geos/init.args` (one arg per line, `#` comments
+    stripped) when `argv[1]` is not absolute, then splices the
+    synthesized argv into `main()` and the rest of pid1 runs
+    unchanged.  Linux/Guix passes an absolute store path in
+    `argv[1]`, so `parse_init_args` is short-circuited before
+    the `open()` call.  See `docs/HURD_BOOT.md` for the
+    operator-side workflow.
 
 For the spike's design notes see `docs/v04-item11-hurd-spike.md`.
 For the boot recipe (what a Hurd-VM operator runs to verify
@@ -217,6 +245,9 @@ The verification levels in the last column:
 | `services/journal-tail.el` Hurd kmsg source | implemented | **YES (live-verified)** on 2026-05-21 (v0.9.6; Hurd arm runs `tail -F --lines=+1 /var/log/kern.log` under supervise.el and dispatches per-line to a new `journal-buffer--parse-syslog-record` that parses the BSD/inetutils one-line format into the standard journal record plist (`:source 'syslog`, `:sev "info"` defaulted since kern.log is implicitly kern.*, `:time` parsed from `MMM DD HH:MM:SS` with current-year defaulting).  no port_caps slot needed: the v0.9.6 probe receipt at `docs/runlogs/2026-05-21-hurd-kmsg-probe.md` confirmed `/dev/klog` is a `/hurd/streamio kmsg` translator that blocks and has no history replay, and Debian Hurd 0.9 ships `inetutils-syslogd` running by default which drains it into `/var/log/kern.log`.  live end-to-end verified at runlog `docs/runlogs/2026-05-21-v096-kmsg-verify.md`: `(supervise-start 'journal-kmsg)` spawned tail, backlog replayed, synthetic appended line landed live in `*journal*`; 100-call leak smoke clean (VmSize delta 0).  one caveat documented in the verify receipt: on this Debian Hurd 0.9 snapshot kern.log is 0 bytes at boot because gnumach boot printfs land in `/var/log/dmesg` (read direct from the gnumach printbuf by `dmesg(8)`) rather than via the /dev/klog -> syslogd -> kern.log path; the pipeline is correct, future runtime kernel events would flow through.  **dmesg-prime follow-on shipped at main/3d4a88b and live-verified on 2026-05-21** (v0.9.7; `journal-tail--prime-from-dmesg` reads /var/log/dmesg at load time on Hurd and appends each non-empty line as a `:source 'dmesg` record so the day-zero buffer carries the boot transcript; 61 dmesg lines = 61 journal records, exact match; runlog `docs/runlogs/2026-05-21-v096-dmesg-prime-verify.md`)) |
 | `user/userland/audio.el` Hurd not-implemented banner | implemented | YES on 2026-05-20 (v0.9.4 doc-flip; `audio-list-cards' on Hurd routes through `geos-port-unimplemented' and returns nil so the `*audio*' buffer renders "no cards visible" cleanly.  Hurd has no ALSA, no `/proc/asound', no audio translator under `/hurd/'; a native sink (OSS-style or Mach-RPC once a Hurd audio translator exists) is a later slice).  **Native audio translator surface: deferred at translator level** (v0.9.7 probe 2026-05-21 confirmed Debian GNU/Hurd 0.9 ships no /hurd/audio*, no settrans-attached /dev/dsp /dev/audio /dev/mixer /dev/snd nodes, no audio entry under /servers, no /proc/asound analogue, zero audio enumeration in the gnumach boot transcript, and `dpkg -L hurd` matches zero files with audio names; H1-H4 all falsified.  pulseaudio 17.0+dfsg1-2.1 and the sndio family are installable from debian-ports sid/main hurd-amd64 but not bundled in the canonical image, so a future v1.x slice would wire `userland/audio.el` to a pulseaudio daemon path gated on user `apt install pulseaudio`; out of scope for v0.9.x.  runlog `docs/runlogs/2026-05-21-hurd-audio-probe.md`) |
 | `port->arm_parent_death` (Linux: `prctl(PR_SET_PDEATHSIG)`; Hurd: `MACH_NOTIFY_DEAD_NAME` via `mach_port_request_notification`) | v0.9.8 slot landed on main with Hurd ENOSYS placeholder; v0.9.9 ships the real Hurd body on the side branch (`hurd/9f2fe6f`): proc_pid2task(getppid()) + mach_port_allocate(RECEIVE) + mach_port_request_notification(MACH_NOTIFY_DEAD_NAME) + a DETACHED pthread watcher that blocks in mach_msg until the dead-name arrives, then pthread_kill(main_thread, sig).  parent_task SEND right ownership transfers to the watcher (do NOT deallocate in the armer; the kernel binds the notification to the ipc_entry).  re-entrancy: IDEMPOTENT on same signal, EALREADY on different signal.  watcher targets the main thread by pthread_kill, not the process by kill(getpid()) (multi-threaded Hurd race).  call site is `spawn_xorg()`'s post-fork child, which still tolerates ENOSYS as defence-in-depth | YES on Linux (prctl shipped, freeze-test `freeze-test-arm-parent-death.el` covers slot-bound + linux-prctl-call + raises-pid1-error-class + error-shape); **YES on Hurd (live-verified)** on 2026-05-21 (v0.9.9 third VM-verify pass on Debian GNU/Hurd 0.9: Probe A 10/10 unamended fork-and-die end-to-end with no orphan B; Probe B EALREADY contract intact (B1 rc=0; B2 same-sig idempotent rc=0; B3 different-sig rc=-1 errno=0x40000025 = err_hurd|EALREADY); Probe C 100-call leak smoke Threads delta +1, VmSize delta +8196 KiB; Probe D2 helper-call returns -1 with errno=ESRCH and SIGUSR2 sentinel within 1s; freeze-test triple green; v0.9.5/v0.9.6/v0.9.7/v0.9.8 regression sweep clean; runlog `docs/runlogs/2026-05-21-v099-vm-verify.md`.  load-bearing ground truth recorded: gnumach 1.8+git20260224 + Hurd userspace encode kern_return_t as `err_hurd|unix_errno`, so proc_pid2task returns `0x40000003 == ESRCH` and `0x40000005 == EIO` directly (not `err_kern|KERN_*` as two earlier iterations assumed); the parent-gone guard compares against the wire values `(kern_return_t)ESRCH` / `(kern_return_t)EIO` / `KERN_INVALID_NAME` (the last retained as a portability defence)) |
+| EXWM attaches to Xvfb on Hurd (userland surface, no port_caps slot) | EXWM 0.33 + xelb 0.20 on emacs-lucid 30.2 attach to the v0.9.8-spawned Xvfb on Hurd unchanged from the Linux path; the userland code does not branch on kernel.  packaging gap on the canonical image: `xvfb`, `emacs-lucid`, `elpa-exwm`, `elpa-xelb` must be `apt install`ed (canonical ships emacs-nox only; `x11-utils`, `xterm`, `xdotool`, `x11-apps` are already in the canonical set).  a future v1.x apt-image flavor bundles them | **YES (live-verified)** on 2026-05-21 (v0.9.10: Xvfb 21.1.22 live on `:99`; emacsclient eval reports `connection=t workspaces=2 managed=1 buffers=1`; root window has the EXWM identity / wmsn / timestamp / workspace-container family; `_NET_SUPPORTING_WM_CHECK` on the root points at the `"EXWM"` window in the same tree; xclock captured as a managed top-level with `WM_CLASS = "xclock","XClock"` and `_NET_WM_PID = 1770`; *Messages* clean of `pid1-error`/`exwm-error`; runlog `docs/runlogs/2026-05-21-v0910-exwm-xvfb-hurd.md`) |
+| pid1 args-file fallback (`/etc/geos/init.args`) | argv[1] non-absolute -> read `/etc/geos/init.args` (O_NOFOLLOW + fstat root-owned regular file); covers the `/hurd/startup argc==1` case and the sysvinit-runlevel-token case (e.g. argv[1]=="6"); Linux/Guix passes argv[1]=/gnu/store/.../emacs and the file is never opened.  parse_init_args at `pid1/emacs-init.c` is the source of truth for the failure-mode contract (open errno, non-regular, non-root, short read, empty file, file > 8 KiB, slot-cap overflow; all fall through to the default argv with one-line console log).  installer wrapper at `install/hurd-bootstrap.sh` writes the file as root:root 0644 with explicit chown after chmod | **YES (v0.9.11)** on 2026-05-21 |
+| GEOS supervisor for sshd + syslogd on Hurd (`emacs-init/services/hurd-essentials.el`) | defines `hurd-sshd` (`:restart on-crash`, `/usr/sbin/sshd -D -e`) and `hurd-syslogd` (`:restart always`, `/usr/sbin/inetutils-syslogd --no-detach`); both autostarted via the supervise.el sentinel.  top-level `(when (eq geos-kernel 'hurd) ...)` guard makes the file a strict no-op on Linux even though the Linux boot gexp also passes `-l services/hurd-essentials.el`.  closes the prior v1.0 design item "GEOS-side service supervisor on the Hurd side" for the two daemons that actually matter today (sshd to keep the box reachable across `(pid1-reboot)`, syslogd to keep `/var/log/kern.log` growing for the journal-kmsg source) | **YES (v0.9.11)** on 2026-05-21 |
 
 The 2026-05-17 verification pass ran `docs/HURD_BOOT.md` steps 1-3
 end-to-end on a fresh Debian GNU/Hurd 2026-03 snapshot VM.  the

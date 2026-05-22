@@ -45,6 +45,11 @@ document I would actually rather you read first. The picture is
 in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (three zoom
 levels, including the dual-kernel Linux + Hurd seam).
 
+For Hurd: on a fresh Debian GNU/Hurd 0.9 image, run
+`install/hurd-bootstrap.sh` as root and reboot. The full recipe
+(apt prereqs, build, rollback path, init.args format) is in
+[docs/HURD_BOOT.md](docs/HURD_BOOT.md).
+
 ## what works
 
   - PID 1 is a C binary that execs Emacs and exposes the reaper, mount
@@ -173,6 +178,9 @@ version:
     `.github/workflows/checks.yml` runs `attribution-scan` and
     `no-shell-check` on every push. See
     [docs/HURD_PORT.md](docs/HURD_PORT.md) for the port status.
+  - v0.9.11: tagged. GEOS boots end-to-end on Debian GNU/Hurd
+    0.9 via the `/etc/geos/init.args` fallback and a supervised
+    sshd + syslogd pair.
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.

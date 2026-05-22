@@ -363,6 +363,20 @@
     ;; fbound when dhcp-request's sentinel calls it.
     (local-file "../emacs-init/services/dhcp.el" "dhcp.el"))
 
+(define hurd-essentials-service-el
+    ;; v0.9.11: sshd + inetutils-syslogd parked under supervise.el on
+    ;; Hurd.  the file's top-level guard `(when (eq geos-kernel 'hurd)
+    ;; ...)' makes it a strict no-op on Linux, so loading it
+    ;; unconditionally here is safe and means a Linux/Guix dev host
+    ;; that later cross-boots into the Hurd port gets the supervised
+    ;; daemons without a second boot pass.  must load after
+    ;; dhcp-service-el so the services/ chain stays grouped, and after
+    ;; supervise-el (already earlier in the -l chain) so defservice is
+    ;; fbound.  before any install/*.el so the wizard does not see a
+    ;; half-built registry.
+    (local-file "../emacs-init/services/hurd-essentials.el"
+                "hurd-essentials.el"))
+
 ;; v0.4 item 3.  install wizard.  pure-elisp wrappers around mkfs,
 ;; cp, pid1-mount, grub-install and grub-mkconfig, plus a
 ;; *install* state-machine buffer that orchestrates them.  the
@@ -736,6 +750,16 @@
                                ;; registry.
                                "-l" #$journal-tail-service-el
                                "-l" #$dhcp-service-el
+                               ;; v0.9.11: Hurd essentials (sshd +
+                               ;; inetutils-syslogd).  no-op on Linux
+                               ;; via the file's top-level
+                               ;; (when (eq geos-kernel 'hurd) ...)
+                               ;; guard, so loading it
+                               ;; unconditionally here is safe.  loaded
+                               ;; after dhcp-service-el to keep the
+                               ;; services/ block grouped and before
+                               ;; the install/*.el chain.
+                               "-l" #$hurd-essentials-service-el
                                ;; v0.4 item 3: the install wizard.
                                ;; load the four install/*.el helpers
                                ;; first (each (provide 's an
