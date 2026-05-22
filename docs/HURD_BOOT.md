@@ -121,11 +121,13 @@ unconditionally.  There is no `argv[1]=path-to-init` hook.
 So the install path is: **replace /sbin/init in place**, after
 keeping a backup the maintenance shell can fall back to.
 
-### v0.9.11 install workflow (recommended)
+### v0.9.12 install workflow (recommended)
 
-As of v0.9.11 the install is one script.  Prerequisite is a fresh
-Debian GNU/Hurd 0.9 image with a working network and root login.
-Get an apt mirror reachable first, then:
+As of v0.9.12 the install is one script and the booted image opens
+an interactive ssh session from the host without any post-install
+manual steps.  Prerequisite is a fresh Debian GNU/Hurd 0.9 image
+with a working network and root login.  Get an apt mirror reachable
+first, then:
 
 ```
 # inside the Hurd VM, as root
@@ -138,6 +140,13 @@ sshd + inetutils-syslogd are not optional: the `hurd-essentials`
 supervisor expects both binaries to exist on disk, and v0.9.6's
 journal-kmsg source on Hurd tails `/var/log/kern.log` which only
 grows because syslogd is draining `/dev/klog` into it.
+
+By default the supervisor configures eth0 statically against the
+QEMU SLIRP defaults (10.0.2.15/24, gw 10.0.2.2).  For a bare-metal
+deployment with real DHCP, set `geos-hurd-static-eth0` to `nil`
+under `/var/emacs/init.el` after the first boot; the settrans
+pre-step still runs so an apt-installed dhcp client has a live
+pfinet to bind to.
 
 Copy the GEOS source tree to the target under `/usr/local/src/geos/`
 (rsync, scp, git clone, whatever fits your workflow), then build
@@ -174,7 +183,7 @@ Rollback path: boot into the GRUB rescue / maintenance shell, then
 `mv /sbin/init.debian-stock /sbin/init`.  Reboot once more and you
 are back on stock Debian sysvinit.
 
-### legacy manual install (pre-v0.9.11)
+### legacy manual install (pre-v0.9.12)
 
 The hand-rolled version of the same steps, kept here because it
 documents what the bootstrap script does under the hood and is
