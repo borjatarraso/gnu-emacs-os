@@ -11,6 +11,28 @@
 ;; package.el wake up and start touching ELPA on boot.
 (setq package-enable-at-startup nil)
 
+;; on Hurd the canonical Debian GNU/Hurd 0.9 image does not ship
+;; binutils, so emacs's lazy native-comp pipeline (gcc -> as -> ld)
+;; cannot build subr trampolines.  the first trampoline attempt (the
+;; kill_emacs primitive, on the very first ungraceful exit) wedges
+;; emacs in a tight gcc-spawn loop because `as' is missing, then pid1
+;; cannot reap the wedge because the child is stuck in compute, not
+;; exited.  opt out of trampoline building entirely on Hurd: the
+;; interpretive subr fallback is always available, a slower elisp
+;; dispatch is the right price to pay versus a wedged supervisor.
+;; native-comp-jit-compilation also goes off so background .eln
+;; production cannot trip the same gcc->as gap on any first-time .el
+;; load post boot.  v0.9.12 slice 3 VM-verify captured the wedge
+;; verbatim.  GEOS_KERNEL is set by pid1 in our envp before emacs
+;; starts; read it directly here rather than waiting for core/port.el
+;; to load, because native-comp can fire before we ever get that far.
+;; variable names are the emacs-29+ canonical forms (the pre-29 names
+;; comp-enable-subr-trampolines / native-comp-deferred-compilation
+;; still work via defvaralias but emit obsolescence warnings).
+(when (equal (getenv "GEOS_KERNEL") "hurd")
+  (setq native-comp-jit-compilation nil)
+  (setq native-comp-enable-subr-trampolines nil))
+
 ;; the C emacs-init forks emacs as a child, so emacs's pid is not 1
 ;; even when we are the supervised userland. the right signal that we
 ;; are the OS emacs (not a stray `emacs -Q` on a dev host) is whether
