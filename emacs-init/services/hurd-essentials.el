@@ -2,9 +2,11 @@
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;; Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 
-;; three daemons GEOS cannot afford to lose on a Hurd VM, parked under
-;; the supervisor so they come back across `(pid1-reboot)` without an
-;; operator logging in to nudge them.
+;; two daemons GEOS cannot afford to lose on a Hurd VM (sshd, syslogd),
+;; parked under the supervisor so they come back across `(pid1-reboot)`
+;; without an operator logging in to nudge them, plus the one-shot
+;; static eth0 bring-up that gets pfinet onto the QEMU SLIRP network so
+;; sshd is actually reachable from the host.
 ;;
 ;; why sshd: the canonical way i exercise a Hurd boot is over ssh from
 ;; the host.  if sshd dies (or the operator pkills it by accident in a
@@ -22,22 +24,32 @@
 ;; (no `inetutils-' prefix); v0.9.11 had the package name in the
 ;; :command path by mistake and slice 6 VM verify caught the gap.
 ;;
-;; why dhclient: on Debian GNU/Hurd 0.9 the pfinet translator is
-;; already settrans'd at /servers/socket/2 by the base image, but
-;; nothing in the default boot path actually requests an IP lease for
-;; eth0 once /etc/init.d/networking is bypassed (pid1 replaced
-;; /sbin/init, so the rc.d chain is gone).  without dhclient the
-;; pfinet stack stays bound to nothing and no inbound packet can
-;; reach sshd, even though sshd's socket is on 0.0.0.0:22.  slice 6
-;; VM verify proved sshd binds correctly but the QEMU SLIRP forward
-;; could not complete the three-way handshake; the fix is to acquire
-;; the lease at boot.  we use `-d' (debug mode, no daemonize) so the
-;; sentinel sees the foreground process; dhclient handles its own
-;; lease renewal in that mode.  :restart 'on-crash because a clean
-;; SIGTERM at shutdown is not a failure.  the binary path is
-;; /sbin/dhclient on Debian; if the operator installed isc-dhcp-client
-;; into a non-standard prefix the path will need an apt-discovered
-;; override once that scenario actually appears.
+;; why static eth0 (NOT dhclient): on Debian GNU/Hurd 0.9 the pfinet
+;; translator is already settrans'd at /servers/socket/2 by the base
+;; image, but nothing in the default boot path actually configures an
+;; address on eth0 once /etc/init.d/networking is bypassed (pid1
+;; replaced /sbin/init, so the rc.d chain is gone).  without an
+;; address, no inbound packet can reach sshd, even though sshd's
+;; socket is on 0.0.0.0:22.  slice 6 VM verify proved sshd binds
+;; correctly but the QEMU SLIRP host-forward could not complete the
+;; three-way handshake.  slice 8 tried `/sbin/dhclient -d eth0' under
+;; supervise.el; slice 9 breadcrumbs proved dhclient spawns clean
+;; (registers pid, no sentinel exit) but emits ZERO DHCP protocol
+;; chatter on stderr, because Linux dhclient's BPF/raw-socket path
+;; expects a Linux netlink-style eth0 device that pfinet does not
+;; present in the same shape.  slice 10 drops the dhclient defservice
+;; entirely and uses the pid1 module's set_address / set_route_default
+;; verbs directly, with the QEMU SLIRP fixed assignment (10.0.2.15/24
+;; via 10.0.2.2).  this is on purpose: the QEMU user-mode SLIRP server
+;; always hands out exactly these addresses, so a fixed config is
+;; equivalent to DHCP for the VM-verify boot path and avoids the
+;; userland-DHCP-on-Hurd rabbit hole.
+;;
+;; for a bare-metal Hurd deployment with a real DHCP server on the
+;; wire, the operator overrides `network-interface-config' in their
+;; site init (or before /var/emacs is mounted, via the args-file) and
+;; this hurd-essentials.el call becomes a no-op for eth0 because the
+;; static-address pre-check sees the operator's intent and yields.
 ;;
 ;; design contract: this file is a strict no-op on Linux.  the entire
 ;; defservice block is wrapped in `(when (eq geos-kernel 'hurd) ...)`
@@ -117,25 +129,64 @@
     :buffer " *supervise:hurd-syslogd*"
     :env nil)
 
-  (defservice hurd-dhclient
-    ;; -d keeps dhclient in the foreground so the sentinel can watch.
-    ;; in foreground mode dhclient still handles lease renewal on its
-    ;; own timer; we do not need a separate renewal service.  eth0 is
-    ;; the canonical interface name pfinet exposes for the first
-    ;; ethernet device; on a multi-NIC machine the operator can
-    ;; supplement this service rather than replace it.
-    :command ("/sbin/dhclient" "-d" "eth0")
-    :restart on-crash
-    :autostart t
-    :buffer " *supervise:hurd-dhclient*"
-    :env nil)
-
   (condition-case _
       (let ((write-region-inhibit-fsync t))
         (write-region
-         "hurd-essentials: defservice hurd-sshd + hurd-syslogd + hurd-dhclient registered\n"
+         "hurd-essentials: defservice hurd-sshd + hurd-syslogd registered\n"
          nil "/dev/console" 'append 'nomsg))
-    (error nil)))
+    (error nil))
+
+  ;; slice 10 (v0.9.12): static eth0 bring-up for the QEMU SLIRP path.
+  ;; the two pid1 module verbs we need (`pid1-set-address' and
+  ;; `pid1-set-route-default') are exported from emacs-init.c whenever
+  ;; PID1_MODULE_PATH was set in our env, so they are present on a
+  ;; supervised OS boot but absent under plain `emacs -Q' on a dev
+  ;; host.  the fboundp guard turns this into a strict no-op in the
+  ;; dev case.
+  ;;
+  ;; address/mask/gateway are hard-coded to QEMU SLIRP's user-mode
+  ;; default subnet (10.0.2.0/24, gw 10.0.2.2, guest 10.0.2.15).  if
+  ;; the operator runs a real DHCP server (e.g. bare metal or a custom
+  ;; QEMU netdev) they override `network-interface-config' before
+  ;; reaching this file, AND they set `geos-hurd-static-eth0' to nil
+  ;; in their site init so this block stops trying.  the defcustom
+  ;; lives here, not in core/network.el, because the QEMU SLIRP
+  ;; constants are a Hurd-side concern and pollute the core defcustom
+  ;; if they live there.
+  (defcustom geos-hurd-static-eth0 t
+    "Non-nil to statically configure eth0 with QEMU SLIRP defaults.
+Set to nil in site init when the Hurd guest is on a network with a
+real DHCP server, or to t and override the address constants below
+when the SLIRP defaults are wrong.  effect is read once at boot when
+services/hurd-essentials.el loads."
+    :group 'network
+    :type 'boolean)
+
+  (when geos-hurd-static-eth0
+    (condition-case err
+        (cond
+         ((not (fboundp 'pid1-set-address))
+          (supervise--console
+           "hurd-essentials: eth0 static skipped, pid1-set-address unbound"))
+         (t
+          (supervise--console
+           "hurd-essentials: eth0 static 10.0.2.15/24 gw 10.0.2.2")
+          (funcall (symbol-function 'pid1-set-address) "eth0" "10.0.2.15" 24)
+          (when (fboundp 'pid1-set-route-default)
+            (condition-case gw-err
+                (funcall (symbol-function 'pid1-set-route-default)
+                         "10.0.2.2" "eth0")
+              (error
+               ;; gateway add raises with EEXIST on a re-apply (e.g.
+               ;; pid1-reboot then this file reloads).  do not panic
+               ;; the supervisor over an idempotency case; log and
+               ;; continue.
+               (supervise--console
+                "hurd-essentials: eth0 gateway add: %S (continuing)"
+                gw-err))))
+          (supervise--console "hurd-essentials: eth0 static OK")))
+      (error
+       (supervise--console "hurd-essentials: eth0 static FAILED %S" err)))))
 
 (provide 'hurd-essentials)
 ;;; hurd-essentials.el ends here
