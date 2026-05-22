@@ -462,6 +462,133 @@ hurd_mount(const char *src, const char *tgt, const char *type,
     return 0;
 }
 
+/* remount / read-write via fsys_set_options("--writable") on the
+ * root fsys port.  this is the moral equivalent of `fsysopts /
+ * --writable` from the shell, except pid1 has to do the RPC by
+ * hand because there is no shell to run yet.
+ *
+ * why pid1 needs this: on a stock Debian GNU/Hurd 0.9 boot, /sbin/
+ * init normally runs /etc/init.d/checkroot.sh which fsysopts-remounts
+ * / rw before any other service comes up.  pid1 replaced /sbin/init,
+ * so checkroot.sh never runs, and / stays read-only the moment we
+ * reach the do_mount block.  every tmpfs translator-attach against
+ * a RO / fails with EIO (the translator record cannot be written),
+ * sethostname returns EROFS (the proc server's sethostname path
+ * touches /etc), and once emacs comes up native-comp aborts on a
+ * RO /tmp.  the cascade was captured live in v0.9.11 VM-verify
+ * round 8; see docs/runlogs/2026-05-18-hurd-pid1-boot-result.md
+ * for the exact trail of EIO/EROFS lines that drove this slice.
+ *
+ * the RPC dance: file_name_lookup("/", 0, 0) gives a file port to
+ * the root directory; file_getcontrol on that port returns the
+ * fsys (filesystem control) port for whichever translator is
+ * serving / right now (on a Debian Hurd boot that is /hurd/ext2fs
+ * sitting on hd0s1 or hd0s2).  file_name_lookup on a Hurd / always
+ * returns the underlying root fsys node rather than a chained
+ * translator, because / has no overlay translator by convention;
+ * if a future setup violates that and stacks a unionfs on /, this
+ * call would target the topmost translator and the underlying ext2
+ * would still be RO.  the supervisor would notice via the cascaded
+ * EIO/EROFS just like today; not our problem to solve in pid1.
+ *
+ * fsys_set_options(fsys, opts, opts_len, do_children) takes an
+ * argz-style options string.  for a one-shot flag we just pass
+ * "--writable" with a NUL terminator (opts_len = strlen + 1) and
+ * do_children = 0 because there are no chained translators under /
+ * we want to recurse into.  /hurd/ext2fs handles --writable by
+ * flipping its internal RW flag and the on-disk superblock state
+ * mark; subsequent writes through the translator succeed.
+ *
+ * errno translation contract: error_t comes back as a Mach
+ * kern_return_t, NOT a POSIX errno, and raw values like
+ * KERN_PROTECTION_FAILURE (0x1) would surface as garbage in the
+ * elisp layer.  same translation table as hurd_mount's tail:
+ *   KERN_INVALID_ARGUMENT  -> EINVAL
+ *   KERN_NO_ACCESS         -> EACCES
+ *   KERN_PROTECTION_FAILURE-> EACCES
+ *   MACH_SEND_INVALID_DEST -> ENOENT
+ *   EOPNOTSUPP             -> EOPNOTSUPP (already a POSIX errno;
+ *                            passed through unchanged so the elisp
+ *                            layer can distinguish "fsys does not
+ *                            support remount" from generic IO)
+ *   anything else          -> EIO
+ *
+ * port lifetime: root_node is a file port we own after the lookup;
+ * deallocate it as soon as file_getcontrol returns (success or
+ * failure).  root_fsys is a SEND right we own after file_getcontrol
+ * succeeds; deallocate it after fsys_set_options returns.  pid1
+ * lives forever so a leaked Mach port at boot would never be reaped;
+ * the boot-once posture does not excuse the leak, it just hides it.
+ *
+ * second-call behaviour: fsys_set_options("--writable") on an
+ * already-rw ext2fs is documented as a no-op return 0, but other
+ * translators (tmpfs, unionfs) have not been verified.  pid1 calls
+ * this exactly once per boot, before do_mount; that is the only
+ * contract the caller side enforces. */
+static int
+hurd_remount_root_rw(void)
+{
+    static const char opts[] = "--writable";
+    /* file_name_lookup with flags=0, mode=0 means "follow translators,
+     * read-only port, no creation".  on Hurd a port to / is always
+     * grantable because everyone can lookup /; the RO posture of the
+     * fs does not prevent obtaining a file port to its root. */
+    file_t root_node = file_name_lookup("/", 0, 0);
+    if (root_node == MACH_PORT_NULL) {
+        /* file_name_lookup already translated to a POSIX errno via
+         * __hurd_fail; nothing to save, errno is already what we want
+         * the caller to see. */
+        return -1;
+    }
+
+    /* the MACH_PORT_NULL initializer is load-bearing on the rc != 0
+     * path below.  MIG-generated out-param stubs by convention leave
+     * the port unset on failure, but a future translator rewrite that
+     * sends a port AND a non-zero rc would leak the port if we trusted
+     * file_getcontrol to always write something.  do NOT remove the
+     * explicit zero-init. */
+    fsys_t root_fsys = MACH_PORT_NULL;
+    error_t rc = file_getcontrol(root_node, &root_fsys);
+    /* drop the file port now; we are done with it whether or not we
+     * got the fsys port back.  the kernel ref count on the underlying
+     * node stays positive via the fsys port we just acquired (on
+     * success) or via pfinet/proc/root callers (on failure). */
+    mach_port_deallocate(mach_task_self(), root_node);
+    if (rc) {
+        switch (rc) {
+        case KERN_INVALID_ARGUMENT:    errno = EINVAL; break;
+        case KERN_NO_ACCESS:           errno = EACCES; break;
+        case KERN_PROTECTION_FAILURE:  errno = EACCES; break;
+        case MACH_SEND_INVALID_DEST:   errno = ENOENT; break;
+        case EOPNOTSUPP:               errno = EOPNOTSUPP; break;
+        default:                       errno = EIO; break;
+        }
+        return -1;
+    }
+
+    /* opts_len includes the trailing NUL: fsys_set_options takes an
+     * argz vector and a length, and a single-string argz is exactly
+     * "string\0" with len = strlen+1.  do_children = 0 because there
+     * are no nested translators under / we want to walk into. */
+    rc = fsys_set_options(root_fsys, (char *)opts, sizeof opts, 0);
+    /* drop the fsys port either way.  ext2fs holds its own kernel-side
+     * refs on the translator process; our send right was a transient
+     * handle for this one RPC. */
+    mach_port_deallocate(mach_task_self(), root_fsys);
+    if (rc) {
+        switch (rc) {
+        case KERN_INVALID_ARGUMENT:    errno = EINVAL; break;
+        case KERN_NO_ACCESS:           errno = EACCES; break;
+        case KERN_PROTECTION_FAILURE:  errno = EACCES; break;
+        case MACH_SEND_INVALID_DEST:   errno = ENOENT; break;
+        case EOPNOTSUPP:               errno = EOPNOTSUPP; break;
+        default:                       errno = EIO; break;
+        }
+        return -1;
+    }
+    return 0;
+}
+
 /* sethostname(2) is POSIX and Hurd's glibc implements it via the
  * proc server's proc_sethostname RPC under the hood.  same body as
  * the Linux backend.  keeping it in the port table even though it is
@@ -2780,6 +2907,7 @@ const port_caps port_hurd_impl = {
     .auth_drain            = hurd_auth_drain,
     .disk_size_bytes       = hurd_disk_size_bytes,
     .arm_parent_death      = hurd_arm_parent_death,
+    .remount_root_rw       = hurd_remount_root_rw,
 };
 
 /* the active pointer + the require-or-abort helper live in
