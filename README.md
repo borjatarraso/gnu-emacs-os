@@ -269,6 +269,30 @@ version:
     [docs/runlogs/2026-05-23-hurd-v0917-static-in-vm-verify.md](docs/runlogs/2026-05-23-hurd-v0917-static-in-vm-verify.md)
     and
     [docs/runlogs/2026-05-23-hurd-v0917-syslog-tail-verify.md](docs/runlogs/2026-05-23-hurd-v0917-syslog-tail-verify.md).
+  - v0.9.18: tagged. canonical Hurd image re-roll, quality-
+    of-life.  new `iso-build/hurd-image-reroll.sh` takes the
+    pristine canonical Debian GNU/Hurd 0.9 image plus an
+    extracted STATIC=1 pid1 binary and produces a derivative
+    image with the four per-cycle setup mutations already
+    baked in: GRUB serial output (`terminal_output serial
+    console` + `console=com0` on every multiboot gnumach
+    line), `/root/.ssh/authorized_keys` with the supplied
+    pubkey, `/sbin/init` replaced with the STATIC pid1
+    (original saved as `/sbin/init.debian-stock`), and
+    `/etc/geos/init.args` in the minimal-to-SSH shape.
+    verified: SSH first-try on two boot cycles, pid1 reports
+    as `/sbin/init` 1,552,824 bytes statically linked, sshd
+    reparented to the supervised emacs, forced SIGSEGV
+    respawn cycles through the supervisor.  first time pid1
+    has booted as actual PID 1 on canonical Debian Hurd 0.9
+    (the v0.9.17 syslog verify substituted sysv-init at PID
+    1, masking this entirely).  the canonical 35-file `-l`
+    init.args chain triggers a `kill_emacs_0.eln` trampoline
+    build path that wedges because the canonical image has
+    no `as`; the script ships the minimal variant that boots
+    cleanly, and closing the wedge so the full chain can
+    ship is the v0.9.19 follow-on.  receipt at
+    [docs/runlogs/2026-05-23-hurd-v0918-image-reroll.md](docs/runlogs/2026-05-23-hurd-v0918-image-reroll.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
