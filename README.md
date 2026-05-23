@@ -231,6 +231,24 @@ version:
     [docs/runlogs/2026-05-23-hurd-v0915-a-b-verify-deferred.md](docs/runlogs/2026-05-23-hurd-v0915-a-b-verify-deferred.md)
     (slice A and B live-verify deferred to v0.9.16 cold-boot
     cycle; code shipped, snapshot-side wedge documented).
+  - v0.9.16: tagged. cold-boot live-verify cycle + STATIC=1
+    Makefile ship.  slice B (periodic dmesg re-sync) PASS on
+    canonical Debian GNU/Hurd 0.9 (timer arm + file-offset
+    tick + idempotent re-arm + documented first-tick double-
+    emit wart).  slice A (syslog kern.* override) REVERTED on
+    both branches after the verify proved two load-bearing
+    assumptions wrong: (1) inetutils-syslogd on Hurd reads
+    `/etc/syslog.conf`, NOT `/etc/inetutils-syslog.conf`;
+    (2) user-process `LOG_KERN` is demoted to `LOG_USER` at
+    source-classification stage per syslog spec, so no config
+    file edit can route `logger -p kern.info` to
+    `/var/log/kern.log`.  v0.9.14 follow-on #1 stays open
+    (next attempt should tail `/var/log/syslog` or document
+    local0 convention).  STATIC=1 Makefile diff shipped on
+    hurd (wraps Hurd subset in `--start-group / --end-group`
+    with `-lihash -lshouldbeinlibc`); in-VM link verify is
+    the v0.9.17 starter.  receipt at
+    [docs/runlogs/2026-05-23-hurd-v0916-cold-boot-verify.md](docs/runlogs/2026-05-23-hurd-v0916-cold-boot-verify.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
