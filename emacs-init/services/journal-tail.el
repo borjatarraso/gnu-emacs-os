@@ -35,6 +35,12 @@ Leading space hides it from buffer lists; the filter consumes the
 text and routes parsed records into *journal*, so this buffer's
 own contents are uninteresting.")
 
+(defconst journal-tail--syslog-work-buffer-name " *supervise:journal-syslog*"
+  "Hidden work buffer for the Hurd /var/log/syslog tail.
+Separate from the kern.log work buffer because supervise.el wants
+one buffer per service and the per-buffer residue state must not
+collide with the kern.log filter's residue.")
+
 (defun journal-tail--ensure-journal-buffer ()
   "Get-or-create the *journal* buffer in journal-buffer-mode.
 Without this, kmsg records arriving before the user ever runs M-x
@@ -135,6 +141,75 @@ chunk retries."
                 (with-current-buffer journal
                   (journal-buffer--append-records (nreverse recs))))))))
     (error (panic-handle err 'journal-tail--filter-syslog))))
+
+;; v0.9.17: second hurd arm.  /var/log/syslog catches what kern.log
+;; cannot: user processes that called `logger -p kern.info ...' get
+;; demoted by syslogd to LOG_USER at source-classification time (per
+;; RFC 3164: user processes are not allowed to emit kern.*) and the
+;; demoted line lands in /var/log/syslog with the user's tag.  v0.9.15
+;; slice A tried to fix this with a kern.* override + SIGHUP; v0.9.16
+;; cold-boot verify proved that path is unfixable via config edits
+;; (wrong conf file on Debian Hurd 0.9, AND the demotion happens
+;; before routing anyway).  this is the alternate fix: tail both
+;; files, accept that lines authored by user processes show up tagged
+;; as `syslog-user' in the *journal* source column.
+;;
+;; line shape is identical to /var/log/kern.log (BSD syslog one-line
+;; format) so we reuse `journal-buffer--parse-syslog-record' and just
+;; re-tag the :source slot so the renderer's source column visibly
+;; distinguishes kernel-origin from user-origin entries.
+;;
+;; de-dup wart: kernel-origin lines that genuinely fan out to BOTH
+;; files (some syslog.conf setups mirror kern.* into syslog as well)
+;; will appear twice in *journal* with different source tags.  on a
+;; canonical Debian Hurd 0.9 install /etc/syslog.conf routes kern.*
+;; only to /var/log/kern.log so the overlap is zero in practice; if
+;; an operator hand-edits syslog.conf to add a *.info catch-all that
+;; covers kern.*, they get duplicates.  we don't try to dedupe (would
+;; need cross-stream timestamp+message matching and the two tails are
+;; independently buffered; honest duplicates beat dropped originals).
+(defun journal-tail--filter-syslog-user (proc chunk)
+  "Process filter for the supervised tail /var/log/syslog follower.
+Same shape as `journal-tail--filter-syslog' but re-tags every
+emitted record's :source to `syslog-user' so the renderer's source
+column reflects that the record came in via the user-facing syslog
+file, not via /var/log/kern.log.  No structural change to the
+parsed plist; downstream code only reads :source for the column."
+  (condition-case err
+      (let* ((work (process-buffer proc))
+             (journal (journal-tail--ensure-journal-buffer)))
+        (when (buffer-live-p work)
+          (with-current-buffer work
+            (unless (and (local-variable-p 'journal-buffer--target)
+                         (eq (buffer-local-value 'journal-buffer--target
+                                                 (current-buffer))
+                             journal))
+              (setq-local journal-buffer--target journal))
+            (let* ((data (concat (or (and (local-variable-p
+                                           'journal-buffer--proc-residue)
+                                          journal-buffer--proc-residue)
+                                     "")
+                                 chunk))
+                   (parts (split-string data "\n"))
+                   (last (car (last parts)))
+                   (complete (butlast parts))
+                   (recs '()))
+              (setq-local journal-buffer--proc-residue (or last ""))
+              (dolist (raw complete)
+                (unless (string-empty-p raw)
+                  (let ((rec (journal-buffer--parse-syslog-record raw)))
+                    (when rec
+                      ;; retag source so the renderer's source column
+                      ;; shows `syslog-user' instead of `syslog'.
+                      ;; plist-put on a freshly-cons'd plist is fine;
+                      ;; the parser builds a new list per call so we
+                      ;; are not mutating shared state.
+                      (push (plist-put rec :source 'syslog-user)
+                            recs)))))
+              (when recs
+                (with-current-buffer journal
+                  (journal-buffer--append-records (nreverse recs))))))))
+    (error (panic-handle err 'journal-tail--filter-syslog-user))))
 
 ;; v0.9.6 follow-on: prime *journal* from /var/log/dmesg on Hurd.
 ;; the syslog tail pipeline is wired correctly but /var/log/kern.log
@@ -361,6 +436,29 @@ and the panic-handle error path both return nil."
 
 (journal-tail--ensure-kern-log-hurd)
 
+;; v0.9.17: same race-window guard for /var/log/syslog as the kern.log
+;; one above.  on a fresh Debian Hurd 0.9 boot the file may not exist
+;; before syslogd's first write; pre-touching it under the same tmpfs
+;; /var caveat makes the `tail -F' contract trivial and stops the
+;; respawn cap from burning on a transient ENOENT.
+(defun journal-tail--ensure-syslog-hurd ()
+  "Touch /var/log/syslog on Hurd if it does not exist.
+No-op on Linux, no-op on Hurd if the file already exists.  Same
+shape as `journal-tail--ensure-kern-log-hurd' (mkdir /var/log
+first because pid1 tmpfs-mounts /var on Hurd boot).  Errors route
+through panic-handle and the supervised tail still spawns."
+  (when (and (not (geos-kernel-linux-p))
+             (not (file-exists-p "/var/log/syslog")))
+    (condition-case err
+        (let ((write-region-inhibit-fsync t))
+          (make-directory "/var/log" t)
+          (write-region "" nil "/var/log/syslog" 'append 'nomsg)
+          t)
+      (error (panic-handle err 'journal-tail--ensure-syslog-hurd)
+             nil))))
+
+(journal-tail--ensure-syslog-hurd)
+
 ;; the `dd' we spawn on linux here is the same coreutils binary the
 ;; lazy in-buffer follower used.  bs=8192 is generous for kmsg
 ;; (records are typically << 1 KiB), status=none silences the
@@ -391,6 +489,22 @@ and the panic-handle error path both return nil."
    :restart 'on-crash
    :buffer journal-tail--work-buffer-name
    :filter filter))
+
+;; v0.9.17: second supervised tail on Hurd, parallel to the kern.log
+;; one above.  gated explicitly on the hurd predicate (Linux has no
+;; need: kmsg streams every facility live).  same supervise contract:
+;; on-crash respawn, dedicated work buffer, dedicated filter that
+;; re-tags :source to `syslog-user' so renderer's source column shows
+;; the origin.  re-registering the same name is idempotent in
+;; supervise-register (it overwrites static intent and preserves
+;; counters), so a re-load of this file does not duplicate the entry.
+(when (geos-kernel-hurd-p)
+  (supervise-register
+   :name 'journal-syslog
+   :command '("tail" "-F" "--lines=+1" "/var/log/syslog")
+   :restart 'on-crash
+   :buffer journal-tail--syslog-work-buffer-name
+   :filter #'journal-tail--filter-syslog-user))
 
 (provide 'journal-tail)
 ;;; journal-tail.el ends here
