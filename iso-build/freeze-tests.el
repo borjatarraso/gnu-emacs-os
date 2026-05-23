@@ -3255,6 +3255,19 @@ up the shadow correctly."
 ;;     `install-wizard'.  this is the more telling half: a regression
 ;;     that drops the panic-handle call would leave the wizard
 ;;     silently returning nil with no audit trail.
+;;
+;;   port/install-partitions-for-hurd-shape
+;;     v1.0 slice A pin: `install--partitions-for-hurd' must not
+;;     raise on a dev host where /dev/wd0s* nodes are absent (returns
+;;     nil), AND when slices ARE present every entry must carry the
+;;     four documented plist keys (:name :node :size-bytes :mounted-p).
+;;     the test injects /dev directly by binding the function's input
+;;     to a name unlikely to over-match (`__freeze_probe_wd0') so the
+;;     dev-host path always falls through to nil cleanly.  guards the
+;;     prefix-anchored regex against silent breakage that would let
+;;     `wd0' over-match `wd00s1' on a hypothetical many-disk system,
+;;     and pins the shape contract so the wizard's renderer can rely
+;;     on plist-get keys never going missing.
 
 (defun freeze-test-port-hurd ()
   "Pin df7fb92: the GEOS_KERNEL=hurd code paths in the elisp port seam.
@@ -3295,6 +3308,8 @@ surface until the side-branch port attempts to boot."
                                "port.el not loaded")
           (freeze-test--record 'port/install-disk-list-nil-and-panic
                                "port.el not loaded")
+          (freeze-test--record 'port/install-partitions-for-hurd-shape
+                               "port.el not loaded")
           (freeze-test--record 'port/uname-hurd-synth
                                "port.el not loaded")
           (freeze-test--record 'port/journal-kmsg-no-autostart
@@ -3310,6 +3325,7 @@ surface until the side-branch port attempts to boot."
           (freeze-test--port-state-detect-mode-safe)
           (freeze-test--port-disks-render-no-sysblock)
           (freeze-test--port-install-disk-list-nil-and-panic)
+          (freeze-test--port-install-partitions-for-hurd-shape)
           (freeze-test--port-uname-hurd-synth)
           (freeze-test--port-journal-kmsg-no-autostart)
           (freeze-test--port-audio-list-cards-nil-and-panic)
@@ -3472,6 +3488,55 @@ nil, and the *panic* buffer grew with a record mentioning the
        (panic-handle err 'freeze-test--port-install-disk-list-nil-and-panic)
        (setq result (format "raised: %S" err))))
     (freeze-test--record 'port/install-disk-list-nil-and-panic result)))
+
+(defun freeze-test--port-install-partitions-for-hurd-shape ()
+  "Sub-check: `install--partitions-for-hurd' shape pin.
+two assertions for v1.0 slice A:
+
+  (a) on a dev host with no /dev/<probe>s* nodes, the function
+      returns nil and does NOT raise.  uses a probe name
+      (`__freeze_probe_wd0') unlikely to collide with anything
+      real under /dev/.
+
+  (b) if and only if entries come back, every entry is a plist
+      carrying :name :node :size-bytes :mounted-p.  on dev hosts
+      the (a) check is sufficient; on a hurd image with real
+      wd0s* nodes the (b) check fires.
+
+skipped if `install--partitions-for-hurd' is unbound (loading
+order glitch, or the install-disk feature got stripped).  this is
+a shape pin, not a correctness pin: a regression that returns the
+wrong sort order or wrong size value will not be caught here, but
+a regression that drops a key from the plist or that raises on a
+clean dev host will."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'install--partitions-for-hurd))
+          (setq result (cons 'skip "install--partitions-for-hurd unbound")))
+         (t
+          (let ((got (install--partitions-for-hurd "__freeze_probe_wd0")))
+            (cond
+             ((null got) (setq result 'pass))
+             ((not (listp got))
+              (setq result (format "returned %S, want list" got)))
+             (t
+              (let ((bad
+                     (cl-loop for p in got
+                              unless (and (plist-member p :name)
+                                          (plist-member p :node)
+                                          (plist-member p :size-bytes)
+                                          (plist-member p :mounted-p))
+                              return p)))
+                (setq result
+                      (cond
+                       (bad (format "plist missing key: %S" bad))
+                       (t 'pass)))))))))
+      (error
+       (panic-handle err
+                     'freeze-test--port-install-partitions-for-hurd-shape)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/install-partitions-for-hurd-shape result)))
 
 (defun freeze-test--port-uname-hurd-synth ()
   "Sub-check: `geos--uname' on hurd returns a synth plist, no /proc reads.

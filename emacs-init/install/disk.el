@@ -191,6 +191,58 @@ argv into mounts."
         (error nil)))
     hit))
 
+(defun install--partitions-for-hurd (disk)
+  "Return list of partition plists for whole-disk DISK on Hurd.
+DISK is the bare whole-disk name (e.g. \"wd0\").  walks /dev/ for
+entries matching \"<disk>s[0-9]+\" (the Hurd slice convention,
+e.g. wd0s1, wd0s2) and returns one plist per slice:
+
+  :name        bare slice name (\"wd0s1\")
+  :node        full /dev path (\"/dev/wd0s1\")
+  :size-bytes  integer byte count from `pid1-disk-size-bytes',
+               or nil if the RPC refuses
+  :mounted-p   t if /proc/mounts mentions the literal /dev/NAME
+
+mirrors `install--partitions-for' (the linux arm in install.el)
+shape-wise, but the contents differ: linux exports :path; we use
+:node here because the spec asked for it and downstream callers
+(the wizard's part-pick render) read both names by plist-get.
+
+no sysfs on hurd, no `partition' file to check; the slice suffix
+is a node-name convention enforced by the storeio translators.
+the regex is anchored to DISK on the left and \"s<digits>\" on
+the right so a `wd0' lookup does not over-match `wd00s1' on a
+hypothetical many-disk system.  `regexp-quote' on DISK guards
+against a future caller passing a name with regex metachars.
+
+size: same `pid1-disk-size-bytes' slot the v0.9.5 disks buffer
+uses (storeio device_get_status under the hood).  fboundp guard
+keeps this file loadable on a linux dev host without
+pid1-module.so present.  nil surfaces if the underlying RPC
+fails, and the wizard renderer's `?' render stays honest.
+
+mounted-p: literal `/dev/NAME' match against /proc/mounts.  the
+2026-05-20 probe documented in
+`install-disk-mounted-p-hurd' showed the hurd procfs translator
+emits the node form even for the root translator, so a literal
+prefix is enough; the store-spec form
+(`part:N:device:wd0') does not appear in mounts."
+  (when (and (stringp disk) (file-directory-p "/dev"))
+    (let* ((re (concat "\\`" (regexp-quote disk) "s[0-9]+\\'"))
+           (mounts (install-disk--mounted-devices))
+           out)
+      (condition-case _
+          (dolist (name (directory-files "/dev" nil re))
+            (let ((node (concat "/dev/" name)))
+              (push (list :name name
+                          :node node
+                          :size-bytes (install-disk--size-bytes-hurd name)
+                          :mounted-p (and (gethash node mounts) t))
+                    out)))
+        (error nil))
+      (sort out (lambda (a b) (string< (plist-get a :name)
+                                       (plist-get b :name)))))))
+
 (defun install-disk--mounted-devices ()
   "Return the set of device paths mentioned in /proc/mounts.
 Returns a hash table keyed on the literal device string (e.g.
