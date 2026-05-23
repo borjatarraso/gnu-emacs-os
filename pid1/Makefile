@@ -182,7 +182,30 @@ PORT_DEFS := -DPORT_HURD
 # defaults toward --no-copy-dt-needed-entries, so a symbol used
 # directly by our TU must be resolved from a library we name
 # ourselves.  do not delete -lpthread to "simplify" the link line.
-PORT_BOOT_LIBS   := -lports -lfshelp -lhurduser -lmachuser -lpthread
+# the boot-binary link line wraps the Hurd subset in
+# -Wl,--start-group ... -Wl,--end-group so the linker iterates over
+# the archive set until the working set stabilises.  this is what
+# hurd.git does for its own translators and matters under -static
+# (STATIC=1) because:
+#   - libports.a refs hurd_ihash_* (libihash.a)
+#   - libfshelp.a refs idvec_* + exec_reauth + __assert_*_backtrace
+#     (libshouldbeinlibc.a)
+#   - libports.a refs __assert_*_backtrace (libshouldbeinlibc.a)
+# under -static there is no DT_NEEDED chase at runtime; every archive
+# must be on the command line.  -lihash and -lshouldbeinlibc ship in
+# hurd-dev on Debian GNU/Hurd 0.9, the same package -lports and
+# -lfshelp already come from, so this is one Makefile edit, not an
+# upstream packaging blocker.  the symbol-provider table and dpkg
+# evidence for this is in docs/runlogs/2026-05-23-hurd-static-link-
+# investigation.md.
+# the module link line keeps the legacy shape because the .so resolves
+# the same transitive set at dlopen time via DT_NEEDED, identical to
+# what the v0.9.14 multi-user re-verify confirmed.  STATIC=1 only
+# touches the boot binary; pid1-module.so is always dynamically linked.
+PORT_BOOT_LIBS   := -Wl,--start-group \
+                    -lports -lfshelp -lihash -lshouldbeinlibc \
+                    -lhurduser -lmachuser -lpthread \
+                    -Wl,--end-group
 PORT_MODULE_LIBS := -lports -lfshelp -lhurduser -lmachuser -lpthread
 # generated MIG sources for the fsys subsystem.  slice 3 needs an
 # fsys_server() demuxer so libdiskfs's fsys_getroot request (issued by
