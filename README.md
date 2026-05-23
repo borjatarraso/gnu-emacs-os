@@ -208,6 +208,29 @@ version:
     [docs/runlogs/2026-05-22-v0914-multiuser-reverify.md](docs/runlogs/2026-05-22-v0914-multiuser-reverify.md)
     and
     [docs/runlogs/2026-05-22-v0914-live-kmsg-probe.md](docs/runlogs/2026-05-22-v0914-live-kmsg-probe.md).
+  - v0.9.15: tagged. four-slice Hurd cleanup release.
+    slice A routes user-side `kern.*` into `/var/log/kern.log`
+    by appending an override to `/etc/inetutils-syslog.conf`
+    from `hurd-essentials.el` (idempotent, SIGHUPs syslogd
+    when already running).  slice B adds a periodic dmesg
+    re-sync timer in `journal-tail.el` so kernel events that
+    landed in dmesg between supervisor ticks still appear in
+    `*journal*`.  slice C is a desk-side investigation
+    receipt for STATIC=1 link of pid1 on Hurd: confirms
+    `libc.a` on Hurd is an ld GROUP script, identifies the
+    one-line Makefile change (`-lihash -lshouldbeinlibc`
+    inside `--start-group`); receipt-only, no Makefile ship.
+    slice D is a 100-cycle emacs respawn long-soak on Debian
+    GNU/Hurd 0.9: PASS, 100/100 cycles, respawn wait flat at
+    1 s/cycle vs 5 s budget, pid1 port table essentially flat
+    (16 to 17 across all 100 cycles), no monotonic resource
+    growth.  receipts at
+    [docs/runlogs/2026-05-23-hurd-static-link-investigation.md](docs/runlogs/2026-05-23-hurd-static-link-investigation.md),
+    [docs/runlogs/2026-05-23-hurd-respawn-soak-100.md](docs/runlogs/2026-05-23-hurd-respawn-soak-100.md),
+    and
+    [docs/runlogs/2026-05-23-hurd-v0915-a-b-verify-deferred.md](docs/runlogs/2026-05-23-hurd-v0915-a-b-verify-deferred.md)
+    (slice A and B live-verify deferred to v0.9.16 cold-boot
+    cycle; code shipped, snapshot-side wedge documented).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
