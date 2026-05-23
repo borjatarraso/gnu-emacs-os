@@ -156,6 +156,38 @@ log "unpacked ${SUPERVISOR_FILES} files under ${STAGING_DIR}/emacs-init"
 # via QEMU SLIRP host-forward).  closing the wedge so the full chain
 # can ship is the v0.9.19 follow-on; the discovery transcript lives at
 # /tmp/v0918-rerolled-first-boot-serial.log and the v0.9.18 receipt.
+###############################################################################
+# step 3b: pre-generate sshd host keys
+###############################################################################
+# WHY pre-generation matters: the v0.9.18 minimal-to-SSH init.args (see
+# step 3 below) execs `sshd -D -e`, which fails fast with "Could not
+# load host key" if /etc/ssh/ssh_host_*_key is absent.  the canonical
+# Debian Hurd image relies on a first-boot sysv-init script to run
+# ssh-keygen -A; under pid1-as-real-PID-1 that script never runs, so
+# the very first boot races sshd against a key set that does not exist
+# yet.  baking the keys in OFFLINE makes the produced image deterministic
+# (same image, same fingerprints, every re-roll cycle), removes the
+# race, and lets the rerolled image come up ssh-able on cycle 1.
+#
+# i generate the standard sshd triple (rsa-3072, ecdsa-256, ed25519);
+# this matches what `ssh-keygen -A` would produce on a stock Debian box.
+# all three private keys land at 0600 root:root, all three public keys
+# at 0644 root:root, under /etc/ssh/ inside the guest.
+log "step 3b: pre-generate sshd host keys (rsa + ecdsa + ed25519)"
+for kt in rsa ecdsa ed25519; do
+    kf="${STAGING_DIR}/ssh_host_${kt}_key"
+    case "${kt}" in
+        rsa)     ssh-keygen -q -t rsa     -b 3072 -N '' -C "root@geos-hurd" -f "${kf}" ;;
+        ecdsa)   ssh-keygen -q -t ecdsa   -b 256  -N '' -C "root@geos-hurd" -f "${kf}" ;;
+        ed25519) ssh-keygen -q -t ed25519        -N '' -C "root@geos-hurd" -f "${kf}" ;;
+    esac
+    if [ ! -f "${kf}" ] || [ ! -f "${kf}.pub" ]; then
+        log "FATAL: ssh-keygen did not produce ${kf}{,.pub}"
+        exit 1
+    fi
+    log "  generated ${kt} host key: $(ssh-keygen -lf "${kf}.pub" | awk '{print $2}')"
+done
+
 cat > "${STAGING_DIR}/init.args" <<'INIT_ARGS_EOF'
 # v0.9.18 minimal-to-SSH init.args
 # the full 35-file -l chain (see git history of hurd-bootstrap.sh) has
@@ -240,6 +272,7 @@ log "grub.cfg patched (${GRUB_DELTA}-line unified diff)"
 #   5. mkdir /etc/geos + upload init.args + chmod
 #   6. mkdir /usr/share/geos + tar-in the supervisor tree
 #   7. mkdir /root/.emacs.d + symlink early-init.el
+#   8. upload pre-generated sshd host keys into /etc/ssh/, perms 0600/0644
 log "step 5: guestfish mutate ${OUTPUT_IMG}"
 guestfish -a "${OUTPUT_IMG}" <<EOF
 run
@@ -286,6 +319,32 @@ tar-in ${SUPERVISOR_TAR} /usr/share/geos/ compress:gzip
 # emacs picks it up BEFORE tty-setup-hook fires. see v0.9.12 slice 6.
 mkdir-p /root/.emacs.d
 ln-sf /usr/share/geos/emacs-init/early-init.el /root/.emacs.d/early-init.el
+
+# 5.8: pre-generated sshd host keys.  mkdir-p /etc/ssh because on a
+# minimal canonical image the dir may exist already (openssh-server is
+# in the base), but i don't want to depend on that.  perms enforced
+# explicitly per key after upload: 0600 for the private halves, 0644
+# for the public halves, root:root everywhere.  see step 3b for the
+# rationale on baking these in offline.
+mkdir-p /etc/ssh
+upload ${STAGING_DIR}/ssh_host_rsa_key /etc/ssh/ssh_host_rsa_key
+upload ${STAGING_DIR}/ssh_host_rsa_key.pub /etc/ssh/ssh_host_rsa_key.pub
+upload ${STAGING_DIR}/ssh_host_ecdsa_key /etc/ssh/ssh_host_ecdsa_key
+upload ${STAGING_DIR}/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_ecdsa_key.pub
+upload ${STAGING_DIR}/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
+upload ${STAGING_DIR}/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
+chmod 0600 /etc/ssh/ssh_host_rsa_key
+chmod 0600 /etc/ssh/ssh_host_ecdsa_key
+chmod 0600 /etc/ssh/ssh_host_ed25519_key
+chmod 0644 /etc/ssh/ssh_host_rsa_key.pub
+chmod 0644 /etc/ssh/ssh_host_ecdsa_key.pub
+chmod 0644 /etc/ssh/ssh_host_ed25519_key.pub
+chown 0 0 /etc/ssh/ssh_host_rsa_key
+chown 0 0 /etc/ssh/ssh_host_rsa_key.pub
+chown 0 0 /etc/ssh/ssh_host_ecdsa_key
+chown 0 0 /etc/ssh/ssh_host_ecdsa_key.pub
+chown 0 0 /etc/ssh/ssh_host_ed25519_key
+chown 0 0 /etc/ssh/ssh_host_ed25519_key.pub
 EOF
 
 log "step 5 complete"
@@ -318,9 +377,19 @@ echo "--- /usr/share/geos/emacs-init (top dirs) ---"
 ls /usr/share/geos/emacs-init
 echo "--- /root/.emacs.d/early-init.el (stat) ---"
 ll /root/.emacs.d/early-init.el
+echo "--- /etc/ssh/ssh_host_*_key* (stat) ---"
+ll /etc/ssh/ssh_host_rsa_key
+ll /etc/ssh/ssh_host_rsa_key.pub
+ll /etc/ssh/ssh_host_ecdsa_key
+ll /etc/ssh/ssh_host_ecdsa_key.pub
+ll /etc/ssh/ssh_host_ed25519_key
+ll /etc/ssh/ssh_host_ed25519_key.pub
 download /boot/grub/grub.cfg ${VERIFY_TMP}/grub.cfg
 download /etc/geos/init.args ${VERIFY_TMP}/init.args
 download /root/.ssh/authorized_keys ${VERIFY_TMP}/authorized_keys
+download /etc/ssh/ssh_host_rsa_key.pub ${VERIFY_TMP}/ssh_host_rsa_key.pub
+download /etc/ssh/ssh_host_ecdsa_key.pub ${VERIFY_TMP}/ssh_host_ecdsa_key.pub
+download /etc/ssh/ssh_host_ed25519_key.pub ${VERIFY_TMP}/ssh_host_ed25519_key.pub
 VERIFY_EOF
 log "verify: GRUB serial line + first multiboot:"
 # literal tab byte for the regex; POSIX grep doesn't honor \t.
@@ -337,6 +406,10 @@ log "verify: init.args first slot:"
 grep -v '^#' "${VERIFY_TMP}/init.args" | grep -v '^$' | head -1 | sed 's/^/    /'
 log "verify: authorized_keys fingerprint:"
 ssh-keygen -lf "${VERIFY_TMP}/authorized_keys" 2>&1 | sed 's/^/    /'
+log "verify: sshd host key fingerprints (rsa + ecdsa + ed25519):"
+for hk in ssh_host_rsa_key.pub ssh_host_ecdsa_key.pub ssh_host_ed25519_key.pub; do
+    ssh-keygen -lf "${VERIFY_TMP}/${hk}" 2>&1 | sed 's/^/    /'
+done
 rm -rf "${VERIFY_TMP}"
 
 OUT_SHA="$(sha256sum "${OUTPUT_IMG}" | cut -d' ' -f1)"
