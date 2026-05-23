@@ -181,6 +181,142 @@ still come up regardless."
 ;; kernel predicate.
 (journal-tail--prime-from-dmesg)
 
+;; v0.9.14 follow-on #2 from
+;; docs/runlogs/2026-05-22-v0914-live-kmsg-probe.md: gnumach boot
+;; printfs land in /var/log/dmesg (read direct from the gnumach
+;; printbuf by dmesg(8)), NOT through /dev/klog -> syslogd ->
+;; kern.log.  the prime above catches the day-zero boot transcript,
+;; but any runtime kernel event that lands in the printbuf AFTER
+;; load-time never reaches *journal*.  this re-sync covers that gap
+;; with an idle timer that diffs the file by byte offset and appends
+;; the delta.
+;;
+;; offset-based, not SHA1-based.  hurd doesn't rotate /var/log/dmesg
+;; today; the cheap path wins until that changes.  on truncation
+;; (size shrank below the last-seen offset) we reset to zero and
+;; re-read from the top, which is the same shape as a log rotation
+;; recovering itself.  on a missing file we no-op and leave the timer
+;; armed; a future boot that produces the file will be picked up on
+;; the next tick.  every fs error routes through panic-handle so a
+;; mid-life unlink does not crash the supervisor.
+
+(defcustom journal-tail-dmesg-resync-interval 30
+  "Seconds between /var/log/dmesg re-sync passes on Hurd.
+The re-sync runs as an idle timer so it never preempts an
+interactive command.  Linux is a strict no-op regardless of this
+value; the kmsg path already streams the ring buffer live.
+
+Set before `journal-tail' loads to take effect at boot; changes at
+runtime require a manual re-arm via
+`journal-tail--arm-dmesg-resync'."
+  :type 'integer
+  :group 'journal)
+
+(defvar journal-tail--dmesg-last-size 0
+  "Last observed byte size of /var/log/dmesg.
+Set by `journal-tail--dmesg-resync-tick' after each successful
+read.  On rotation (file shrank) the tick resets this to zero and
+re-reads the file from the top.  Starts at zero so the very first
+tick has to compare against the size left by
+`journal-tail--prime-from-dmesg' if any; in practice the prime
+runs `insert-file-contents-literally' without remembering the
+size, so the first tick will re-emit the entire file as delta on a
+Hurd boot.  That double-emit is benign: the prime fired before
+*journal* could even be a buffer the user looks at, and
+`journal-buffer--append-records' is idempotent in shape; the only
+cost is a one-shot duplication of the boot transcript on the
+first tick after load.  Future slice can prime this from the post-
+prime file size if the duplication ever matters.")
+
+(defvar journal-tail--dmesg-resync-timer nil
+  "Idle timer object driving the /var/log/dmesg re-sync, or nil.
+Held in a defvar so repeated loads do not stack timers: the arm
+function cancels any prior timer before scheduling a new one.")
+
+(defun journal-tail--dmesg-resync-tick ()
+  "Read the delta of /var/log/dmesg since the last tick and append it.
+Stat the file; if the size grew, read only the appended bytes via
+`insert-file-contents-literally' with explicit BEG/END byte
+offsets; if the size shrank (rotation, truncation), reset the
+last-seen offset to zero and re-read from the top; if the file is
+absent or the same size, no-op.  Every fs error routes through
+panic-handle so a transient unlink does not crash the timer.
+
+The supervised `tail -F' on /var/log/kern.log is the canonical
+source for runtime kernel events on Hurd; this is the safety net
+for events that gnumach pushes only into its printbuf and never
+through /dev/klog -> syslogd."
+  (when (and (not (geos-kernel-linux-p))
+             (file-readable-p "/var/log/dmesg"))
+    (condition-case err
+        (let* ((attrs (file-attributes "/var/log/dmesg"))
+               (size (and attrs (file-attribute-size attrs))))
+          (cond
+           ;; stat failed or returned something we cannot reason about.
+           ;; no-op, leave the offset alone; the next tick retries.
+           ((not (integerp size)) nil)
+           ;; empty file: record the zero size so a future append from
+           ;; a fresh write is detected against the right baseline.
+           ((zerop size)
+            (setq journal-tail--dmesg-last-size 0))
+           ;; rotation / truncation: reset and re-read from the top so
+           ;; we don't miss the post-rotation prefix.
+           ((< size journal-tail--dmesg-last-size)
+            (setq journal-tail--dmesg-last-size 0)
+            (journal-tail--dmesg-resync-append 0 size)
+            (setq journal-tail--dmesg-last-size size))
+           ;; grew: read only the new bytes.
+           ((> size journal-tail--dmesg-last-size)
+            (journal-tail--dmesg-resync-append
+             journal-tail--dmesg-last-size size)
+            (setq journal-tail--dmesg-last-size size))
+           ;; size equal: no new bytes, nothing to do.
+           (t nil)))
+      (error (panic-handle err 'journal-tail--dmesg-resync-tick)))))
+
+(defun journal-tail--dmesg-resync-append (beg end)
+  "Read bytes [BEG, END) of /var/log/dmesg and append parsed records.
+Helper for `journal-tail--dmesg-resync-tick'; splits the read text
+on newlines, runs each non-empty line through
+`journal-buffer--parse-dmesg-record', and hands the batch to
+`journal-buffer--append-records'.  Errors route through
+panic-handle and the tick continues."
+  (condition-case err
+      (let* ((journal (journal-tail--ensure-journal-buffer))
+             (text (with-temp-buffer
+                     (insert-file-contents-literally
+                      "/var/log/dmesg" nil beg end)
+                     (buffer-string)))
+             (lines (split-string text "\n"))
+             (recs '()))
+        (dolist (raw lines)
+          (let ((rec (journal-buffer--parse-dmesg-record raw)))
+            (when rec
+              (push rec recs))))
+        (when recs
+          (with-current-buffer journal
+            (journal-buffer--append-records (nreverse recs)))))
+    (error (panic-handle err 'journal-tail--dmesg-resync-append))))
+
+(defun journal-tail--arm-dmesg-resync ()
+  "Schedule (or re-schedule) the /var/log/dmesg re-sync idle timer.
+Hurd-only.  Idempotent: a prior timer in
+`journal-tail--dmesg-resync-timer' is cancelled before the new one
+goes in, so re-loading this file does not stack timers.  Lifetime
+is the rest of the Emacs life; there is no `journal-tail-stop'
+counterpart today, so an explicit teardown means
+`(cancel-timer journal-tail--dmesg-resync-timer)' from a repl."
+  (when (timerp journal-tail--dmesg-resync-timer)
+    (cancel-timer journal-tail--dmesg-resync-timer)
+    (setq journal-tail--dmesg-resync-timer nil))
+  (when (not (geos-kernel-linux-p))
+    (setq journal-tail--dmesg-resync-timer
+          (run-with-idle-timer journal-tail-dmesg-resync-interval
+                               t
+                               #'journal-tail--dmesg-resync-tick))))
+
+(journal-tail--arm-dmesg-resync)
+
 ;; v0.9.13 follow-on: pre-create /var/log/kern.log on Hurd so the
 ;; supervised `tail -F --lines=+1` does not race syslogd's first
 ;; write.  the race window matters: hurd-syslogd is a sibling
