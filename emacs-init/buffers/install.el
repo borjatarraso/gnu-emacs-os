@@ -98,21 +98,38 @@ without parsing blkid.")
 ;; -- partition enumeration ----------------------------------------------------
 
 (defun install--partitions-for (disk-name)
-  "Return list of /dev/X paths for partitions of DISK-NAME.
-DISK-NAME is bare (sda, nvme0n1).  scans /sys/block/DISK/ for
-sub-entries that are partitions: the kernel exposes them as
-directories named after the partition (sda1, nvme0n1p1) with a
-`partition' file inside.  no mounted check here; the caller (the
-format-confirm step) re-checks against /proc/mounts to refuse a
-mounted partition."
-  (let ((dir (concat "/sys/block/" disk-name "/")))
-    (when (file-directory-p dir)
-      (let (parts)
-        (dolist (entry (directory-files dir nil "\\`[^.]"))
-          (let ((part-file (concat dir entry "/partition")))
-            (when (file-readable-p part-file)
-              (push (concat "/dev/" entry) parts))))
-        (sort parts #'string<)))))
+  "Return list of partitions of DISK-NAME.
+DISK-NAME is bare (sda, nvme0n1; or wd0 on Hurd).
+
+linux arm: scans /sys/block/DISK/ for sub-entries that are
+partitions (the kernel exposes them as directories named after
+the partition, e.g. sda1 / nvme0n1p1, with a `partition' file
+inside).  returns a list of /dev/X path strings.  no mounted
+check here; the caller (the format-confirm step) re-checks
+against /proc/mounts to refuse a mounted partition.
+
+hurd arm (v1.0 slice A): defers to
+`install--partitions-for-hurd', which returns a list of plists
+shaped (:name :node :size-bytes :mounted-p) because hurd has no
+sysfs and the slice convention is the storeio translator
+node-name suffix (wd0s1, wd0s2, ...).  the two arms return
+different shapes on purpose: the hurd plist carries enough info
+(size, mount state) for a future render-side polish to grow a
+richer part-pick screen.  downstream wizard steps (mkfs / grub
+i386-pc) still do not port; `install-yes' refuses to advance
+past :format-confirm on a non-linux kernel."
+  (cond
+   ((geos-kernel-hurd-p)
+    (install--partitions-for-hurd disk-name))
+   (t
+    (let ((dir (concat "/sys/block/" disk-name "/")))
+      (when (file-directory-p dir)
+        (let (parts)
+          (dolist (entry (directory-files dir nil "\\`[^.]"))
+            (let ((part-file (concat dir entry "/partition")))
+              (when (file-readable-p part-file)
+                (push (concat "/dev/" entry) parts))))
+          (sort parts #'string<)))))))
 
 ;; -- render --------------------------------------------------------------------
 
