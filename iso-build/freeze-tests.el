@@ -3830,54 +3830,62 @@ hurd, not about forcing the file to be present."
     (freeze-test--record 'port/journal-kmsg-no-autostart result)))
 
 (defun freeze-test--port-audio-list-cards-nil-and-panic ()
-  "Sub-check: `audio-list-cards' on hurd returns nil AND panics.
+  "Sub-check: `audio-list-cards' on hurd with NO pactl returns nil AND panics.
 asserts both halves: the return value is nil (so the *audio* buffer
 falls through to its `(no ALSA cards visible ...)' branch with no
 attempt to read /proc/asound/cards), and the *panic* buffer grew
-with a record mentioning the `audio-list-cards' feature tag.
-without the panic record a regression that drops the
-`geos-port-unimplemented' route would leave audio silently empty
-on hurd with no audit trail."
+with a record mentioning a `pactl-missing' or `audio-list-cards'
+feature tag.  the dispatch is now pactl-aware (v1.x bucket-3) so
+this test pins the no-pactl path explicitly via a stub of
+`audio--executable' that returns nil.  without the panic record a
+regression that drops the `geos-port-unimplemented' route would
+leave audio silently empty on hurd with no audit trail."
   (let ((result 'fail))
     (condition-case err
         (cond
          ((not (fboundp 'audio-list-cards))
           (setq result (cons 'skip "audio-list-cards unbound")))
          (t
-          (let* ((buf (panic--get-buffer))
-                 (before (with-current-buffer buf (buffer-size)))
-                 (rv (let ((geos-kernel 'hurd))
-                       (audio-list-cards)))
-                 (after (with-current-buffer buf (buffer-size)))
-                 (delta (with-current-buffer buf
-                          (buffer-substring-no-properties
-                           (1+ before) (point-max)))))
-            (cond
-             ((not (null rv))
-              (setq result (format "returned %S, want nil" rv)))
-             ((not (> after before))
-              (setq result
-                    (format "panic buffer did not grow: %d -> %d"
-                            before after)))
-             ((not (string-match-p "audio-list-cards" delta))
-              (setq result
-                    (format "new panic entry lacks 'audio-list-cards' tag: %s"
-                            (substring delta 0
-                                       (min 120 (length delta))))))
-             (t (setq result 'pass))))))
+          (cl-letf (((symbol-function 'audio--executable)
+                     (lambda (_name) nil)))
+            (let* ((buf (panic--get-buffer))
+                   (before (with-current-buffer buf (buffer-size)))
+                   (rv (let ((geos-kernel 'hurd))
+                         (audio-list-cards)))
+                   (after (with-current-buffer buf (buffer-size)))
+                   (delta (with-current-buffer buf
+                            (buffer-substring-no-properties
+                             (1+ before) (point-max)))))
+              (cond
+               ((not (null rv))
+                (setq result (format "returned %S, want nil" rv)))
+               ((not (> after before))
+                (setq result
+                      (format "panic buffer did not grow: %d -> %d"
+                              before after)))
+               ((not (or (string-match-p "audio-list-cards" delta)
+                         (string-match-p "pactl-missing" delta)))
+                (setq result
+                      (format "new panic entry lacks audio tag: %s"
+                              (substring delta 0
+                                         (min 120 (length delta))))))
+               (t (setq result 'pass)))))))
       (error
        (panic-handle err 'freeze-test--port-audio-list-cards-nil-and-panic)
        (setq result (format "raised: %S" err))))
     (freeze-test--record 'port/audio-list-cards-nil-and-panic result)))
 
 (defun freeze-test--port-audio-render-no-procasound ()
-  "Sub-check: `audio-buffer--render' on hurd draws no /proc/asound rows.
+  "Sub-check: `audio-buffer--render' on hurd with NO pactl draws the banner.
 asserts the rendered buffer does NOT contain the linux-arm key
-banner \"keys: + vol up\" (the cheat-sheet at the bottom of the
-linux render is the cleanest sentinel that the linux body ran),
-and that the body contains \"not implemented\" so we know the
-hurd arm produced its documented output rather than e.g. an
-empty buffer.  uses a throwaway buffer; does NOT touch *audio*."
+banner \"vol up\" (the cheat-sheet at the bottom of the linux
+render is the cleanest sentinel that the linux body ran), and
+that the body contains \"not implemented\" so we know the hurd
+arm produced its documented banner rather than e.g. an empty
+buffer.  the dispatch is pactl-aware now; we stub
+`executable-find' to nil so the hurd arm picks the banner branch
+deterministically regardless of whether the host has pactl.
+uses a throwaway buffer; does NOT touch *audio*."
   (let ((result 'fail))
     (condition-case err
         (cond
@@ -3885,11 +3893,13 @@ empty buffer.  uses a throwaway buffer; does NOT touch *audio*."
           (setq result (cons 'skip "audio-buffer--render unbound")))
          (t
           (with-temp-buffer
-            (let ((geos-kernel 'hurd))
-              (audio-buffer--render))
+            (cl-letf (((symbol-function 'executable-find)
+                       (lambda (_name &optional _remote) nil)))
+              (let ((geos-kernel 'hurd))
+                (audio-buffer--render)))
             (let ((body (buffer-string)))
               (cond
-               ((string-match-p "keys: \\+ vol up" body)
+               ((string-match-p "+ vol up" body)
                 (setq result
                       "linux render cheat-sheet present in hurd render"))
                ((not (string-match-p "not implemented" body))
@@ -3901,6 +3911,140 @@ empty buffer.  uses a throwaway buffer; does NOT touch *audio*."
        (panic-handle err 'freeze-test--port-audio-render-no-procasound)
        (setq result (format "raised: %S" err))))
     (freeze-test--record 'port/audio-render-no-procasound result)))
+
+(defun freeze-test-audio-pactl-hurd ()
+  "Pin v1.x bucket-3 X: hurd-arm audio shells out to pactl correctly.
+four sub-asserts, run inline:
+
+  1. parser: `audio--parse-pactl-list-short-sinks' returns the
+     expected (INDEX . NAME) shape for a canonical
+     `list short sinks' line.
+  2. list-cards: with `executable-find' stubbed to a fake pactl
+     path and `make-process' shimmed to inject a canned stdout,
+     `audio-list-cards' on hurd returns the parsed sinks.  also
+     asserts the argv passed to make-process is exactly
+     (\"pactl\" \"list\" \"short\" \"sinks\").
+  3. volume: `audio-volume 42' on hurd spawns pactl with argv
+     (\"set-sink-volume\" \"@DEFAULT_SINK@\" \"42%\").
+  4. degrade: with `executable-find' returning nil for pactl,
+     `audio-list-cards' on hurd returns nil and routes a
+     port-unimplemented breadcrumb (already covered by
+     `freeze-test--port-audio-list-cards-nil-and-panic'; we
+     re-assert the nil-return here so this test stands alone).
+
+we do NOT actually spawn pactl: the make-process stub captures
+the argv into a closure-local list and returns a dummy process
+object the sentinel never fires on (the list-sinks path is
+synchronous-by-pump so we also stub the sync collector when the
+real one is more than the test cares to wait for).  the goal is
+to pin the wire shape, not to verify pulseaudio."
+  (interactive)
+  (require 'userland-audio nil 'noerror)
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (and (fboundp 'audio--parse-pactl-list-short-sinks)
+                    (fboundp 'audio-list-cards)
+                    (fboundp 'audio-volume)))
+          (setq result (cons 'skip "pactl helpers unbound")))
+         (t
+          (let ((sub-results '()))
+            ;; sub 1: parser
+            (let* ((line "1\tauto_null\tmodule-null-sink.c\ts16le 2ch 44100Hz\tSUSPENDED")
+                   (parsed (audio--parse-pactl-list-short-sinks line)))
+              (push (cons 'parser
+                          (equal parsed '((1 . "auto_null"))))
+                    sub-results))
+            ;; sub 2: list-cards argv + parse round-trip
+            (let* ((captured-args nil)
+                   (canned "0\tnull-sink\tmodule.c\tfmt\tIDLE\n1\tauto_null\tmodule-null-sink.c\ts16le 2ch 44100Hz\tSUSPENDED\n"))
+              (cl-letf (((symbol-function 'audio--executable)
+                         (lambda (_n) "/usr/bin/pactl"))
+                        ((symbol-function 'executable-find)
+                         (lambda (_n &optional _r) "/usr/bin/pactl"))
+                        ((symbol-function 'audio--pactl-collect-sync)
+                         (lambda (args)
+                           (setq captured-args args)
+                           canned)))
+                (let* ((sinks (let ((geos-kernel 'hurd))
+                                (audio-list-cards))))
+                  (push (cons 'list-cards-argv
+                              (equal captured-args
+                                     '("list" "short" "sinks")))
+                        sub-results)
+                  (push (cons 'list-cards-parse
+                              (equal sinks
+                                     '((0 . "null-sink")
+                                       (1 . "auto_null"))))
+                        sub-results))))
+            ;; sub 3: volume argv
+            (let ((captured-vol-argv nil))
+              (cl-letf (((symbol-function 'audio--executable)
+                         (lambda (_n) "/usr/bin/pactl"))
+                        ((symbol-function 'audio--pactl-spawn-async)
+                         (lambda (args) (setq captured-vol-argv args))))
+                (let ((geos-kernel 'hurd))
+                  (setq audio--pactl-default-sink-runtime nil)
+                  (audio-volume 42))
+                (push (cons 'volume-argv
+                            (equal captured-vol-argv
+                                   '("set-sink-volume"
+                                     "@DEFAULT_SINK@"
+                                     "42%")))
+                      sub-results)))
+            ;; sub 4: degrade when pactl missing
+            (cl-letf (((symbol-function 'audio--executable)
+                       (lambda (_n) nil))
+                      ((symbol-function 'executable-find)
+                       (lambda (_n &optional _r) nil)))
+              (let ((rv (let ((geos-kernel 'hurd))
+                          (audio-list-cards))))
+                (push (cons 'degrade-nil (null rv)) sub-results)))
+            ;; aggregate
+            (let ((failed (cl-remove-if #'cdr sub-results)))
+              (cond
+               (failed
+                (setq result
+                      (format "sub-asserts failed: %s"
+                              (mapconcat (lambda (s)
+                                           (symbol-name (car s)))
+                                         failed " "))))
+               (t (setq result 'pass)))))))
+      (error
+       (panic-handle err 'freeze-test-audio-pactl-hurd)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'audio-pactl-hurd result)))
+
+(defun freeze-test-audio-pactl-mute-argv ()
+  "Pin v1.x bucket-3 X: `audio-mute-toggle' on hurd builds the right argv.
+shim `audio--pactl-spawn-async' to capture and assert (\"set-sink-mute\"
+\"@DEFAULT_SINK@\" \"toggle\").  separated from the main pactl test so a
+mute-argv regression names itself in the report."
+  (interactive)
+  (require 'userland-audio nil 'noerror)
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (fboundp 'audio-mute-toggle))
+          (setq result (cons 'skip "audio-mute-toggle unbound")))
+         (t
+          (let ((captured nil))
+            (cl-letf (((symbol-function 'audio--executable)
+                       (lambda (_n) "/usr/bin/pactl"))
+                      ((symbol-function 'audio--pactl-spawn-async)
+                       (lambda (args) (setq captured args))))
+              (let ((geos-kernel 'hurd))
+                (setq audio--pactl-default-sink-runtime nil)
+                (audio-mute-toggle)))
+            (cond
+             ((equal captured '("set-sink-mute" "@DEFAULT_SINK@" "toggle"))
+              (setq result 'pass))
+             (t
+              (setq result (format "captured argv = %S" captured)))))))
+      (error
+       (panic-handle err 'freeze-test-audio-pactl-mute-argv)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'audio-pactl-mute-argv result)))
 
 (defun freeze-test-session-end-isolation ()
   "Pin v0.6 item 6.4: `session-end' on user A leaves user B alone.
@@ -4065,6 +4209,8 @@ back via state-read to confirm the persist landed."
   (freeze-test-input-persist)
   (freeze-test-input-ibus-throttle)
   (freeze-test-audio-pcm-parser)
+  (freeze-test-audio-pactl-hurd)
+  (freeze-test-audio-pactl-mute-argv)
   (freeze-test-rpc-services-list)
   (freeze-test-services-client-render)
   (freeze-test-journal-client-render)

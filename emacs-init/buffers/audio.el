@@ -47,21 +47,64 @@
 the user sees this in the header line so they have feedback that
 their `+'/`-' presses actually went somewhere.")
 
-(defun audio-buffer--render-hurd ()
-  "Render the hurd-arm body of *audio*.
-Hurd has no ALSA so the cards/PCM surfaces are absent.  Print the
-banner the freeze suite and the user expect; do NOT touch ALSA
-binaries.  routes a port-unimplemented breadcrumb so a post-mortem
-sees the kernel skew that produced the empty buffer."
+(defun audio-buffer--render-hurd-no-pactl ()
+  "Render the hurd `pactl-missing' body of *audio*.
+this is the fallback when `executable-find' for pactl returns nil
+(no pulseaudio-utils package installed).  prints the historical
+banner the freeze suite and the user expect; routes a port-
+unimplemented breadcrumb so a post-mortem sees the kernel skew
+that produced the empty buffer."
   (let ((inhibit-read-only t))
     (erase-buffer)
     (setq header-line-format
-          (format "*audio*  kernel=%s  ALSA absent" geos-kernel))
+          (format "*audio*  kernel=%s  pactl absent" geos-kernel))
     (insert
      (format
-      "*audio* is not implemented on kernel %s.\n\nthe audio view reads /proc/asound, an ALSA-only surface; on hurd a translator-backed audio path is the v0.8 follow-up.  for now: no card list, no volume keys, no pcm count.\n"
+      "*audio* is not implemented on kernel %s.\n\nthe audio view reads /proc/asound, an ALSA-only surface; on hurd a translator-backed audio path is the v0.8 follow-up.  for now: no card list, no volume keys, no pcm count.\n\nyou can install pulseaudio-utils to get pactl-driven volume + mute, even without real-hardware playback (module-null-sink works).\n"
       geos-kernel))
     (geos-port-unimplemented 'audio-buffer)))
+
+(defun audio-buffer--render-hurd-pactl ()
+  "Render the hurd `pactl-present' body of *audio*.
+calls `audio-list-cards' (which on hurd shells out to pactl via
+`audio--list-cards-hurd') and lays out the rows in the same shape
+as the linux render so the keymap (RET to pick, +/- for volume, m
+for mute, n to cycle) works without divergence.  one bit of honesty
+in the header: shows pulse-sink, not card, so a user who knows
+what they're looking at is not lied to."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (setq header-line-format
+          (format "*audio*  kernel=%s  source=pactl  vol=%d%%"
+                  geos-kernel audio-buffer--current-volume))
+    (cond
+     ((not (fboundp 'audio-list-cards))
+      (insert "userland/audio.el not loaded\n"))
+     (t
+      (let ((sinks (audio-list-cards)))
+        (insert (format "  %4s %s\n" "idx" "pulse-sink"))
+        (cond
+         ((null sinks)
+          (insert "  (no pulseaudio sinks visible; daemon not running?)\n"))
+         (t
+          (dolist (s sinks)
+            (let ((line (format "  %4d %s" (car s) (cdr s))))
+              (insert (propertize line 'audio-card s) "\n")))))
+        (insert
+         "\nkeys: + vol up   - vol down   m mute   n next sink   RET pick   g refresh   q bury\n"))))))
+
+(defun audio-buffer--render-hurd ()
+  "Render the hurd-arm body of *audio*.
+dispatches on pactl presence: when `executable-find' resolves
+`audio-pactl-binary' we render the live sink list via pactl; when
+it does not we keep the historical \"not implemented\" banner so
+the v0.9.7 contract (no pactl => banner + port-unimplemented
+breadcrumb) is preserved verbatim."
+  (cond
+   ((and (boundp 'audio-pactl-binary)
+         (executable-find audio-pactl-binary))
+    (audio-buffer--render-hurd-pactl))
+   (t (audio-buffer--render-hurd-no-pactl))))
 
 (defun audio-buffer--pcm-stream-count (&optional path)
   "Return the number of playback PCM substreams visible in PATH.
@@ -144,14 +187,26 @@ on this kernel."
   (get-text-property (line-beginning-position) 'audio-card))
 
 (defun audio-buffer-pick-card ()
-  "Make the card on the current line the default sink.  bound to RET.
-sets `audio-default-card' to a string of the card index so subsequent
-amixer calls use it via `amixer -c N'."
+  "Make the row on the current line the default sink.  bound to RET.
+linux arm: sets `audio-default-card' to the card index string so
+subsequent amixer calls use it via `amixer -c N'.
+hurd arm: calls `audio-pactl-set-default-sink' with the literal
+pulse-sink NAME so subsequent pactl verbs target it; we point at
+the literal name (not at `pactl set-default-sink', which mutates
+daemon-global state)."
   (interactive)
   (let ((row (audio-buffer-card-at-point)))
     (cond
      ((null row)
-      (message "audio-buffer: no card on this line"))
+      (message "audio-buffer: no row on this line"))
+     ((geos-kernel-hurd-p)
+      (cond
+       ((fboundp 'audio-pactl-set-default-sink)
+        (audio-pactl-set-default-sink (cdr row))
+        (audio-buffer-refresh)
+        (message "audio-buffer: pactl sink -> %s" (cdr row)))
+       (t
+        (message "audio-buffer: userland/audio.el pactl helpers not loaded"))))
      (t
       (let ((idx (number-to-string (car row))))
         (cond
