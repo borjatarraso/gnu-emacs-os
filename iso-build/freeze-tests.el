@@ -3280,6 +3280,16 @@ up the shadow correctly."
 ;;     against a regression that prints the raw plist via `format "%s"'
 ;;     or drops the mounted tag, which is the user-visible failure mode
 ;;     pre-slice-B operators saw on hurd.
+;;
+;;   port/install-yes-hurd-advances
+;;     v1.x slice C pin: `install-yes' in :format-confirm on hurd MUST
+;;     advance to `install--enter-format' rather than short-circuit
+;;     with a `format step is linux-only' panic.  the pre-slice-C
+;;     `install-yes' gated on `geos-kernel-linux-p' alone, so a
+;;     regression that reintroduces that gate would silently re-block
+;;     the wizard on the kernel the v1.x research cleared.  cl-letf
+;;     stubs `install--enter-format' to flip a sentinel and binds the
+;;     wizard state so no real mkfs spawn happens.
 
 (defun freeze-test-port-hurd ()
   "Pin df7fb92: the GEOS_KERNEL=hurd code paths in the elisp port seam.
@@ -3325,6 +3335,8 @@ surface until the side-branch port attempts to boot."
                                "port.el not loaded")
           (freeze-test--record 'port/install-part-pick-render-shape
                                "port.el not loaded")
+          (freeze-test--record 'port/install-yes-hurd-advances
+                               "port.el not loaded")
           (freeze-test--record 'port/uname-hurd-synth
                                "port.el not loaded")
           (freeze-test--record 'port/journal-kmsg-no-autostart
@@ -3342,6 +3354,7 @@ surface until the side-branch port attempts to boot."
           (freeze-test--port-install-disk-list-nil-and-panic)
           (freeze-test--port-install-partitions-for-hurd-shape)
           (freeze-test--port-install-part-pick-render-shape)
+          (freeze-test--port-install-yes-hurd-advances)
           (freeze-test--port-uname-hurd-synth)
           (freeze-test--port-journal-kmsg-no-autostart)
           (freeze-test--port-audio-list-cards-nil-and-panic)
@@ -3643,6 +3656,63 @@ host)."
                      'freeze-test--port-install-part-pick-render-shape)
        (setq result (format "raised: %S" err))))
     (freeze-test--record 'port/install-part-pick-render-shape result)))
+
+(defun freeze-test--port-install-yes-hurd-advances ()
+  "Sub-check: `install-yes' on hurd in :format-confirm advances.
+v1.x slice C pin.  the pre-slice-C `install-yes' short-circuited
+on `(not (geos-kernel-linux-p))' and called `install--fail' with
+\"format step is linux-only\".  slice C relaxed the gate to
+`(or (geos-kernel-linux-p) (geos-kernel-hurd-p))' after the v1.x
+research cleared mkfs.ext4 + grub-install on canonical Debian
+Hurd 0.9.  a regression that reintroduces the linux-only gate
+would silently re-block the wizard, with the operator only seeing
+it at end-to-end VM install time; this pin catches it at boot.
+
+approach: cl-letf stubs `install--enter-format' to flip a
+sentinel and skip the real mkfs spawn, then binds `geos-kernel'
+to 'hurd, `install--state' to :format-confirm and
+`install--picked-part' to a synthetic plist of the v1.x slice A
+shape.  asserts the sentinel got flipped (proves we reached the
+format-entry branch) AND that `install--state' was not driven
+to :error by `install--fail' (proves the linux-only short-circuit
+did not fire).  skipped if `install-yes' itself is unbound (the
+buffer file did not load on this host)."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (and (fboundp 'install-yes)
+                    (fboundp 'install--enter-format)))
+          (setq result (cons 'skip "install-yes or enter-format unbound")))
+         (t
+          (let* ((reached nil)
+                 (fake-part (list :name "wd0s2"
+                                  :node "/dev/wd0s2"
+                                  :size-bytes (* 4 1024 1024 1024)
+                                  :mounted-p nil)))
+            (cl-letf
+                (((symbol-function 'install--enter-format)
+                  (lambda () (setq reached t))))
+              (let ((geos-kernel 'hurd)
+                    (install--state :format-confirm)
+                    (install--picked-part fake-part)
+                    (install--last-error nil))
+                (install-yes)
+                (cond
+                 ((not reached)
+                  (setq result
+                        (format
+                         "install-yes did not reach enter-format; state=%S err=%S"
+                         install--state install--last-error)))
+                 ((eq install--state :error)
+                  (setq result
+                        (format "install-yes drove state to :error; err=%S"
+                                install--last-error)))
+                 (t (setq result 'pass))))))))
+      (error
+       (panic-handle err
+                     'freeze-test--port-install-yes-hurd-advances)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/install-yes-hurd-advances result)))
 
 (defun freeze-test--port-uname-hurd-synth ()
   "Sub-check: `geos--uname' on hurd returns a synth plist, no /proc reads.

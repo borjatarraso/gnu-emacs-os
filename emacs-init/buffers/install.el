@@ -220,6 +220,21 @@ so callers can simply check non-nil before using the result."
    ((and (listp p) (plist-member p :name)) (plist-get p :name))
    (t (install--bad-shape p))))
 
+(defun install--part-node (p)
+  "Return the absolute /dev path for partition P, or nil if shape unknown.
+P is a /dev/X string (linux arm of `install--partitions-for') or a
+plist with :node (hurd arm).  three downstream call sites need this
+to convert the operator's pick into argv for mkfs.ext4, pid1-mount,
+and the grub-prep chain; without this helper each of those would
+have to grow its own (cond ((stringp p) p) ((listp p) ...)) which
+is the bug surface slice C is closing.  bad shapes route through
+`install--bad-shape' and the helper returns nil so callers can
+short-circuit cleanly."
+  (cond
+   ((stringp p) p)
+   ((and (listp p) (plist-member p :node)) (plist-get p :node))
+   (t (install--bad-shape p))))
+
 (defun install--part-size-human (p)
   "Return a humanised byte count for partition plist P, or nil.
 walks the plist's :size-bytes slot; falls back to a raw `%d' format
@@ -281,11 +296,20 @@ least sees something instead of a blank line."
           (cl-incf i)))))))
 
 (defun install--render-format-confirm ()
-  "Render the format-confirm step."
+  "Render the format-confirm step.
+both arms render via `install--part-node' so the operator sees
+\"/dev/wd0s2\" on hurd rather than the raw plist text; falls back
+to the bare name if for some reason :node is missing, and to a
+literal `?' if the shape is unrecognised so a regression upstream
+in `install--partitions-for' surfaces visibly here instead of as
+a malformed-format crash."
   (insert "  y format    n back    q quit\n\n")
   (insert "=== confirm format ===\n\n")
   (insert (format "  about to format %s as ext4 with label %S.\n"
-                  install--picked-part install-root-label))
+                  (or (install--part-node install--picked-part)
+                      (install--part-name install--picked-part)
+                      "?")
+                  install-root-label))
   (insert "  ALL DATA ON THIS PARTITION WILL BE LOST.\n\n")
   (insert "  press y to proceed, n to back out.\n"))
 
@@ -297,10 +321,16 @@ least sees something instead of a blank line."
   (insert "  see the per-step work buffer for live output.\n"))
 
 (defun install--render-done ()
-  "Render the success screen."
+  "Render the success screen.
+target line goes through `install--part-node' so the hurd arm
+prints the /dev path the kernel actually saw rather than the
+prin1 of the plist."
   (insert "  r reboot    q bury\n\n")
   (insert "=== install complete ===\n\n")
-  (insert (format "  target:    %s\n" install--picked-part))
+  (insert (format "  target:    %s\n"
+                  (or (install--part-node install--picked-part)
+                      (install--part-name install--picked-part)
+                      "?")))
   (insert (format "  mounted:   %s\n" install-target-mount))
   (insert "  bootloader: GRUB (BIOS / i386-pc)\n\n")
   (insert "  Remove the install medium and press r to reboot.\n"))
@@ -351,29 +381,47 @@ least sees something instead of a blank line."
   (install--repaint))
 
 (defun install--enter-format ()
-  "Spawn mkfs.ext4 on `install--picked-part'."
-  (setq install--state :format
-        install--progress "spawning mkfs.ext4")
-  (install--repaint)
-  (install-mkfs-ext4
-   install--picked-part install-root-label
-   (lambda (ok reason)
-     (cond
-      ((not ok) (install--fail (cons :format reason)))
-      (t (install--enter-mount))))))
+  "Spawn mkfs.ext4 on `install--picked-part'.
+resolves the /dev path through `install--part-node' so the linux
+arm passes the original string verbatim and the hurd arm passes
+the plist's :node slot (e.g. \"/dev/wd0s2\").  a nil from the
+helper means the partition shape was unrecognised, in which case
+`install--bad-shape' has already routed the panic and we fail the
+step rather than handing nil down to mkfs.ext4."
+  (let ((node (install--part-node install--picked-part)))
+    (cond
+     ((null node)
+      (install--fail (cons :format 'bad-partition-shape)))
+     (t
+      (setq install--state :format
+            install--progress "spawning mkfs.ext4")
+      (install--repaint)
+      (install-mkfs-ext4
+       node install-root-label
+       (lambda (ok reason)
+         (cond
+          ((not ok) (install--fail (cons :format reason)))
+          (t (install--enter-mount)))))))))
 
 (defun install--enter-mount ()
-  "Create `install-target-mount' and pid1-mount the target there."
+  "Create `install-target-mount' and pid1-mount the target there.
+resolves the /dev path through `install--part-node' for the same
+reason `install--enter-format' does: pid1-mount wants a string,
+not the operator's plist.  a nil from the helper fails the step."
   (setq install--state :mount install--progress nil)
   (install--repaint)
   (condition-case err
-      (progn
-        (unless (file-directory-p install-target-mount)
-          (make-directory install-target-mount t))
-        (when (fboundp 'pid1-mount)
-          (pid1-mount install--picked-part install-target-mount
-                      "ext4" 0 nil))
-        (install--enter-copy))
+      (let ((node (install--part-node install--picked-part)))
+        (cond
+         ((null node)
+          (install--fail (cons :mount 'bad-partition-shape)))
+         (t
+          (unless (file-directory-p install-target-mount)
+            (make-directory install-target-mount t))
+          (when (fboundp 'pid1-mount)
+            (pid1-mount node install-target-mount
+                        "ext4" 0 nil))
+          (install--enter-copy))))
     (error
      (install--fail (cons :mount err)))))
 
@@ -479,22 +527,32 @@ binding per key."
 
 (defun install-yes ()
   "y handler.  only meaningful in :format-confirm.
-On non-linux kernels the format/mkfs/copy/grub chain does not
-port (parted is not on hurd, the wizard hard-codes mkfs.ext4 and
-GRUB i386-pc), so we refuse here instead of half-doing it.  the
-disk-pick / part-pick steps still run on hurd as a read-only
-preview of what the wizard would target on linux."
+Both linux and hurd advance through the same mkfs.ext4 +
+grub-install + grub-mkconfig chain: the 2026-05-23 v1.x research
+(see `docs/runlogs/...-v1x-install-hurd-scope.md') verified that
+mke2fs and grub-install both open /dev/wd0sN storeio nodes via
+plain open(O_RDWR) and lseek/pwrite byte-for-byte, so no new
+port_caps slot was needed.  the partition the operator picked
+is a /dev/X string on linux and a (:name :node :size-bytes
+:mounted-p) plist on hurd; the downstream steps
+(`install--enter-format', `install--enter-mount') resolve the
+device path via `install--part-node' so either shape works.
+
+other kernels (no other arms today) still fail here with a
+`geos-port-unimplemented' record; that is the canonical refusal
+shape and keeps the wizard from half-doing it on a kernel where
+the binary surface is unverified."
   (interactive)
   (pcase install--state
     (:format-confirm
      (cond
-      ((not (geos-kernel-linux-p))
+      ((or (geos-kernel-linux-p) (geos-kernel-hurd-p))
+       (install--enter-format))
+      (t
        (geos-port-unimplemented 'install-format)
        (install--fail
         (cons :format
-              (format "format step is linux-only; running on %s"
-                      geos-kernel))))
-      (t (install--enter-format))))
+              (format "format step unsupported on %s" geos-kernel))))))
     (_ (message "install: y has no meaning in %s" install--state))))
 
 (defun install-reboot ()
