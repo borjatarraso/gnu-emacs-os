@@ -65,6 +65,7 @@
 
 (require 'supervise)
 (require 'port)
+(require 'panic)
 
 ;; v0.9.12 slice 5 diagnostic.  /dev/console writes (not just messages)
 ;; so the breadcrumb survives into the serial log even when *Messages*
@@ -77,6 +78,129 @@
        (format "hurd-essentials: file loaded, geos-kernel=%S\n" geos-kernel)
        nil "/dev/console" 'append 'nomsg))
   (error nil))
+
+;; v0.9.14 follow-on #1 from
+;; docs/runlogs/2026-05-22-v0914-live-kmsg-probe.md: on Debian GNU/Hurd
+;; 0.9 the canonical inetutils-syslogd config does not route
+;; user-process LOG_KERN messages into /var/log/kern.log.  syslog spec
+;; says kern facility is reserved for the kernel side, so syslogd
+;; demoting user-side kern.* to user.* is per spec.  for the GEOS
+;; journal-kmsg pipeline i want a unified view though: anything a user
+;; runs with `logger -p kern.info "..."' should land in *journal* the
+;; same way real kernel messages do, because *journal* is the one
+;; place an operator looks.
+;;
+;; the fix is a one-line override into /etc/inetutils-syslog.conf
+;; saying `kern.* /var/log/kern.log'.  this is operator-owned
+;; configuration, so the write is strictly additive: read the file,
+;; bail if the exact line is already there, otherwise append.  never
+;; truncate, never rewrite other lines.
+;;
+;; the override is written at file-load time, BEFORE supervise-autostart
+;; runs from supervise-finalize, so on a cold boot syslogd starts with
+;; the override already in place and no SIGHUP is needed.  the SIGHUP
+;; path below covers the hot-reload case where the operator re-loads
+;; hurd-essentials.el against a live system with syslogd already up.
+;;
+;; the helpers are defined at top level (not inside the hurd gate)
+;; because the byte-compiler does not recognise defuns inside a top
+;; level `when' as known functions and warns; the actual call sites are
+;; the only thing that needs the gate.  on Linux these helpers are
+;; defined but never reached.
+(defconst hurd-essentials--syslog-conf "/etc/inetutils-syslog.conf"
+  "Path of the inetutils-syslogd config we patch for kern.* routing.")
+
+(defconst hurd-essentials--syslog-kern-line "kern.*    /var/log/kern.log"
+  "Exact line we ensure is present in `hurd-essentials--syslog-conf'.
+Four spaces between selector and action; inetutils-syslogd's parser
+accepts any run of whitespace as the field separator (tab or spaces),
+i pin one canonical byte sequence so the idempotency check is a
+plain string search rather than a tokenize-and-compare.  if an
+operator hand-wrote the same logical line with a tab instead, the
+appender below will add a second copy; that is benign (syslogd
+honors duplicate selector/action lines as one) and the operator can
+delete one if it bothers them.")
+
+(defun hurd-essentials--syslog-conf-has-kern-override-p ()
+  "Return non-nil iff the kern.* override is already present.
+Reads `hurd-essentials--syslog-conf' if it exists.  a missing file
+counts as absent (the appender will create a one-line file in that
+case).  all I/O routed through panic-handle on file-error so a
+permission denied or transient mount glitch does not crash the
+supervisor."
+  (and (file-exists-p hurd-essentials--syslog-conf)
+       (condition-case err
+           (with-temp-buffer
+             (insert-file-contents hurd-essentials--syslog-conf)
+             (save-excursion
+               (goto-char (point-min))
+               (search-forward hurd-essentials--syslog-kern-line nil t)))
+         (file-error
+          (panic-handle err 'hurd-essentials--syslog-conf-has-kern-override-p)
+          ;; pretend the line is present so the appender is a no-op;
+          ;; we already logged the read failure, no reason to
+          ;; immediately retry the same path as a write.
+          t))))
+
+(defun hurd-essentials--ensure-syslog-conf-kern-override ()
+  "Idempotently append the kern.* override to inetutils-syslog.conf.
+No-op if the exact line is already present.  appends (creating the
+file if missing) otherwise.  never truncates and never touches other
+lines; this file is operator-owned.  file-error during the append is
+panic-handled so the supervisor stays up."
+  (cond
+   ((hurd-essentials--syslog-conf-has-kern-override-p)
+    (supervise--console
+     "hurd-essentials: syslog.conf kern.* override already present, no write"))
+   (t
+    (condition-case err
+        (progn
+          ;; trailing newline so the file ends clean and a future
+          ;; append from another tool lands on a fresh line.  the
+          ;; 'append flag here is the load-bearing piece: even if the
+          ;; file already has content we trust nothing about its
+          ;; final byte and just append our line + newline.
+          (write-region
+           (concat hurd-essentials--syslog-kern-line "\n")
+           nil hurd-essentials--syslog-conf 'append 'nomsg)
+          (supervise--console
+           "hurd-essentials: appended kern.* override to %s"
+           hurd-essentials--syslog-conf))
+      (file-error
+       (panic-handle err 'hurd-essentials--ensure-syslog-conf-kern-override)
+       (supervise--console
+        "hurd-essentials: syslog.conf kern.* override append FAILED %S"
+        err))))))
+
+(defun hurd-essentials--maybe-sighup-syslogd ()
+  "Send SIGHUP to a running hurd-syslogd so it re-reads the config.
+If the service is not registered, not running, or has no pid (e.g.
+the override was written during file-load before supervise-finalize
+started anything), this is a no-op: the override will be picked up
+at first start, the contract holds.  pid1-kill would be nicer for
+consistency with the rest of the supervisor, but no such binding
+exists in the pid1 module yet; signal-process is the boring fallback
+that has been load-bearing in session-end (core/session.el) since
+v0.6, so the precedent is solid."
+  (let* ((svc (and (boundp 'supervise--registry)
+                   (hash-table-p supervise--registry)
+                   (gethash 'hurd-syslogd supervise--registry)))
+         (pid (and svc (supervise-service-pid svc))))
+    (cond
+     ((not (and (integerp pid) (fboundp 'signal-process)))
+      (supervise--console
+       "hurd-essentials: skip SIGHUP, syslogd not running (pid=%S)" pid))
+     (t
+      (condition-case err
+          (progn
+            (signal-process pid 'HUP)
+            (supervise--console
+             "hurd-essentials: SIGHUP sent to syslogd pid=%d" pid))
+        (error
+         (panic-handle err 'hurd-essentials--maybe-sighup-syslogd)
+         (supervise--console
+          "hurd-essentials: SIGHUP to syslogd pid=%d FAILED %S"
+          pid err)))))))
 
 (when (eq geos-kernel 'hurd)
   (condition-case _
@@ -128,6 +252,9 @@
     :autostart t
     :buffer " *supervise:hurd-syslogd*"
     :env nil)
+
+  (hurd-essentials--ensure-syslog-conf-kern-override)
+  (hurd-essentials--maybe-sighup-syslogd)
 
   (condition-case _
       (let ((write-region-inhibit-fsync t))
