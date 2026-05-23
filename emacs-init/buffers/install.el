@@ -200,6 +200,65 @@ without killing the buffer."
           (insert (propertize line 'install-disk d) "\n"))
         (cl-incf i))))))
 
+(defun install--bad-shape (p)
+  "Route a malformed partition entry P through panic-handle.
+the part-pick screen accepts two shapes: a /dev/X path string (the
+linux arm of `install--partitions-for') or a plist carrying :name
+:node :size-bytes :mounted-p (the hurd arm).  anything else means
+a regression in one of those producers; surface it via panic-handle
+rather than letting it raise up into the keymap handler."
+  (panic-handle (cons 'install-bad-part-shape p) 'install--part-pick)
+  nil)
+
+(defun install--part-name (p)
+  "Return the bare slice name for partition P, or nil if shape unknown.
+P is a /dev/X string (linux arm) or a plist with :name (hurd arm).
+returns nil and routes through `install--bad-shape' for anything else,
+so callers can simply check non-nil before using the result."
+  (cond
+   ((stringp p) (substring p (length "/dev/")))
+   ((and (listp p) (plist-member p :name)) (plist-get p :name))
+   (t (install--bad-shape p))))
+
+(defun install--part-size-human (p)
+  "Return a humanised byte count for partition plist P, or nil.
+walks the plist's :size-bytes slot; falls back to a raw `%d' format
+if `file-size-human-readable' is unavailable (older Emacs), and to
+\"?\" if :size-bytes itself is nil.  not called for the linux arm
+because that arm's elements are plain path strings."
+  (let ((bytes (plist-get p :size-bytes)))
+    (cond
+     ((not bytes) "?")
+     ((fboundp 'file-size-human-readable)
+      (file-size-human-readable bytes))
+     (t (format "%d" bytes)))))
+
+(defun install--part-render-line (p)
+  "Return the displayed text for a single partition entry P.
+two shapes:
+  - string \"/dev/X\" (linux): render verbatim, byte-identical to
+    the pre-slice-B output so the linux arm is undisturbed.
+  - plist (:name :node :size-bytes :mounted-p) (hurd): render as
+    \"<name>   <size-human>   [mounted]\" where the bracket marker
+    only appears when :mounted-p is non-nil.
+
+unknown shapes route through `install--bad-shape' and the rendered
+string falls back to a `?'-prefixed `prin1' so the operator at
+least sees something instead of a blank line."
+  (cond
+   ((stringp p) p)
+   ((and (listp p) (plist-member p :name))
+    (let ((name (plist-get p :name))
+          (size (install--part-size-human p))
+          (mnt (plist-get p :mounted-p)))
+      (format "%s   %s%s"
+              name
+              size
+              (if mnt "   [mounted]" ""))))
+   (t
+    (install--bad-shape p)
+    (format "? %S" p))))
+
 (defun install--render-part-pick ()
   "Render the partition-pick step."
   (let* ((disk install--picked-disk)
@@ -217,7 +276,7 @@ without killing the buffer."
       (let ((i 0))
         (dolist (p parts)
           (let* ((caret (if (= i install--row) "->" "  "))
-                 (line (format "%s %s" caret p)))
+                 (line (format "%s %s" caret (install--part-render-line p))))
             (insert (propertize line 'install-part p) "\n"))
           (cl-incf i)))))))
 
@@ -361,12 +420,18 @@ without killing the buffer."
      (let* ((disk install--picked-disk)
             (parts (and disk (install--partitions-for
                               (plist-get disk :name))))
-            (p (nth install--row parts)))
+            (p (nth install--row parts))
+            ;; bare-name extractor handles both shapes; if the shape
+            ;; is bad it routes through `install--bad-shape' and
+            ;; returns nil, which the (null name) arm catches below.
+            (name (and p (install--part-name p))))
        (cond
         ((null p) (message "install: no partition on this line"))
-        ((install-disk-mounted-p
-          (substring p (length "/dev/")))
-         (message "install: refuses to wipe %s, mounted in /proc/mounts" p))
+        ((null name)
+         (message "install: bad partition shape, see *panic*"))
+        ((install-disk-mounted-p name)
+         (message "install: refuses to wipe %s, mounted in /proc/mounts"
+                  name))
         (t (install--enter-format-confirm p)))))
     (:error (install :welcome))
     (_ (message "install: RET has no meaning in state %s" install--state))))

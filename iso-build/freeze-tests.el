@@ -3268,6 +3268,18 @@ up the shadow correctly."
 ;;     `wd0' over-match `wd00s1' on a hypothetical many-disk system,
 ;;     and pins the shape contract so the wizard's renderer can rely
 ;;     on plist-get keys never going missing.
+;;
+;;   port/install-part-pick-render-shape
+;;     v1.x slice B pin: `install--render-part-pick' on the hurd plist
+;;     shape produces a human-readable line.  feeds a two-entry synthetic
+;;     plist list (one mounted, one not) into the renderer with the
+;;     buffer ephemeral, cl-letf-overrides `install--partitions-for' so
+;;     no /dev probe runs, and asserts the rendered text contains the
+;;     bare slice name, the humanised size, and the `[mounted]' marker
+;;     for the mounted row but NOT for the unmounted row.  guards
+;;     against a regression that prints the raw plist via `format "%s"'
+;;     or drops the mounted tag, which is the user-visible failure mode
+;;     pre-slice-B operators saw on hurd.
 
 (defun freeze-test-port-hurd ()
   "Pin df7fb92: the GEOS_KERNEL=hurd code paths in the elisp port seam.
@@ -3286,6 +3298,7 @@ surface until the side-branch port attempts to boot."
   (require 'port nil 'noerror)
   (require 'disks-buffer nil 'noerror)
   (require 'install-disk nil 'noerror)
+  (require 'install-buffer nil 'noerror)
   (require 'userland-uname nil 'noerror)
   (require 'userland-audio nil 'noerror)
   (require 'audio-buffer nil 'noerror)
@@ -3310,6 +3323,8 @@ surface until the side-branch port attempts to boot."
                                "port.el not loaded")
           (freeze-test--record 'port/install-partitions-for-hurd-shape
                                "port.el not loaded")
+          (freeze-test--record 'port/install-part-pick-render-shape
+                               "port.el not loaded")
           (freeze-test--record 'port/uname-hurd-synth
                                "port.el not loaded")
           (freeze-test--record 'port/journal-kmsg-no-autostart
@@ -3326,6 +3341,7 @@ surface until the side-branch port attempts to boot."
           (freeze-test--port-disks-render-no-sysblock)
           (freeze-test--port-install-disk-list-nil-and-panic)
           (freeze-test--port-install-partitions-for-hurd-shape)
+          (freeze-test--port-install-part-pick-render-shape)
           (freeze-test--port-uname-hurd-synth)
           (freeze-test--port-journal-kmsg-no-autostart)
           (freeze-test--port-audio-list-cards-nil-and-panic)
@@ -3537,6 +3553,96 @@ clean dev host will."
                      'freeze-test--port-install-partitions-for-hurd-shape)
        (setq result (format "raised: %S" err))))
     (freeze-test--record 'port/install-partitions-for-hurd-shape result)))
+
+(defun freeze-test--port-install-part-pick-render-shape ()
+  "Sub-check: `install--render-part-pick' renders plist entries cleanly.
+v1.x slice B pin.  feeds a synthetic two-entry plist list (one mounted
+slice, one not) through the renderer with the buffer ephemeral and
+`install--partitions-for' stubbed so no /dev probe runs.  asserts:
+
+  (a) the rendered text contains each slice's bare :name;
+  (b) the rendered text contains the humanised :size-bytes;
+  (c) the `[mounted]' marker appears for the mounted row;
+  (d) the `[mounted]' marker does NOT appear for the unmounted row.
+
+guards against the pre-slice-B failure mode where the plist printed
+literally via `format \"%s\"' (ugly but non-crashing) and against a
+later regression that drops the mounted tag.  skipped if any of the
+slice-B render helpers are unbound (the file did not load on this
+host)."
+  (let ((result 'fail))
+    (condition-case err
+        (cond
+         ((not (and (fboundp 'install--render-part-pick)
+                    (fboundp 'install--part-render-line)))
+          (setq result (cons 'skip "install render helpers unbound")))
+         (t
+          ;; synthetic disk + two-slice plist list.  i pick sizes that
+          ;; round to distinct human strings so a renderer that drops
+          ;; the size column shows up as a missing substring rather
+          ;; than as a coincidental match.
+          (let* ((disk (list :name "wd0" :path "/dev/wd0"))
+                 (parts (list
+                         (list :name "wd0s1"
+                               :node "/dev/wd0s1"
+                               :size-bytes (* 4 1024 1024 1024)
+                               :mounted-p nil)
+                         (list :name "wd0s2"
+                               :node "/dev/wd0s2"
+                               :size-bytes (* 16 1024 1024 1024)
+                               :mounted-p t)))
+                 (install--picked-disk disk)
+                 (install--row 0)
+                 (body
+                  (with-temp-buffer
+                    (cl-letf (((symbol-function 'install--partitions-for)
+                               (lambda (_d) parts)))
+                      (install--render-part-pick))
+                    (buffer-string))))
+            (cond
+             ((not (string-match-p "wd0s1" body))
+              (setq result "render missing slice name wd0s1"))
+             ((not (string-match-p "wd0s2" body))
+              (setq result "render missing slice name wd0s2"))
+             ;; size-human: file-size-human-readable on 4 GiB returns
+             ;; "4.0G" or "4G" depending on emacs version; match the
+             ;; leading digit + unit letter so both shapes pass.  the
+             ;; failure mode i care about is no size at all (a literal
+             ;; "(:size-bytes 4294967296 ...)" plist print would not
+             ;; contain a bare "G" outside the keyword text).
+             ((not (string-match-p "4[^ ]*G" body))
+              (setq result
+                    (format "render missing 4G size: %s"
+                            (substring body 0 (min 200 (length body))))))
+             ((not (string-match-p "16[^ ]*G" body))
+              (setq result
+                    (format "render missing 16G size: %s"
+                            (substring body 0 (min 200 (length body))))))
+             ;; mounted tag MUST appear once (for wd0s2) and the row
+             ;; for wd0s1 must NOT carry it.  i scan line-by-line to
+             ;; rule out a renderer that prints the tag globally.
+             (t
+              (let ((s1-line nil) (s2-line nil))
+                (dolist (l (split-string body "\n" t))
+                  (when (string-match-p "wd0s1" l) (setq s1-line l))
+                  (when (string-match-p "wd0s2" l) (setq s2-line l)))
+                (cond
+                 ((not s1-line) (setq result "no wd0s1 line in render"))
+                 ((not s2-line) (setq result "no wd0s2 line in render"))
+                 ((string-match-p "\\[mounted\\]" s1-line)
+                  (setq result
+                        (format "[mounted] tag on unmounted row: %s"
+                                s1-line)))
+                 ((not (string-match-p "\\[mounted\\]" s2-line))
+                  (setq result
+                        (format "[mounted] tag missing on mounted row: %s"
+                                s2-line)))
+                 (t (setq result 'pass)))))))))
+      (error
+       (panic-handle err
+                     'freeze-test--port-install-part-pick-render-shape)
+       (setq result (format "raised: %S" err))))
+    (freeze-test--record 'port/install-part-pick-render-shape result)))
 
 (defun freeze-test--port-uname-hurd-synth ()
   "Sub-check: `geos--uname' on hurd returns a synth plist, no /proc reads.
