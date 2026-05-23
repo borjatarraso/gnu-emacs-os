@@ -249,6 +249,26 @@ version:
     with `-lihash -lshouldbeinlibc`); in-VM link verify is
     the v0.9.17 starter.  receipt at
     [docs/runlogs/2026-05-23-hurd-v0916-cold-boot-verify.md](docs/runlogs/2026-05-23-hurd-v0916-cold-boot-verify.md).
+  - v0.9.17: tagged. closes v0.9.14 follow-on #1 properly and
+    flips the last `PENDING` row in `docs/HURD_PORT.md`.
+    `journal-tail.el` grows a second supervised tail on
+    `/var/log/syslog` (Hurd-gated) that retags emitted
+    records' `:source` plist slot to `syslog-user`, so
+    user-process `logger -p kern.info` lines (which syslogd
+    demotes to `LOG_USER` per syslog spec and lands in
+    `/var/log/syslog`, not `/var/log/kern.log`) finally appear
+    in `*journal*` with a visible source distinction from
+    genuine kernel messages.  no de-dup logic because canonical
+    Debian Hurd 0.9 routes `kern.*` only to `kern.log`.
+    `STATIC=1` link cleanliness on Hurd flipped `PENDING ->
+    YES` after the in-VM verify on the preserved v0.9.16
+    work.img produced `emacs-init` 1,552,824 B with `file`
+    reporting `statically linked`, no dynamic section per
+    `readelf -d`, and `ldd` reporting `not a dynamic
+    executable`.  receipts at
+    [docs/runlogs/2026-05-23-hurd-v0917-static-in-vm-verify.md](docs/runlogs/2026-05-23-hurd-v0917-static-in-vm-verify.md)
+    and
+    [docs/runlogs/2026-05-23-hurd-v0917-syslog-tail-verify.md](docs/runlogs/2026-05-23-hurd-v0917-syslog-tail-verify.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
