@@ -293,6 +293,36 @@ version:
     cleanly, and closing the wedge so the full chain can
     ship is the v0.9.19 follow-on.  receipt at
     [docs/runlogs/2026-05-23-hurd-v0918-image-reroll.md](docs/runlogs/2026-05-23-hurd-v0918-image-reroll.md).
+  - v0.9.19: tagged. trampoline wedge closed.  the v0.9.18
+    follow-on resolved as a deployment freshness gap, not a
+    missing toolchain.  canonical Debian GNU/Hurd 0.9 has
+    gcc 15.2.0 and binutils 2.46 in stock apt; the v0.9.18
+    image had baked an early snapshot of
+    `emacs-init/early-init.el` that predated the native-comp
+    opt-out clause.  a single re-roll cycle picks up current
+    main; the full 35-file `-l` init.args chain then boots
+    through to the supervised emacs sitting in `*scratch*`
+    with hurd-essentials registering services and `settrans
+    /hurd/pfinet` exit=0.  zero `kill_emacs`, `trampoline`,
+    `SIGSEGV`, `abort`, `panic`, `Backtrace`, or `fatal` hits
+    over the 509-line full-chain serial transcript.  pulseaudio
+    Y re-verified on the fresh v0919 image (server up,
+    module-null-sink loaded) after the `/var` translator
+    quirk worked around via `settrans -fg /var`.  bucket-2
+    probes shipped instruction-level diagnoses for glibc
+    `pt-hurd-cond-timedwait.o` and pflocal `SO_RCVTIMEO`,
+    both with deferred-upstream HURD_PORT.md rows.  three
+    v1.x install slices (partitions A/B + kernel-gate relax
+    C) and audio piece X pactl wiring landed early.  zero
+    HURD_PORT.md row flips this release; every row was already
+    YES or deferred-upstream as of v0.9.17.  first GEOS
+    release where the canonical 35-file emacs-init chain
+    boots end-to-end on real Debian GNU/Hurd 0.9 with pid1
+    as actual PID 1.  receipts at
+    [docs/runlogs/2026-05-23-hurd-v0919-bucket2-probes.md](docs/runlogs/2026-05-23-hurd-v0919-bucket2-probes.md),
+    [docs/runlogs/2026-05-24-v0919-bucket-closeout.md](docs/runlogs/2026-05-24-v0919-bucket-closeout.md),
+    and
+    [docs/runlogs/2026-05-24-hurd-v0919-image-reroll-fullchain.md](docs/runlogs/2026-05-24-hurd-v0919-image-reroll-fullchain.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
