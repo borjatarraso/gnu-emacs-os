@@ -704,6 +704,23 @@ static const char *geos_mode_env = NULL;
 static char geos_kernel_env_buf[64];
 static const char *geos_kernel_env = NULL;
 
+/* v0.9.20 slice A: unconditional sentinel that the supervised emacs is
+ * a child of pid1.  before this splice, the elisp `pid1-as-emacs-p'
+ * predicate keyed on PID1_MODULE_PATH, which STATIC=1 builds never set
+ * (the inline-primitives path deliberately skips the dlopen, see the
+ * argv[2] guard around line 1640).  consequence: every supervision
+ * gate downstream (supervise-finalize, autostart, /var ownership,
+ * session.el's pid1-spawn path) silently fell through to the dev-host
+ * no-op branch under STATIC builds.  caught on the v0.9.19 full-chain
+ * boot when hurd-essentials' :autostart sshd never came up.
+ *
+ * GEOS_PID1=1 is a fixed string literal because there is nothing
+ * variable to splice; this is purely "pid1 spawned this emacs".  the
+ * pointer is a global so the envp[] splice below treats it the same
+ * shape as module_env/geos_kernel_env (assigned-or-NULL).  it is
+ * always non-NULL: pid1 always wants to mark its supervised emacs. */
+static const char *geos_pid1_env = "GEOS_PID1=1";
+
 /* (B1, skeptic 2026-05-06) supervisor needs to know which child pid
  * is the X server so it can react to Xorg dying instead of treating
  * it as just another reaped orphan. set by xorg_bring_up() after a
@@ -1162,15 +1179,15 @@ spawn_emacs(void)
         argv[ai] = NULL;
 
         /* envp is fixed-size; we splice PID1_MODULE_PATH, DISPLAY,
-         * GEOS_MODE, GEOS_KERNEL in if they were set.  4 fixed entries
-         * + up to 4 conditional + trailing NULL = 9 slots worst-case
-         * today.  the cap is sized at 12 to leave headroom for the
-         * next env splice (skeptic B2: a missing bump on the next
-         * addition would write envp[ei] = NULL one past the array and
-         * the bug class is "supervisor execve overruns envp" which
-         * brick-installs).  raise the cap together with any new
-         * envp[ei++] line. */
-        char *envp[12];
+         * GEOS_MODE, GEOS_KERNEL, GEOS_PID1 in if they were set.  4
+         * fixed entries + up to 5 conditional + trailing NULL = 10
+         * slots worst-case today.  the cap is sized at 13 to leave
+         * headroom for the next env splice (skeptic B2: a missing
+         * bump on the next addition would write envp[ei] = NULL one
+         * past the array and the bug class is "supervisor execve
+         * overruns envp" which brick-installs).  raise the cap
+         * together with any new envp[ei++] line. */
+        char *envp[13];
         int ei = 0;
         envp[ei++] = "TERM=linux";
         envp[ei++] = "HOME=/root";
@@ -1181,6 +1198,10 @@ spawn_emacs(void)
         if (display_env) envp[ei++] = (char *)display_env;
         if (geos_mode_env) envp[ei++] = (char *)geos_mode_env;
         if (geos_kernel_env) envp[ei++] = (char *)geos_kernel_env;
+        /* GEOS_PID1=1: const string literal at file scope, never
+         * NULL.  shape-parallel with the splices above; the if is
+         * defensive but in practice always taken. */
+        if (geos_pid1_env) envp[ei++] = (char *)geos_pid1_env;
         envp[ei] = NULL;
         execve(emacs_path, argv, envp);
         /* execve only returns on failure; if it succeeded the child is
