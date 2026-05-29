@@ -58,15 +58,33 @@
 ;; the C emacs-init forks emacs as a child, so emacs's pid is not 1
 ;; even when we are the supervised userland. the right signal that we
 ;; are the OS emacs (not a stray `emacs -Q` on a dev host) is whether
-;; emacs-init populated PID1_MODULE_PATH in our env. once stage B
-;; lands and emacs itself is PID 1, this predicate flips back to
-;; (= (emacs-pid) 1) and pid1-module.so loads as a dlopen from a
-;; statically-linked emacs. for now, env presence is the truth.
-(defconst pid1-as-emacs-p (and (getenv "PID1_MODULE_PATH") t)
+;; pid1 spliced a sentinel into our env. v0.9.20 slice A adds the
+;; unconditional GEOS_PID1=1 splice so STATIC=1 builds (which never
+;; set PID1_MODULE_PATH because they inline the primitives) still
+;; trip this predicate; before that change, every downstream
+;; supervision gate fell through on STATIC builds and sshd autostart
+;; never fired on the full-chain Hurd boot. PID1_MODULE_PATH stays
+;; in the predicate so a dynamic-module build (Guix gexp shape) also
+;; satisfies it without needing the v0.9.20 pid1 binary on the same
+;; system. once stage B lands and emacs itself is PID 1, this
+;; predicate flips back to (= (emacs-pid) 1) and pid1-module.so
+;; loads as a dlopen from a statically-linked emacs.
+(defconst pid1-as-emacs-p (and (or (getenv "PID1_MODULE_PATH")
+                                   (getenv "GEOS_PID1"))
+                               t)
   "Non-nil when this Emacs is the supervised OS userland.
-True when emacs-init exported PID1_MODULE_PATH into our env. Used
-downstream to gate module loads, /var ownership, and supervision
-wiring. Plain `emacs -Q` invocations on a dev host see nil here.")
+True when pid1 either exported PID1_MODULE_PATH (dynamic-module
+builds) or GEOS_PID1=1 (STATIC=1 builds, v0.9.20+) into our env.
+Used downstream to gate module loads, /var ownership, and
+supervision wiring. Plain `emacs -Q' invocations on a dev host see
+nil here.
+
+Note: the env splice is inherited by every child process of the
+supervisor emacs (eshell, make-process, shstub bounce-back), so
+GEOS_PID1=1 visible inside a subprocess does NOT mean that
+subprocess IS the supervisor. A future supervisor-identity check
+needs (= (emacs-pid) ...) against a pid-pinned token, not this
+predicate.")
 
 (message "early-init: emacs pid=%d pid1-as-emacs-p=%s module-env=%s"
          (emacs-pid) pid1-as-emacs-p (getenv "PID1_MODULE_PATH"))
