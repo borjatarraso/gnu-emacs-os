@@ -129,3 +129,92 @@ to the probe receipt above.
     submission.  pfinet is FSF / GNU territory; there is no Debian
     packaging side to this one beyond rebuilding once upstream
     lands.
+
+## To file
+
+- destination: `bug-hurd@gnu.org` (or the Savannah `hurd` tracker
+  at https://savannah.gnu.org/bugs/?group=hurd if a tracker entry
+  is preferred over a list post; either reaches the same set of
+  maintainers).
+- subject line: `[pfinet] no per-interface byte / packet counter RPC; please add SIOCGIFSTATS or equivalent`
+- body header:
+
+  on Debian GNU/Hurd 0.9 (pfinet as shipped in the `hurd` source
+  package, `pfinet.defs` subsystem 37000, `iioctl.defs` subsystem
+  112000), there is no RPC, no ioctl, and no procfs file that
+  returns per-interface byte / packet counters.  `/proc/net/dev`
+  does not exist; the per-iface ioctl menu covers ADDR / DSTADDR /
+  FLAGS / BRDADDR / CONF / NETMASK / METRIC / ARP / MTU / INDEX /
+  NAME / HWADDR and no stats slot; `pfinet.defs` exposes exactly
+  two routines, `pfinet_siocgifconf` and `pfinet_getroutes`; the
+  `/hurd/pfinet` binary carries no `*_get_stats` entry beyond
+  `tunnel_get_stats` (a Linux-net internal callback, not an RPC).
+  user impact: every tool that reads `/proc/net/dev` (ifconfig
+  byte counts, bmon, vnstat, prometheus node_exporter, GEOS's
+  `*network*` buffer, anything else) reports zero traffic on
+  every interface regardless of actual load.  request: add a
+  per-iface stats getter so the counters pfinet already maintains
+  internally (via its Linux-net glue layer) become readable.
+
+## Patch sketch (not yet a working diff)
+
+```pseudo-diff
+--- include/hurd/iioctl.defs
++++ include/hurd/iioctl.defs
+@@
++/* slot N (pick the next free slot from the existing skip list:
++   0-11, 13, 15, 18, 20-21, 26-32, 36, 38, 40-50, 53-89). */
++routine iioctl_siocgifstats (
++        iface : io_t;
++        out stats : iioctl_net_device_stats_t);
+
+--- include/hurd/iioctl_types.defs
++++ include/hurd/iioctl_types.defs
+@@
++type iioctl_net_device_stats_t = struct {
++    uint64_t rx_bytes;
++    uint64_t tx_bytes;
++    uint64_t rx_packets;
++    uint64_t tx_packets;
++    uint64_t rx_errors;
++    uint64_t tx_errors;
++    uint64_t rx_dropped;
++    uint64_t tx_dropped;
++};
+
+--- pfinet/iioctl-ops.c
++++ pfinet/iioctl-ops.c
+@@
++kern_return_t
++S_iioctl_siocgifstats (struct iouser *user, ifname_t name,
++                       iioctl_net_device_stats_t *stats)
++{
++  /* look up the device by ifname; copy the in-kernel net_device_stats
++     struct that the Linux net glue maintains on every recv/xmit out
++     to the caller; map missing iface to ENODEV.  */
++}
+
+--- glibc: sysdeps/mach/hurd/bits/ioctls.h
++++ glibc: sysdeps/mach/hurd/bits/ioctls.h
+@@
++#define SIOCGIFSTATS  _IOWR ('i', N, struct iioctl_net_device_stats)
+```
+
+- reproduction steps (canonical Debian GNU/Hurd 0.9):
+
+  1. boot the canonical image, log in, generate traffic on lo:
+     `ping -c 100 127.0.0.1 >/dev/null`.
+  2. observe `cat /proc/net/dev` returns `No such file or directory`.
+  3. observe `ifconfig lo` reports `RX bytes:0` and `TX bytes:0`
+     under live traffic.
+  4. for the ioctl confirmation, compile and run the 30-line
+     SIOCGIFSTATS probe from finding 4 in the runlog; observe
+     `errno=1073741849 "Inappropriate ioctl for device"`
+     (Hurd-encoded ENOTTY).
+  5. for the binary scan: `nm /hurd/pfinet | grep _get_stats`
+     returns exactly one hit, `tunnel_get_stats`, which is a
+     Linux-net internal callback and not exported as a Mach RPC.
+
+- GEOS runlog: `docs/runlogs/2026-05-20-hurd-pfinet-counters-probe.md`.
+
+filed-by: Borja Tarraso <borja.tarraso@member.fsf.org>

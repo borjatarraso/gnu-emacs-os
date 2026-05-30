@@ -126,3 +126,107 @@ multi-client / per-app-volume use case once installed.
 
 HURD_PORT.md row 280 carries the "deferred at translator level"
 verdict with a pointer to the audio probe receipt above.
+
+## To file (bug-hurd, design discussion)
+
+- destination: `bug-hurd@gnu.org` (the canonical inbox; also
+  reachable as the Savannah `hurd` tracker at
+  https://savannah.gnu.org/bugs/?group=hurd if a tracker entry is
+  preferred over a list post).
+- subject line: `[RFC] no native audio translator on Debian GNU/Hurd 0.9; design discussion for /hurd/audio`
+- body header:
+
+  on Debian GNU/Hurd 0.9 (hurd 1:0.9.git20230520-7, gnumach
+  1.8+git20230410-1), there is no native audio surface.  `/hurd/`
+  ships 74 translator binaries and none match
+  `audio|snd|dsp|sound|mixer|oss|alsa`; `/dev/` has no audio
+  nodes; `/servers/` enumerates 13 entries and none are audio;
+  gnumach boot enumerates no audio hardware in dmesg.  the user
+  impact: no application that opens an audio device works
+  (everything from `aplay` through pulseaudio's real-hardware
+  sinks).  the pragmatic workaround is `apt install pulseaudio`,
+  which installs cleanly on hurd-amd64 and exercises null sinks /
+  module-pipe-source paths, but cannot reach hardware.  this RFC
+  asks for design feedback on three remediation levels: apt-image
+  bundling of pulseaudio (no upstream change), a native
+  `/hurd/audio` translator (large), and a Mach-RPC sound server
+  (larger).
+
+## Patch sketch (not yet a working diff)
+
+```pseudo-diff
+/* new translator binary, structurally parallel to /hurd/pfinet
+   and /hurd/streamio.  attaches to /dev/dsp (and friends) via
+   settrans; client opens the device node and reads/writes PCM
+   with ioctls for format / rate / channel selection.  */
+
+--- hurd/audio/main.c  (new)
++++ hurd/audio/main.c
+@@
++/* audio translator: serves /dev/dsp and friends.  OSS
++   SNDCTL_DSP_* ioctls for format / rate / channel; read/write
++   for PCM; attaches via settrans /dev/dsp /hurd/audio.  */
++int
++main (int argc, char **argv)
++{
++  /* parse args (device backend: rumpaudio vs native gnumach
++     driver), bind the translator control port, enter the
++     server loop.  */
++}
+
+--- gnumach: device/audio.c  (new, driver layer)
++++ gnumach: device/audio.c
+@@
++/* either: port a NetBSD audio driver via the rumpkernel path
++   (rumpdisk / rumpnet are the precedent on hurd-amd64; rumpaudio
++   is the natural sibling); or write a native gnumach driver
++   against the QEMU intel-hda / ac97 device first to get a
++   known-good target before any real-hardware bring-up.  */
+```
+
+- reproduction steps (canonical Debian GNU/Hurd 0.9):
+
+  1. boot the canonical image.
+  2. `ls /hurd/ | grep -iE 'audio|snd|dsp|sound|mixer|oss|alsa'`
+     prints nothing.
+  3. `ls /dev/dsp /dev/audio /dev/mixer /dev/snd /dev/sound`
+     returns ENOENT on every path.
+  4. `ls /servers/` lists 13 names; none are audio.
+  5. `dmesg | grep -iE 'audio|snd|sound|dsp|oss|alsa'` returns
+     no matches.
+  6. `dpkg -L hurd | grep -iE 'audio|snd|sound|dsp|oss|alsa'`
+     returns no matches.
+  7. for the pulseaudio workaround:
+     `apt install pulseaudio && pulseaudio --start && pactl list short sinks`
+     succeeds with a null sink; no hardware is reachable.
+
+- GEOS runlog: `docs/runlogs/2026-05-21-hurd-audio-probe.md`
+  (H1 / H2 / H3 / H4 falsified end-to-end; H5 partial; H6
+  confirmed for pulseaudio 17.0+dfsg1-2.1 and sndio).
+
+filed-by: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+## To file (debian-hurd, packaging side)
+
+- destination: `debian-hurd@lists.debian.org` (the Debian Hurd
+  porters list; the maintainers who would land an apt-image
+  flavor with pulseaudio bundled live here).
+- subject line: `[debian-hurd] no native audio translator on hurd-amd64; suggesting pulseaudio in the live-image task`
+- body header:
+
+  on Debian GNU/Hurd 0.9 there is no audio surface in the base
+  install (no `/hurd/audio*`, no `/dev/dsp`, no `/servers/audio`,
+  no gnumach driver enumeration).  pulseaudio 17.0+dfsg1-2.1 from
+  debian-ports sid/main is installable on hurd-amd64 and works
+  for null-sink / module-pipe-source paths; the gap is purely
+  that it is not bundled in the canonical image.  the proposal
+  is to add pulseaudio (and the userland that goes with it) to a
+  future hurd-amd64 live-image flavor so audio-aware userland
+  comes up zero-config.  the deeper translator / driver work is
+  filed separately on `bug-hurd@gnu.org`.
+
+- reproduction steps and probe pointer: same as the bug-hurd
+  filing above; GEOS runlog
+  `docs/runlogs/2026-05-21-hurd-audio-probe.md`.
+
+filed-by: Borja Tarraso <borja.tarraso@member.fsf.org>
