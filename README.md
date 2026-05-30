@@ -366,6 +366,19 @@ version:
     journal-syslog, hurd-syslogd, hurd-sshd) autostarting.
     receipt at
     [docs/runlogs/2026-05-30-hurd-v0922-slice-b-ide-e1000.md](docs/runlogs/2026-05-30-hurd-v0922-slice-b-ide-e1000.md).
+  - v0.9.23: tagged. install wizard slice C live-verified on
+    Hurd, no code change.  v0.9.22 unblocked the last
+    outstanding v1.x slice; the verify rig boots the v0.9.22
+    image with a second IDE disk attached and drives
+    `install-mkfs-ext4` and `install-grub-install` over
+    `emacsclient` end-to-end against `/dev/wd1`.  both
+    callbacks return `(t nil)`; the fresh ext4 mounts and
+    shows `lost+found`; grub-install writes the i386-pc
+    `core.img` (28,424 B) to `/mnt/wd1/boot/grub/i386-pc/`,
+    the work buffer logs "Installation finished. No error
+    reported.", and the MBR carries the GRUB signature.
+    closes task #210.  receipt at
+    [docs/runlogs/2026-05-30-hurd-v0923-install-slice-c-verify.md](docs/runlogs/2026-05-30-hurd-v0923-install-slice-c-verify.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
