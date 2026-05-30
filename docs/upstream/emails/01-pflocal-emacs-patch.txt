@@ -56,7 +56,7 @@ apt):
   5. for the call-site confirmation, attach gdb to emacsclient,
      break setsockopt, run, read the args.
 
-Patch follows.  Also filed a feature request against pflocal proper
+I'm also filing in parallel a feature request against pflocal proper
 on bug-hurd@gnu.org (subject "[pflocal] SO_RCVTIMEO returns ENOPROTOOPT;
 please implement on the AF_UNIX socket-option path") so the deeper
 fix is tracked there.
