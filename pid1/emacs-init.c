@@ -613,6 +613,17 @@ mount_var(void)
 
 static volatile sig_atomic_t got_sigchld = 0;
 
+/* v0.9.24 follow-on #7 (2026-05-30): tripped by the signal handler
+ * below when sysvinit's `shutdown -h now` (or any external SIGTERM /
+ * SIGUSR1 / SIGUSR2 to pid 1) starts the shutdown chain.  the
+ * supervisor loop reads this flag at the top of each iteration and
+ * breaks out instead of respawning emacs, so a closing emacs on the
+ * shutdown path does not get re-forked into a doomed bringup that
+ * tries to remount /var and re-run supervise-autostart.  see
+ * docs/runlogs/2026-05-30-hurd-pselect-soak-35min.md lines 535-619
+ * for the original /dev/console pollution this closes. */
+static volatile sig_atomic_t shutting_down = 0;
+
 /* sleeps for at least sec seconds, restarting on EINTR. plain sleep()
  * returns early when SIGCHLD wakes us, which would defeat the
  * crash-loop throttle: emacs dies, sigchld fires, sleep returns
@@ -635,6 +646,23 @@ on_sigchld(int sig)
 {
     (void)sig;
     got_sigchld = 1;
+}
+
+/* SIGTERM / SIGUSR1 / SIGUSR2 land here when something external (the
+ * sysvinit-shaped `shutdown` binary on Hurd, or a future GEOS-native
+ * caller that wants to signal pid 1) initiates a shutdown.  signal-safe
+ * minimum: just set the shutting_down flag.  the supervisor loop
+ * checks it before each respawn cycle and breaks out cleanly.
+ * invariant: does no I/O, no malloc, no non-async-signal-safe calls.
+ * the same handler is installed for all three signals because the only
+ * thing pid 1 does in response is "stop respawning emacs"; the actual
+ * halt or poweroff happens elsewhere (port->reboot from a Femacs
+ * binding, or the kernel cutting power outright). */
+static void
+on_shutdown_signal(int sig)
+{
+    (void)sig;
+    shutting_down = 1;
 }
 
 /* path to the emacs binary. on a guix system /usr/bin/emacs does not
@@ -1853,6 +1881,38 @@ main(int argc, char **argv)
         _exit(127);
     }
 
+    /* v0.9.24 follow-on #7: install shutdown-signal handlers so the
+     * supervisor knows not to respawn emacs after an external shutdown.
+     * the kernel default-ignores SIGTERM / SIGUSR1 / SIGUSR2 for pid 1
+     * unless a handler is installed, so without these three sigaction
+     * calls the signals never reach on_shutdown_signal and the
+     * shutting_down flag never gets set.  failures are NON-fatal here:
+     * if sigaction fails we just keep the old behaviour (respawn after
+     * shutdown, which pollutes the serial log but does not break the
+     * box), so we log to /dev/console and continue rather than
+     * _exit(127) the way the SIGCHLD branch above does. */
+    {
+        struct sigaction sashut;
+        memset(&sashut, 0, sizeof sashut);
+        sashut.sa_handler = on_shutdown_signal;
+        /* no SA_RESTART for the same reason as SIGCHLD: we want
+         * waitpid() to return EINTR so the supervisor loop reaches the
+         * shutting_down check at the top of the for(;;) body. */
+        sashut.sa_flags = 0;
+        sigemptyset(&sashut.sa_mask);
+        const int shut_sigs[] = { SIGTERM, SIGUSR1, SIGUSR2 };
+        for (size_t i = 0; i < sizeof shut_sigs / sizeof shut_sigs[0]; i++) {
+            if (sigaction(shut_sigs[i], &sashut, NULL) < 0) {
+                char buf[128];
+                snprintf(buf, sizeof buf,
+                         "pid1: sigaction(shutdown sig=%d) failed: %s; "
+                         "respawn-after-shutdown gate disabled",
+                         shut_sigs[i], strerror(errno));
+                console(buf);
+            }
+        }
+    }
+
     /* boot mode toggle: cmdline geos.mode=console forces a pure-text
      * boot (no Xorg, emacs talks to /dev/console). default (no token,
      * or geos.mode=ui) keeps the v0.2 behaviour.  v0.4 item 10 adds
@@ -1976,6 +2036,38 @@ main(int argc, char **argv)
      * Xorg dies while emacs is still alive and we never notice until
      * the user closes their x frame; -1 lets either signal land. */
     for (;;) {
+        /* v0.9.24 follow-on #7: short-circuit the respawn path on
+         * shutdown.  on_shutdown_signal sets this flag from SIGTERM /
+         * SIGUSR1 / SIGUSR2 (the conventional init shutdown signals).
+         * without this gate, `shutdown -h now` killing the supervised
+         * emacs would have us re-fork emacs into a doomed bringup
+         * cycle (fresh pids, /var remount, supervise-autostart re-run)
+         * that pollutes /dev/console while the kernel is on its way
+         * out.  shape mirrors `emacs_holding` below: keep reaping
+         * zombies so reparented children do not pile up, but never
+         * fork emacs again.  we do NOT return from main(): the kernel
+         * caller that initiated shutdown (or the operator via
+         * geos-poweroff / geos-reboot) is responsible for the actual
+         * halt syscall, and returning here would panic the kernel
+         * unnecessarily on what would otherwise be a clean shutdown
+         * window. */
+        if (shutting_down) {
+            static int announced = 0;
+            if (!announced) {
+                console("pid1: shutting down, not respawning emacs");
+                announced = 1;
+            }
+            int st;
+            pid_t z = waitpid(-1, &st, 0);
+            if (z < 0 && errno == EINTR) continue;
+            if (z < 0) {
+                /* no children left at all (ECHILD); sleep so we are not
+                 * spinning on the syscall, then loop back to await the
+                 * halt that whoever signalled us is bringing. */
+                sleep_at_least(5);
+            }
+            continue;
+        }
         /* (B6) crashloop gate. once tripped we stay in the holding
          * pattern: just reap whatever shows up so zombies do not pile
          * up, but never fork emacs again. the operator gets a stable
