@@ -42,6 +42,26 @@
 #   SMOKE_TIMEOUT_S  deadline for the smoke gate (default 240).
 #   SMOKE_PORT    host port for the smoke gate's hostfwd (default 2299,
 #                 chosen to not collide with operator's 2266 manual boot).
+#   FLAVOR        image flavor to produce.  default "minimal" (the v0.9.22
+#                 canonical 35-file chain; byte-identical to prior behavior;
+#                 OUTPUT_IMG path unchanged from before this knob existed).
+#                 the other accepted value is "apt-image", which produces a
+#                 v1.x apt-image flavor: same baked artifacts as minimal,
+#                 PLUS a post-step-7 boot pass that ssh's in and apt-installs
+#                 the EXWM-on-Xvfb stack (xvfb, emacs-lucid, elpa-exwm,
+#                 elpa-xelb) and pulseaudio.  the apt-image output lands at
+#                 a separate path so the minimal artifact stays untouched;
+#                 see APT_OUTPUT_IMG below.  unknown FLAVOR values fail
+#                 fast in step 1.
+#   APT_OUTPUT_IMG  when FLAVOR=apt-image, the apt-image flavor lands here.
+#                 default: /home/overdrive/hurd-vm/debian-hurd-amd64-geos-v0922-apt.img
+#                 this is a fresh qcow2 overlay over PRISTINE_IMG built
+#                 alongside OUTPUT_IMG so the minimal artifact is not
+#                 disturbed (a re-run with FLAVOR=apt-image still ships
+#                 the minimal one too).  ignored when FLAVOR=minimal.
+#   APT_PORT      host port for the apt-install boot's hostfwd (default 2298,
+#                 chosen to not collide with smoke's 2299 or operator's 2266).
+#   APT_TIMEOUT_S  deadline for the apt-install ssh wait (default 300).
 #
 # OUTPUT:
 #   $OUTPUT_IMG  rerolled Debian GNU/Hurd 0.9 image with:
@@ -79,6 +99,10 @@ PID1_BIN="${PID1_BIN:-/tmp/v0918-reroll-staging/emacs-init}"
 SUPERVISOR_TAR="${SUPERVISOR_TAR:-/tmp/v0918-reroll-staging/emacs-init-tree.tar.gz}"
 SSH_PUBKEY="${SSH_PUBKEY:-/tmp/hurd_vm_key.pub}"
 OUTPUT_IMG="${OUTPUT_IMG:-/home/overdrive/hurd-vm/debian-hurd-amd64-geos-v0918.img}"
+FLAVOR="${FLAVOR:-minimal}"
+APT_OUTPUT_IMG="${APT_OUTPUT_IMG:-/home/overdrive/hurd-vm/debian-hurd-amd64-geos-v0922-apt.img}"
+APT_PORT="${APT_PORT:-2298}"
+APT_TIMEOUT_S="${APT_TIMEOUT_S:-300}"
 
 # log prefix on every line so the operator can grep the run for
 # [hurd-image-reroll] and see exactly what happened, in order.
@@ -129,6 +153,22 @@ log "pid1 binary: ${PID1_BIN} (${PID1_SIZE} bytes, sha256=${PID1_SHA})"
 log "supervisor tar: ${SUPERVISOR_TAR} (sha256=${TAR_SHA})"
 log "pristine base: ${PRISTINE_IMG}"
 log "output target: ${OUTPUT_IMG}"
+
+# FLAVOR gate.  minimal is the historical default and is byte-identical
+# to the pre-knob behavior.  apt-image is the v1.x flavor that bundles
+# the EXWM-on-Xvfb stack and pulseaudio via a post-smoke apt pass.
+# anything else is a typo, fail fast before paying for the qcow2 + bake.
+case "${FLAVOR}" in
+    minimal|apt-image) : ;;
+    *)
+        log "FATAL: unknown FLAVOR=${FLAVOR} (expected minimal or apt-image)"
+        exit 1
+        ;;
+esac
+log "flavor: ${FLAVOR}"
+if [ "${FLAVOR}" = "apt-image" ]; then
+    log "apt-image output target: ${APT_OUTPUT_IMG}"
+fi
 
 ###############################################################################
 # step 2: qcow2 overlay on top of pristine (idempotent)
@@ -680,9 +720,196 @@ fi
 OUT_SHA="$(sha256sum "${OUTPUT_IMG}" | cut -d' ' -f1)"
 log "output image sha256: ${OUT_SHA}"
 log "done: ${OUTPUT_IMG} ($(stat -c '%s' "${OUTPUT_IMG}") bytes)"
+
+###############################################################################
+# step 8: FLAVOR=apt-image, bake the v1.x X+audio userland on top
+###############################################################################
+# WHY this step exists: the v0.9.10 EXWM-on-Xvfb live-verify needed
+# xvfb + emacs-lucid + elpa-exwm + elpa-xelb apt-installed inside the
+# image, and the v1.x pulseaudio scope wants pactl available out of the
+# box.  doing this per-cycle costs ~5-10 minutes of apt + ~150 MB of
+# fetch every boot.  bake it once here and ship a derivative image that
+# already has the packages installed.
+#
+# the apt-image is a qcow2 overlay over OUTPUT_IMG, so the minimal
+# artifact stays the canonical 35-file v0.9.22 baseline and the
+# apt-installed layer is a separate file (APT_OUTPUT_IMG).  the apt
+# pass needs network: SLIRP gives outbound DNS + tcp out of the box,
+# and we hostfwd APT_PORT->22 so we can ssh in from the host to drive
+# apt-get.  graceful shutdown via `shutdown -h now` over ssh, not
+# qemu kill, because killing qemu mid-apt corrupts the qcow2.
+if [ "${FLAVOR}" = "apt-image" ]; then
+    log "step 8: FLAVOR=apt-image, baking X+audio userland over ${OUTPUT_IMG}"
+    if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+        log "FATAL: FLAVOR=apt-image needs qemu-system-x86_64 (apt install qemu-system-x86)"
+        exit 1
+    fi
+    if ! command -v ssh >/dev/null 2>&1; then
+        log "FATAL: FLAVOR=apt-image needs ssh on PATH"
+        exit 1
+    fi
+
+    # ssh private key path: the convention here is to point SSH_PUBKEY
+    # at the .pub and have the private half live alongside it (same path
+    # without .pub).  derive the private path by stripping .pub if present;
+    # fail fast if the private key is not readable.
+    SSH_PRIVKEY="${SSH_PUBKEY%.pub}"
+    if [ ! -r "${SSH_PRIVKEY}" ]; then
+        log "FATAL: cannot read ssh private key at ${SSH_PRIVKEY} (derived from SSH_PUBKEY)"
+        exit 1
+    fi
+
+    # fresh qcow2 overlay over the smoke-tested OUTPUT_IMG, so the
+    # minimal artifact is not disturbed by the apt pass.  same rm -f
+    # idempotency pattern as step 2.
+    rm -f "${APT_OUTPUT_IMG}"
+    qemu-img create -q -f qcow2 -F qcow2 -b "${OUTPUT_IMG}" "${APT_OUTPUT_IMG}" >/dev/null
+    log "apt-image overlay ${APT_OUTPUT_IMG} -> ${OUTPUT_IMG}"
+
+    APT_SERIAL="${APT_SERIAL:-/tmp/hurd-image-reroll-apt-serial.log}"
+    APT_PIDFILE="${APT_PIDFILE:-/tmp/hurd-image-reroll-apt-qemu.pid}"
+    : > "${APT_SERIAL}"
+
+    # same qemu invocation shape as the smoke gate (if=ide + e1000 are
+    # both load-bearing per v0.9.22).  hostfwd on APT_PORT this time.
+    nohup qemu-system-x86_64 -enable-kvm -cpu host -m 2048 \
+        -drive file="${APT_OUTPUT_IMG}",if=ide,format=qcow2 \
+        -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"${APT_PORT}"-:22 \
+        -device e1000,netdev=net0 \
+        -nographic -serial file:"${APT_SERIAL}" -display none \
+        >/dev/null 2>&1 &
+    APT_QEMU_PID=$!
+    echo "${APT_QEMU_PID}" > "${APT_PIDFILE}"
+    log "apt qemu pid=${APT_QEMU_PID}, serial=${APT_SERIAL}, port=${APT_PORT}"
+
+    # ssh args.  StrictHostKeyChecking=no because every re-roll bakes
+    # fresh sshd host keys in step 3b; UserKnownHostsFile=/dev/null so
+    # the operator's ~/.ssh/known_hosts does not collect throwaway
+    # entries.  ConnectTimeout keeps the polling loop tight.
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR -i ${SSH_PRIVKEY} -p ${APT_PORT}"
+
+    # wait for ssh.  poll every 5 s until ssh succeeds or the deadline
+    # passes.  the supervised emacs needs to come up, settrans pfinet
+    # has to land, and sshd has to bind, all within APT_TIMEOUT_S.
+    log "step 8a: waiting for ssh on 127.0.0.1:${APT_PORT} (deadline ${APT_TIMEOUT_S}s)"
+    APT_DEADLINE="$(($(date +%s) + APT_TIMEOUT_S))"
+    APT_SSH_UP=0
+    while [ "$(date +%s)" -lt "${APT_DEADLINE}" ]; do
+        sleep 5
+        if ssh ${SSH_OPTS} root@127.0.0.1 true >/dev/null 2>&1; then
+            APT_SSH_UP=1
+            break
+        fi
+    done
+    if [ "${APT_SSH_UP}" != "1" ]; then
+        log "FATAL: apt-image ssh did not come up within ${APT_TIMEOUT_S}s"
+        log "  last 30 serial lines:"
+        tail -30 "${APT_SERIAL}" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/^/    /'
+        kill "${APT_QEMU_PID}" 2>/dev/null || true
+        sleep 2
+        kill -9 "${APT_QEMU_PID}" 2>/dev/null || true
+        rm -f "${APT_PIDFILE}"
+        exit 2
+    fi
+    log "ssh up; running apt-get update + install"
+
+    # apt-get update.  if this fails or returns "no candidate" for the
+    # EXWM stack (canonical Debian Hurd 0.9 may not have debian-ports
+    # sid in sources.list), add debian-ports key + sid main and retry.
+    # the EXWM/emacs-lucid packages live in debian-ports, not Debian
+    # proper; the pulseaudio package is in canonical Debian.
+    APT_PKGS="xvfb emacs-lucid elpa-exwm elpa-xelb pulseaudio"
+    if ! ssh ${SSH_OPTS} root@127.0.0.1 'apt-get update' >/dev/null 2>&1; then
+        log "apt-get update failed on first try, attempting debian-ports fallback"
+    fi
+    # probe candidate for emacs-lucid; if missing, splice debian-ports.
+    APT_CANDIDATE="$(ssh ${SSH_OPTS} root@127.0.0.1 'apt-cache policy emacs-lucid 2>/dev/null | grep -c "Candidate: [0-9]"' || echo 0)"
+    if [ "${APT_CANDIDATE}" = "0" ]; then
+        log "step 8b: emacs-lucid has no candidate, splicing debian-ports sid main"
+        # debian-ports archive key + sid main line.  apt-key is
+        # deprecated on bookworm+ but still works on Hurd 0.9; the
+        # /etc/apt/trusted.gpg.d drop-in is the modern path so use that.
+        # the keyring package debian-ports-archive-keyring lives in
+        # debian-ports itself (chicken-and-egg), so fetch the key bytes
+        # via wget over plain http first, then add the apt source.
+        ssh ${SSH_OPTS} root@127.0.0.1 'set -e
+            apt-get install -y --no-install-recommends wget gnupg
+            wget -qO /tmp/dp.gpg http://ftp.ports.debian.org/debian-ports/pool-amd64/main/d/debian-ports-archive-keyring/debian-ports-archive-keyring_2023.02.01_all.deb || true
+            if [ -s /tmp/dp.gpg ]; then
+                dpkg -i /tmp/dp.gpg || true
+            fi
+            echo "deb http://ftp.ports.debian.org/debian-ports/ sid main" > /etc/apt/sources.list.d/debian-ports.list
+            apt-get update' >/dev/null 2>&1 || log "WARNING: debian-ports splice ssh exited nonzero, proceeding to install attempt anyway"
+    fi
+
+    # the install proper.  --no-install-recommends keeps pulseaudio
+    # from pulling 80+ MB of fonts and sound themes; the EXWM packages
+    # have light recommends so it does not hurt them either.
+    log "step 8c: apt-get install -y --no-install-recommends ${APT_PKGS}"
+    if ! ssh ${SSH_OPTS} root@127.0.0.1 "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${APT_PKGS}"; then
+        log "FATAL: apt-get install failed"
+        ssh ${SSH_OPTS} root@127.0.0.1 'shutdown -h now' >/dev/null 2>&1 || true
+        wait "${APT_QEMU_PID}" 2>/dev/null || true
+        rm -f "${APT_PIDFILE}"
+        exit 2
+    fi
+    ssh ${SSH_OPTS} root@127.0.0.1 'apt-get clean' >/dev/null 2>&1 || true
+
+    # smoke gate on the install: count installed packages from the
+    # APT_PKGS list.  we expect 5 ii rows back (xvfb, emacs-lucid,
+    # elpa-exwm, elpa-xelb, pulseaudio).  the `-E` regex pinpoints
+    # exact package names from the dpkg list so a sibling package that
+    # happens to contain "pulseaudio" in its name does not over-count.
+    log "step 8d: dpkg verify (expect 5 ii rows)"
+    APT_INSTALLED="$(ssh ${SSH_OPTS} root@127.0.0.1 "dpkg-query -W -f='\${db:Status-Abbrev} \${Package}\n' xvfb emacs-lucid elpa-exwm elpa-xelb pulseaudio 2>/dev/null | grep -cE '^ii  (xvfb|emacs-lucid|elpa-exwm|elpa-xelb|pulseaudio)\$'" || echo 0)"
+    log "  installed count: ${APT_INSTALLED}/5"
+    if [ "${APT_INSTALLED}" != "5" ]; then
+        log "FATAL: apt-image verify saw only ${APT_INSTALLED}/5 of ${APT_PKGS}"
+        ssh ${SSH_OPTS} root@127.0.0.1 'dpkg -l | grep -E "(xvfb|emacs-lucid|elpa-exwm|elpa-xelb|pulseaudio)"' 2>&1 | sed 's/^/    /'
+        ssh ${SSH_OPTS} root@127.0.0.1 'shutdown -h now' >/dev/null 2>&1 || true
+        wait "${APT_QEMU_PID}" 2>/dev/null || true
+        rm -f "${APT_PIDFILE}"
+        exit 2
+    fi
+
+    # graceful shutdown.  the ssh command returns immediately because
+    # shutdown sends SIGTERM to sshd before the disk sync finishes; we
+    # `wait` for the qemu pid to harvest the guest's clean exit.  if
+    # qemu does not exit within 60 s (Hurd shutdown is slow), fall back
+    # to SIGTERM then SIGKILL; this is best-effort, the worst case is a
+    # dirty qcow2 that ext2fs will fsck on next boot.
+    log "step 8e: graceful shutdown over ssh"
+    ssh ${SSH_OPTS} root@127.0.0.1 'shutdown -h now' >/dev/null 2>&1 || true
+    SHUTDOWN_DEADLINE="$(($(date +%s) + 60))"
+    while kill -0 "${APT_QEMU_PID}" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "${SHUTDOWN_DEADLINE}" ]; then
+            log "WARNING: guest did not halt within 60s, sending SIGTERM to qemu"
+            kill "${APT_QEMU_PID}" 2>/dev/null || true
+            sleep 5
+            kill -9 "${APT_QEMU_PID}" 2>/dev/null || true
+            break
+        fi
+        sleep 2
+    done
+    wait "${APT_QEMU_PID}" 2>/dev/null || true
+    rm -f "${APT_PIDFILE}"
+
+    APT_SHA="$(sha256sum "${APT_OUTPUT_IMG}" | cut -d' ' -f1)"
+    log "apt-image sha256: ${APT_SHA}"
+    log "apt-image done: ${APT_OUTPUT_IMG} ($(stat -c '%s' "${APT_OUTPUT_IMG}") bytes)"
+fi
+
 log "next: boot with"
 log "  qemu-system-x86_64 -enable-kvm -cpu host -m 2048 \\"
 log "    -drive file=${OUTPUT_IMG},if=ide,format=qcow2 \\"
 log "    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2266-:22 \\"
 log "    -device e1000,netdev=net0 \\"
 log "    -nographic -serial file:/tmp/v0918-first-boot-serial.log"
+if [ "${FLAVOR}" = "apt-image" ]; then
+    log "or for the apt-image flavor:"
+    log "  qemu-system-x86_64 -enable-kvm -cpu host -m 2048 \\"
+    log "    -drive file=${APT_OUTPUT_IMG},if=ide,format=qcow2 \\"
+    log "    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2266-:22 \\"
+    log "    -device e1000,netdev=net0 \\"
+    log "    -nographic -serial file:/tmp/v0918-first-boot-serial.log"
+fi
