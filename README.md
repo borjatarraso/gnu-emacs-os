@@ -323,6 +323,34 @@ version:
     [docs/runlogs/2026-05-24-v0919-bucket-closeout.md](docs/runlogs/2026-05-24-v0919-bucket-closeout.md),
     and
     [docs/runlogs/2026-05-24-hurd-v0919-image-reroll-fullchain.md](docs/runlogs/2026-05-24-hurd-v0919-image-reroll-fullchain.md).
+  - v0.9.20: tagged. supervised-autostart predicate flip.  pid1
+    now splices `GEOS_PID1=1` into the supervised emacs envp at
+    spawn, and `pid1-as-emacs-p` in early-init.el OR-checks
+    against that env var as well as `PID1_MODULE_PATH`.  on
+    STATIC=1 PORT=hurd builds the module is inlined so
+    `PID1_MODULE_PATH` is never set, which had been silently
+    no-op'ing every downstream supervision wiring guarded by
+    the predicate since v0.9.16.  also lands
+    `iso-build/hurd-fast-iterate.sh`, a tar-over-ssh push +
+    supervisor bounce that cuts elisp-only iteration from
+    `~20 min` (full image re-roll) to `~5 s`.  receipt at
+    [docs/runlogs/2026-05-30-hurd-v0920-slice-a.md](docs/runlogs/2026-05-30-hurd-v0920-slice-a.md).
+  - v0.9.21: tagged. iso-build/hurd-image-reroll.sh efficiency
+    triple.  qcow2 backing-chain replaces a 4 GB `cp` with a
+    `~200 KiB` thin overlay over the read-only pristine; a
+    single `guestfish --listen` daemon collapses three
+    `~15 s` appliance launches into one; new step 7 boots the
+    rolled image in a throwaway QEMU up to 240 s and fails
+    fast on `No such device or address` or `Kernel panic`.
+    a clean elisp-only re-roll now costs `15-30 s` end-to-end
+    vs the previous `75-90 s`.  slice B (the full 35-file
+    canonical init.args bake) was rebuilt this cycle then
+    re-deferred to v0.9.22 after the new smoke gate caught a
+    deterministic rumpdisk wd0 enumeration race in the
+    canonical pristine itself, reproducible on the known-good
+    v0.9.20 image with byte-identical serial output.  receipt
+    at
+    [docs/runlogs/2026-05-30-hurd-v0921-efficiency-triple.md](docs/runlogs/2026-05-30-hurd-v0921-efficiency-triple.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
