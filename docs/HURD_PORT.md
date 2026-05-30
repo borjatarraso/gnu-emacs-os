@@ -130,7 +130,9 @@ requested via `mach_port_request_notification` at
 push to main and to the `hurd` branch. Pure-text passes
 (attribution-scan, no-shell-check) cover both. A boot smoke test
 on a Hurd qcow2 needs a self-hosted runner with KVM and a Hurd
-toolchain; that's a v0.8 follow-up.
+toolchain; workflow drafted at `.github/workflows/hurd-smoke.yml`,
+ungates the day a self-hosted runner labelled `hurd-kvm` registers,
+see `docs/CI_HURD_RUNNER.md` for the operator recipe.
 
 ## Side-branch contract
 

@@ -1,0 +1,295 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# hurd-smoke.yml, the Hurd boot smoke gate.  promised in
+# docs/HURD_PORT.md (the "v0.8 follow-up" line in the CI-shape
+# section) and finally drafted as task #228.
+#
+# what this gates: a full re-roll of the canonical Debian GNU/Hurd 0.9
+# image with the current main's pid1 + supervisor tree baked in, then
+# a headless KVM boot under qemu, then a serial-log marker match
+# proving pid1 ran emacs, hurd-essentials autostarted, settrans pfinet
+# came back exit=0, and the static eth0 path bound.  optionally an
+# ssh-into-the-guest check that supervise-status returns something
+# resembling a live registry.
+#
+# why a self-hosted runner: github-hosted ubuntu runners do not expose
+# /dev/kvm (their nested-virt story is "we are already nested, get
+# off"), and the canonical Debian Hurd qcow2 takes around 3 to 5
+# minutes to boot under tcg vs around 90 seconds under kvm.  the
+# image-reroll itself launches a libguestfs appliance for ~30 seconds
+# and the post-reroll smoke another ~90, so we need every accel knob
+# we can find or the workflow blows past any sane timeout.  docs/
+# CI_HURD_RUNNER.md is the operator-facing recipe for provisioning
+# the runner.
+#
+# why the if-clause ungate: until somebody actually registers a
+# self-hosted runner with the `hurd-kvm` label, this job would queue
+# indefinitely on every push.  the `vars.HURD_RUNNER_REGISTERED ==
+# 'true'` repository variable is the explicit opt-in flip.  the
+# repository_owner check is the second path (so the operator's own
+# pushes always exercise the gate once they've set up the runner)
+# without needing the variable to be set.  fork PRs neither own the
+# repo nor have the variable; they get a no-op.
+#
+# how to ungate after registering a runner: set the repository
+# variable HURD_RUNNER_REGISTERED to the literal string 'true' under
+# the repo's Settings > Secrets and variables > Actions > Variables
+# tab.  no workflow edit required; next push goes through.
+#
+# trade-off on the pid1 build step: a true CI run rebuilds pid1 from
+# source under PORT=hurd STATIC=1 inside a Debian Hurd cross-build
+# environment (or, more realistically, on the runner if the operator
+# elects to install hurd-dev + the cross gcc).  while the cross-
+# toolchain story is unsettled, the workflow accepts a bootstrap
+# path: env HURD_PID1_BIN points at a prebuilt STATIC=1 emacs-init
+# binary on the runner, and the build step is skipped.  this is fine
+# for the first iteration of the gate; it catches every elisp-level
+# regression in emacs-init/ + every image-reroll-script regression,
+# which is what we want today.  rebuilding pid1 from source on the
+# runner is the next iteration; tracked at docs/CI_HURD_RUNNER.md.
+
+name: hurd-smoke
+on:
+  push:
+    branches: [main, hurd]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: hurd-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hurd-boot-smoke:
+    name: hurd-boot-smoke
+    # the runs-on label `hurd-kvm` is the contract with the operator.
+    # docs/CI_HURD_RUNNER.md spells out the registration invocation
+    # that produces a runner carrying this label.
+    runs-on: [self-hosted, hurd-kvm]
+    # ungate: either the repo owner (so my own pushes always exercise
+    # the gate, no variable required) OR a repository variable that
+    # the operator flips after registering a runner.  the latter is
+    # how a future maintainer takes over without needing to edit this
+    # file.
+    if: github.repository_owner == 'borja' || vars.HURD_RUNNER_REGISTERED == 'true'
+    timeout-minutes: 25
+    env:
+      # paths are runner-local; override via repository variables or
+      # by editing the runner's environment file.  defaults match
+      # docs/CI_HURD_RUNNER.md's recommended layout.
+      HURD_PRISTINE_IMG: ${{ vars.HURD_PRISTINE_IMG || '/var/lib/geos-ci/pristine/debian-hurd-amd64-20260314.pre-pid1.img' }}
+      HURD_PID1_BIN:     ${{ vars.HURD_PID1_BIN     || '/var/lib/geos-ci/staging/emacs-init' }}
+      SMOKE_PORT:        '2299'
+      SMOKE_TIMEOUT_S:   '300'
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: runner sanity
+        # if any of these are missing the runner was not provisioned
+        # per the recipe; fail fast with a pointer to the doc.
+        run: |
+          set -eu
+          echo "--- qemu version ---"
+          qemu-system-x86_64 --version | head -1
+          echo "--- kvm-ok ---"
+          if command -v kvm-ok >/dev/null 2>&1; then
+            kvm-ok || { echo "kvm-ok failed; this runner is not KVM-capable, see docs/CI_HURD_RUNNER.md"; exit 1; }
+          else
+            test -w /dev/kvm || { echo "/dev/kvm not writable by runner uid, see docs/CI_HURD_RUNNER.md"; exit 1; }
+            echo "/dev/kvm writable, ok"
+          fi
+          echo "--- pristine image ---"
+          test -f "${HURD_PRISTINE_IMG}" || { echo "pristine image missing at ${HURD_PRISTINE_IMG}, see docs/CI_HURD_RUNNER.md"; exit 1; }
+          ls -lh "${HURD_PRISTINE_IMG}"
+          echo "--- libguestfs + qemu-img ---"
+          command -v guestfish >/dev/null  || { echo "guestfish missing (apt install libguestfs-tools)"; exit 1; }
+          command -v qemu-img >/dev/null   || { echo "qemu-img missing (apt install qemu-utils)"; exit 1; }
+          echo "--- pid1 binary (HURD_PID1_BIN) ---"
+          if [ -f "${HURD_PID1_BIN}" ]; then
+            ls -lh "${HURD_PID1_BIN}"
+            file "${HURD_PID1_BIN}" || true
+          else
+            echo "HURD_PID1_BIN not present; the build step will produce it"
+          fi
+
+      - name: build pid1 (PORT=hurd STATIC=1) if HURD_PID1_BIN absent
+        # bootstrap path: skip the build entirely if the operator has
+        # placed a known-good static binary at HURD_PID1_BIN.  the
+        # build path itself requires a debian-hurd cross-build env on
+        # the runner; if neither path resolves, fail with a pointer.
+        run: |
+          set -eu
+          if [ -f "${HURD_PID1_BIN}" ]; then
+            echo "using prebuilt HURD_PID1_BIN=${HURD_PID1_BIN}, skipping build"
+            exit 0
+          fi
+          echo "HURD_PID1_BIN absent, attempting build"
+          if ! make -C pid1 PORT=hurd STATIC=1; then
+            echo "pid1 PORT=hurd STATIC=1 build failed; this runner needs a hurd cross toolchain"
+            echo "see docs/CI_HURD_RUNNER.md for the apt install list (gcc-x86-64-linux-gnu + hurd-dev cross headers)"
+            exit 1
+          fi
+          install -D -m 0755 pid1/emacs-init "${HURD_PID1_BIN}"
+          echo "built ${HURD_PID1_BIN}:"
+          ls -lh "${HURD_PID1_BIN}"
+
+      - name: stage supervisor tarball
+        # hurd-image-reroll.sh expects a gzipped tar with one
+        # top-level entry, emacs-init/.  cheaper to roll it here from
+        # the checkout than to pull it off the runner's staging area.
+        run: |
+          set -eu
+          mkdir -p /tmp/hurd-smoke-stage
+          tar czf /tmp/hurd-smoke-stage/emacs-init-tree.tar.gz emacs-init/
+          ls -lh /tmp/hurd-smoke-stage/emacs-init-tree.tar.gz
+
+      - name: re-roll hurd image
+        # FLAVOR=minimal is the byte-identical-to-v0.9.22 path; the
+        # script's own step-7 smoke also runs inside this step (it
+        # gates the artifact before we ever touch the next step's
+        # serial-log gate, so a regression in pid1 or in emacs-init/
+        # surfaces here without us needing a second qemu launch).
+        run: |
+          set -eu
+          mkdir -p /tmp/hurd-smoke-out
+          FLAVOR=minimal \
+          PRISTINE_IMG="${HURD_PRISTINE_IMG}" \
+          PID1_BIN="${HURD_PID1_BIN}" \
+          SUPERVISOR_TAR=/tmp/hurd-smoke-stage/emacs-init-tree.tar.gz \
+          SSH_PUBKEY="${HOME}/.ssh/hurd_runner_key.pub" \
+          OUTPUT_IMG=/tmp/hurd-smoke-out/hurd-ci.img \
+          SMOKE_PORT="${SMOKE_PORT}" \
+          SMOKE_TIMEOUT_S=240 \
+          ./iso-build/hurd-image-reroll.sh
+
+      - name: boot smoke gate
+        # second qemu launch, with the operator-visible hostfwd on
+        # ${SMOKE_PORT}->22 so the ssh step below can reach in.  the
+        # marker set is the supervisor's /dev/console breadcrumbs
+        # documented at docs/HURD_PORT.md (the row that names them
+        # verbatim), plus the boot-marker.el "geos: emacs userland up"
+        # line.  any FAIL marker exits immediately.
+        run: |
+          set -eu
+          SMOKE_SERIAL=/tmp/hurd-smoke-out/serial-${GITHUB_RUN_ID}.log
+          : > "${SMOKE_SERIAL}"
+          echo "${SMOKE_SERIAL}" > /tmp/hurd-smoke-out/serial-path
+          # if=ide + -device e1000 is load-bearing per v0.9.22
+          # (rumpdisk has no virtio-blk; netdde has no virtio-net).
+          nohup qemu-system-x86_64 -enable-kvm -cpu host -m 2048 \
+              -drive file=/tmp/hurd-smoke-out/hurd-ci.img,if=ide,format=qcow2 \
+              -netdev user,id=net0,hostfwd=tcp:127.0.0.1:${SMOKE_PORT}-:22 \
+              -device e1000,netdev=net0 \
+              -nographic -serial file:"${SMOKE_SERIAL}" -display none \
+              >/dev/null 2>&1 &
+          echo $! > /tmp/hurd-smoke-out/qemu.pid
+          echo "qemu pid=$(cat /tmp/hurd-smoke-out/qemu.pid), serial=${SMOKE_SERIAL}"
+          DEADLINE=$(( $(date +%s) + SMOKE_TIMEOUT_S ))
+          PASS=0
+          while [ "$(date +%s)" -lt "${DEADLINE}" ]; do
+              sleep 3
+              if [ ! -s "${SMOKE_SERIAL}" ]; then
+                  continue
+              fi
+              if grep -aqE 'Kernel panic|No such device or address' "${SMOKE_SERIAL}"; then
+                  echo "smoke FAIL: hard failure marker on serial"
+                  tail -200 "${SMOKE_SERIAL}"
+                  exit 1
+              fi
+              # PASS is the AND of two markers per task #228:
+              #   - hurd-essentials: eth0 static OK   (from supervise breadcrumb)
+              #   - geos: emacs userland up           (from boot-marker.el)
+              # if the operator's image is on a different chain, the
+              # earlier image-reroll smoke already proved init.args
+              # eval reached PASS, so this AND is the upper bound.
+              if grep -aq 'hurd-essentials: eth0 static OK' "${SMOKE_SERIAL}" \
+                 && grep -aq 'geos: emacs userland up' "${SMOKE_SERIAL}"; then
+                  echo "smoke PASS"
+                  grep -aE 'hurd-essentials:|geos:' "${SMOKE_SERIAL}" | head -20
+                  PASS=1
+                  break
+              fi
+          done
+          if [ "${PASS}" -ne 1 ]; then
+              echo "smoke TIMEOUT after ${SMOKE_TIMEOUT_S}s, success markers never matched"
+              echo "--- last 200 serial lines ---"
+              tail -200 "${SMOKE_SERIAL}"
+              exit 1
+          fi
+
+      - name: ssh into guest and snapshot supervisor state
+        # uses the runner's prebaked private key (mirror of the
+        # pubkey baked into the image).  the supervise-status verb
+        # over the rpc socket is the preferred check; ps -A is the
+        # fallback when the rpc client isn't reachable (e.g. an
+        # earlier-than-v0.6 image).
+        run: |
+          set -eu
+          mkdir -p /tmp/hurd-smoke-out
+          # the runner stores its private key under $HOME/.ssh/ per
+          # the recipe; HURD_RUNNER_KEY secret can override.
+          KEY="${HOME}/.ssh/hurd_runner_key"
+          if [ -n "${HURD_RUNNER_KEY_SECRET:-}" ]; then
+              echo "${HURD_RUNNER_KEY_SECRET}" > /tmp/hurd-smoke-out/runner-key
+              chmod 0600 /tmp/hurd-smoke-out/runner-key
+              KEY=/tmp/hurd-smoke-out/runner-key
+          fi
+          ssh -p "${SMOKE_PORT}" -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=15 \
+              -i "${KEY}" root@127.0.0.1 \
+              'uname -a; (emacsclient -e "(supervise-status)" 2>/dev/null) || ps -A' \
+              > /tmp/hurd-smoke-out/guest-state.txt
+          echo "--- guest state ---"
+          cat /tmp/hurd-smoke-out/guest-state.txt
+        env:
+          HURD_RUNNER_KEY_SECRET: ${{ secrets.HURD_RUNNER_KEY }}
+
+      - name: graceful shutdown
+        # ssh in, ask shutdown -h now, give qemu 30s to exit, then
+        # SIGTERM the pid as the operator-visible "we are leaving
+        # state on disk; don't reboot into half-state next run".
+        if: always()
+        run: |
+          set -eu
+          KEY="${HOME}/.ssh/hurd_runner_key"
+          if [ -n "${HURD_RUNNER_KEY_SECRET:-}" ]; then
+              KEY=/tmp/hurd-smoke-out/runner-key
+          fi
+          if [ -f /tmp/hurd-smoke-out/qemu.pid ]; then
+              QPID="$(cat /tmp/hurd-smoke-out/qemu.pid)"
+              ssh -p "${SMOKE_PORT}" -o StrictHostKeyChecking=no \
+                  -o UserKnownHostsFile=/dev/null \
+                  -o ConnectTimeout=10 \
+                  -i "${KEY}" root@127.0.0.1 \
+                  'shutdown -h now' 2>/dev/null || true
+              i=0
+              while [ "${i}" -lt 30 ] && kill -0 "${QPID}" 2>/dev/null; do
+                  i=$((i + 1))
+                  sleep 1
+              done
+              if kill -0 "${QPID}" 2>/dev/null; then
+                  echo "guest did not shut down in 30s, SIGTERM"
+                  kill -TERM "${QPID}" 2>/dev/null || true
+                  sleep 2
+                  kill -KILL "${QPID}" 2>/dev/null || true
+              fi
+              rm -f /tmp/hurd-smoke-out/qemu.pid
+          fi
+        env:
+          HURD_RUNNER_KEY_SECRET: ${{ secrets.HURD_RUNNER_KEY }}
+
+      - name: upload artifacts
+        # serial log + supervisor state, even on failure; this is
+        # what an operator looks at after a red build.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hurd-smoke-${{ github.run_id }}
+          path: |
+            /tmp/hurd-smoke-out/serial-*.log
+            /tmp/hurd-smoke-out/guest-state.txt
+          if-no-files-found: warn
+          retention-days: 14
