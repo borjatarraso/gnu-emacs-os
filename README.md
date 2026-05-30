@@ -379,22 +379,24 @@ version:
     reported.", and the MBR carries the GRUB signature.
     closes task #210.  receipt at
     [docs/runlogs/2026-05-30-hurd-v0923-install-slice-c-verify.md](docs/runlogs/2026-05-30-hurd-v0923-install-slice-c-verify.md).
-  - v0.9.24: in flight on main, untagged at the time of writing.
-    three parallel slices landed:  (1) `docs/upstream/` carries
-    four upstream-ready bug-report + patch drafts for the
-    deferred-Hurd items (pflocal SO_RCVTIMEO, pfinet per-iface
-    counters, native Hurd audio translator, native Xorg
-    evdev/libinput); (2) `iso-build/hurd-image-reroll.sh` grows
-    a `FLAVOR=apt-image` knob that bakes a derivative image with
-    xvfb + emacs-lucid + elpa-exwm + elpa-xelb + pulseaudio
-    apt-installed on top of the canonical bake, so the v1.x
-    EXWM-on-Xvfb + pulseaudio surface ships turnkey;  (3)
-    `.github/workflows/hurd-smoke.yml` plus
-    `docs/CI_HURD_RUNNER.md` draft the self-hosted KVM boot-
-    smoke gate that goes live the day a runner labelled
-    `hurd-kvm` registers.  the long pselect soak slice and the
-    apt-image live-verify slice are still in flight; v0.9.24
-    will tag when both report.
+  - v0.9.24: tagged. four parallel slices landed: (1)
+    `docs/upstream/` carries four upstream-ready bug-report +
+    patch drafts for the deferred-Hurd items (pflocal
+    SO_RCVTIMEO, pfinet per-iface counters, native Hurd audio
+    translator, native Xorg evdev/libinput); (2)
+    `iso-build/hurd-image-reroll.sh` grows a `FLAVOR=apt-image`
+    knob that bakes a derivative image with xvfb + emacs-lucid
+    + elpa-exwm + elpa-xelb + pulseaudio apt-installed on top
+    of the canonical bake, so the v1.x EXWM-on-Xvfb + pulseaudio
+    surface ships turnkey; (3) `.github/workflows/hurd-smoke.yml`
+    plus `docs/CI_HURD_RUNNER.md` draft the self-hosted KVM
+    boot-smoke gate that goes live the day a runner labelled
+    `hurd-kvm` registers; (4) a 35-minute / 1383-eval pselect
+    soak on the v0.9.22 image upgrades task #213's verdict from
+    "5-min / 60-eval non-reproduction" to "35-min / 1383-eval
+    non-reproduction", zero SIGSEGV/__mach_msg markers, PID
+    stable at 30 across 63 side-polls.  receipt at
+    [docs/runlogs/2026-05-30-hurd-pselect-soak-35min.md](docs/runlogs/2026-05-30-hurd-pselect-soak-35min.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.
