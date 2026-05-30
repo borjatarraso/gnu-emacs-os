@@ -86,6 +86,16 @@ log() {
     printf '[hurd-image-reroll] %s\n' "$*"
 }
 
+# gf: thin alias for guestfish --remote.  used once the --listen
+# daemon is up (step 3c).  one libguestfs appliance launch amortises
+# across the whole script instead of paying ~15 s per guestfish
+# invocation; with 3 invocations previously, this is ~30 s saved per
+# re-roll cycle and a cleaner mutation flow (every gf line is one
+# verb, no HEREDOC quoting gotchas).
+gf() {
+    guestfish --remote -- "$@"
+}
+
 ###############################################################################
 # step 1: input sanity
 ###############################################################################
@@ -157,7 +167,9 @@ log "overlay done; ${OUTPUT_IMG} ($(stat -c '%s' "${OUTPUT_IMG}") bytes initial,
 # upload from there. STAGING_DIR is per-run so concurrent re-rolls don't
 # collide (though the script's qcow2-level invariant is single-writer).
 STAGING_DIR="$(mktemp -d /tmp/hurd-image-reroll-stage.XXXXXX)"
-trap 'rm -rf "${STAGING_DIR}"' EXIT
+# trap installed in step 3c after the guestfish daemon is up, so the
+# single trap can tear both down in one go (daemon first via gf exit,
+# then staging dir).
 log "step 3: staging dir ${STAGING_DIR}"
 
 # unpack the supervisor tree. the tarball's root entry must be
@@ -245,7 +257,39 @@ INIT_ARGS_EOF
 log "init.args staged ($(wc -l < "${STAGING_DIR}/init.args") lines, minimal-to-SSH variant)"
 
 ###############################################################################
-# step 4: extract pristine GRUB cfg, patch it, stage the patched copy
+# step 3c: start guestfish --listen daemon, mount once
+###############################################################################
+# WHY: the previous flow launched guestfish 3 separate times (step 4
+# read pristine grub.cfg; step 5 mutated output image; step 6 read-only
+# verified).  each launch pays ~15 s appliance spin-up.  --listen mode
+# starts the daemon once, exports GUESTFISH_PID, and lets every later
+# call use `gf` (= guestfish --remote --) to talk to the same appliance
+# at microsecond cost.
+#
+# step 4 used to read grub.cfg from PRISTINE_IMG.  the qcow2 overlay
+# from step 2 is byte-identical to pristine until step 5 mutations
+# land, so reading grub.cfg from OUTPUT_IMG before step 5 yields the
+# same bytes.  this lets one daemon serve all three steps.
+#
+# the trap fires on any exit path (success, error, signal) so the
+# daemon never leaks.  `gf exit 2>/dev/null || true` because if the
+# daemon already exited cleanly, --remote will error and we don't
+# care.
+log "step 3c: start guestfish --listen daemon over ${OUTPUT_IMG}"
+eval "$(guestfish --listen)"
+if [ -z "${GUESTFISH_PID:-}" ]; then
+    log "FATAL: guestfish --listen did not export GUESTFISH_PID"
+    exit 1
+fi
+trap 'rm -rf "${STAGING_DIR}"; gf exit 2>/dev/null || true' EXIT
+log "guestfish daemon pid=${GUESTFISH_PID}"
+
+gf add "${OUTPUT_IMG}"
+gf run
+gf mount /dev/sda2 /
+
+###############################################################################
+# step 4: extract pristine GRUB cfg (via overlay), patch it
 ###############################################################################
 # pristine grub.cfg has two problems we have to fix for serial verifies:
 #   a) `terminal_output gfxterm` swallows the boot menu and kernel
@@ -253,11 +297,8 @@ log "init.args staged ($(wc -l < "${STAGING_DIR}/init.args") lines, minimal-to-S
 #   b) the multiboot gnumach lines lack `console=com0`, so even if
 #      GRUB itself ends up on serial, gnumach writes to vga and the
 #      hand-off transcript stops at the GRUB menu.
-log "step 4: extract + patch GRUB cfg"
-guestfish --ro -a "${PRISTINE_IMG}" \
-    run : \
-    mount /dev/sda2 / : \
-    download /boot/grub/grub.cfg "${STAGING_DIR}/grub.cfg.orig"
+log "step 4: extract + patch GRUB cfg (via overlay, pre-mutation)"
+gf download /boot/grub/grub.cfg "${STAGING_DIR}/grub.cfg.orig"
 
 # patch a: prepend `serial --unit=0 --speed=115200` and replace
 # `terminal_output gfxterm` with `terminal_output serial console`.
@@ -307,52 +348,49 @@ log "grub.cfg patched (${GRUB_DELTA}-line unified diff)"
 #   6. mkdir /usr/share/geos + tar-in the supervisor tree
 #   7. mkdir /root/.emacs.d + symlink early-init.el
 #   8. upload pre-generated sshd host keys into /etc/ssh/, perms 0600/0644
-log "step 5: guestfish mutate ${OUTPUT_IMG}"
-guestfish -a "${OUTPUT_IMG}" <<EOF
-run
-mount /dev/sda2 /
+log "step 5: gf mutate ${OUTPUT_IMG} via daemon pid=${GUESTFISH_PID}"
 
 # 5.1: backup /sbin/init. the rm -f in step 2 guarantees we're working
 # on a fresh copy of the pristine, where /sbin/init is the stock
 # Debian binary and /sbin/init.debian-stock does NOT exist yet. so
 # the mv is unconditional; no re-run safety branch needed here, because
 # the re-run safety lives at the qcow2-overwrite level (step 2 rm -f).
-mv /sbin/init /sbin/init.debian-stock
+gf mv /sbin/init /sbin/init.debian-stock
 
 # 5.2: drop new /sbin/init
-upload ${PID1_BIN} /sbin/init
-chmod 0755 /sbin/init
+gf upload "${PID1_BIN}" /sbin/init
+gf chmod 0755 /sbin/init
 
 # 5.3: patched grub.cfg in place
-upload ${STAGING_DIR}/grub.cfg /boot/grub/grub.cfg
-chmod 0644 /boot/grub/grub.cfg
+gf upload "${STAGING_DIR}/grub.cfg" /boot/grub/grub.cfg
+gf chmod 0644 /boot/grub/grub.cfg
 
 # 5.4: root ssh key. mkdir-p is a no-op if the dir exists; chmod after
 # to enforce 0700 / 0600 regardless of umask the guest happens to honor.
-mkdir-p /root/.ssh
-upload ${SSH_PUBKEY} /root/.ssh/authorized_keys
-chmod 0600 /root/.ssh/authorized_keys
-chmod 0700 /root/.ssh
-chown 0 0 /root/.ssh
-chown 0 0 /root/.ssh/authorized_keys
+gf mkdir-p /root/.ssh
+gf upload "${SSH_PUBKEY}" /root/.ssh/authorized_keys
+gf chmod 0600 /root/.ssh/authorized_keys
+gf chmod 0700 /root/.ssh
+gf chown 0 0 /root/.ssh
+gf chown 0 0 /root/.ssh/authorized_keys
 
 # 5.5: init.args
-mkdir-p /etc/geos
-upload ${STAGING_DIR}/init.args /etc/geos/init.args
-chmod 0644 /etc/geos/init.args
-chown 0 0 /etc/geos/init.args
+gf mkdir-p /etc/geos
+gf upload "${STAGING_DIR}/init.args" /etc/geos/init.args
+gf chmod 0644 /etc/geos/init.args
+gf chown 0 0 /etc/geos/init.args
 
 # 5.6: supervisor tree under /usr/share/geos/emacs-init/. tar-in
 # streams the tarball into the named guest directory. the tarball's
 # root entry is emacs-init/, so we extract into /usr/share/geos/
 # and the result lands at /usr/share/geos/emacs-init/.
-mkdir-p /usr/share/geos
-tar-in ${SUPERVISOR_TAR} /usr/share/geos/ compress:gzip
+gf mkdir-p /usr/share/geos
+gf tar-in "${SUPERVISOR_TAR}" /usr/share/geos/ compress:gzip
 
 # 5.7: symlink early-init.el into /root/.emacs.d/ so the supervised
 # emacs picks it up BEFORE tty-setup-hook fires. see v0.9.12 slice 6.
-mkdir-p /root/.emacs.d
-ln-sf /usr/share/geos/emacs-init/early-init.el /root/.emacs.d/early-init.el
+gf mkdir-p /root/.emacs.d
+gf ln-sf /usr/share/geos/emacs-init/early-init.el /root/.emacs.d/early-init.el
 
 # 5.8: pre-generated sshd host keys.  mkdir-p /etc/ssh because on a
 # minimal canonical image the dir may exist already (openssh-server is
@@ -360,26 +398,15 @@ ln-sf /usr/share/geos/emacs-init/early-init.el /root/.emacs.d/early-init.el
 # explicitly per key after upload: 0600 for the private halves, 0644
 # for the public halves, root:root everywhere.  see step 3b for the
 # rationale on baking these in offline.
-mkdir-p /etc/ssh
-upload ${STAGING_DIR}/ssh_host_rsa_key /etc/ssh/ssh_host_rsa_key
-upload ${STAGING_DIR}/ssh_host_rsa_key.pub /etc/ssh/ssh_host_rsa_key.pub
-upload ${STAGING_DIR}/ssh_host_ecdsa_key /etc/ssh/ssh_host_ecdsa_key
-upload ${STAGING_DIR}/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_ecdsa_key.pub
-upload ${STAGING_DIR}/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
-upload ${STAGING_DIR}/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub
-chmod 0600 /etc/ssh/ssh_host_rsa_key
-chmod 0600 /etc/ssh/ssh_host_ecdsa_key
-chmod 0600 /etc/ssh/ssh_host_ed25519_key
-chmod 0644 /etc/ssh/ssh_host_rsa_key.pub
-chmod 0644 /etc/ssh/ssh_host_ecdsa_key.pub
-chmod 0644 /etc/ssh/ssh_host_ed25519_key.pub
-chown 0 0 /etc/ssh/ssh_host_rsa_key
-chown 0 0 /etc/ssh/ssh_host_rsa_key.pub
-chown 0 0 /etc/ssh/ssh_host_ecdsa_key
-chown 0 0 /etc/ssh/ssh_host_ecdsa_key.pub
-chown 0 0 /etc/ssh/ssh_host_ed25519_key
-chown 0 0 /etc/ssh/ssh_host_ed25519_key.pub
-EOF
+gf mkdir-p /etc/ssh
+for kt in rsa ecdsa ed25519; do
+    gf upload "${STAGING_DIR}/ssh_host_${kt}_key"     "/etc/ssh/ssh_host_${kt}_key"
+    gf upload "${STAGING_DIR}/ssh_host_${kt}_key.pub" "/etc/ssh/ssh_host_${kt}_key.pub"
+    gf chmod 0600 "/etc/ssh/ssh_host_${kt}_key"
+    gf chmod 0644 "/etc/ssh/ssh_host_${kt}_key.pub"
+    gf chown 0 0  "/etc/ssh/ssh_host_${kt}_key"
+    gf chown 0 0  "/etc/ssh/ssh_host_${kt}_key.pub"
+done
 
 log "step 5 complete"
 
@@ -396,35 +423,32 @@ log "step 6: post-mutation verification"
 # contains tabs or single quotes.  do the inspection where we have
 # decent tools.
 VERIFY_TMP="$(mktemp -d /tmp/hurd-image-reroll-verify.XXXXXX)"
-guestfish --ro -a "${OUTPUT_IMG}" <<VERIFY_EOF
-run
-mount /dev/sda2 /
-echo "--- /sbin/init ---"
-ll /sbin/init
-echo "--- /sbin/init.debian-stock ---"
-ll /sbin/init.debian-stock
-echo "--- /etc/geos/init.args (stat) ---"
-ll /etc/geos/init.args
-echo "--- /root/.ssh/authorized_keys (stat) ---"
-ll /root/.ssh/authorized_keys
-echo "--- /usr/share/geos/emacs-init (top dirs) ---"
-ls /usr/share/geos/emacs-init
-echo "--- /root/.emacs.d/early-init.el (stat) ---"
-ll /root/.emacs.d/early-init.el
+# uses the same --listen daemon from step 3c; the daemon was opened
+# read-write but we're done mutating, so the remaining ops are reads.
+# `ll` and `ls` are diagnostic-only here; their stdout goes to the
+# operator log so a forensic re-roll can be grepped after the fact.
+echo "--- /sbin/init ---";                              gf ll /sbin/init
+echo "--- /sbin/init.debian-stock ---";                 gf ll /sbin/init.debian-stock
+echo "--- /etc/geos/init.args (stat) ---";              gf ll /etc/geos/init.args
+echo "--- /root/.ssh/authorized_keys (stat) ---";       gf ll /root/.ssh/authorized_keys
+echo "--- /usr/share/geos/emacs-init (top dirs) ---";   gf ls /usr/share/geos/emacs-init
+echo "--- /root/.emacs.d/early-init.el (stat) ---";     gf ll /root/.emacs.d/early-init.el
 echo "--- /etc/ssh/ssh_host_*_key* (stat) ---"
-ll /etc/ssh/ssh_host_rsa_key
-ll /etc/ssh/ssh_host_rsa_key.pub
-ll /etc/ssh/ssh_host_ecdsa_key
-ll /etc/ssh/ssh_host_ecdsa_key.pub
-ll /etc/ssh/ssh_host_ed25519_key
-ll /etc/ssh/ssh_host_ed25519_key.pub
-download /boot/grub/grub.cfg ${VERIFY_TMP}/grub.cfg
-download /etc/geos/init.args ${VERIFY_TMP}/init.args
-download /root/.ssh/authorized_keys ${VERIFY_TMP}/authorized_keys
-download /etc/ssh/ssh_host_rsa_key.pub ${VERIFY_TMP}/ssh_host_rsa_key.pub
-download /etc/ssh/ssh_host_ecdsa_key.pub ${VERIFY_TMP}/ssh_host_ecdsa_key.pub
-download /etc/ssh/ssh_host_ed25519_key.pub ${VERIFY_TMP}/ssh_host_ed25519_key.pub
-VERIFY_EOF
+for kt in rsa ecdsa ed25519; do
+    gf ll "/etc/ssh/ssh_host_${kt}_key"
+    gf ll "/etc/ssh/ssh_host_${kt}_key.pub"
+done
+gf download /boot/grub/grub.cfg                   "${VERIFY_TMP}/grub.cfg"
+gf download /etc/geos/init.args                   "${VERIFY_TMP}/init.args"
+gf download /root/.ssh/authorized_keys            "${VERIFY_TMP}/authorized_keys"
+gf download /etc/ssh/ssh_host_rsa_key.pub         "${VERIFY_TMP}/ssh_host_rsa_key.pub"
+gf download /etc/ssh/ssh_host_ecdsa_key.pub       "${VERIFY_TMP}/ssh_host_ecdsa_key.pub"
+gf download /etc/ssh/ssh_host_ed25519_key.pub     "${VERIFY_TMP}/ssh_host_ed25519_key.pub"
+# done with the daemon; trap cleanup will SIGTERM it via `gf exit`,
+# but explicit shutdown here frees the appliance before step 7 starts
+# its own QEMU.  ignore errors in case the daemon already died.
+gf umount-all || true
+gf exit 2>/dev/null || true
 log "verify: GRUB serial line + first multiboot:"
 # literal tab byte for the regex; POSIX grep doesn't honor \t.
 TAB="$(printf '\t')"
