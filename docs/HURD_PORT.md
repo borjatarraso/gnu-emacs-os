@@ -107,9 +107,12 @@ container hierarchy with WM_CLASS and `_NET_WM_PID` set
 (runlog `docs/runlogs/2026-05-21-v0910-exwm-xvfb-hurd.md`).
 The canonical image ships emacs-nox, so four apt packages
 (`xvfb`, `emacs-lucid`, `elpa-exwm`, `elpa-xelb`) need
-installing for the X mode; a future v1.x apt-image flavor will
-bundle them. `x11-utils`, `xterm`, `xdotool`, `x11-apps` are
-already in the canonical set.
+installing for the X mode. v0.9.24 ships the v1.x apt-image
+flavor that bundles them; run `FLAVOR=apt-image
+iso-build/hurd-image-reroll.sh` to bake a derivative image
+with the four packages plus `pulseaudio` already installed.
+`x11-utils`, `xterm`, `xdotool`, `x11-apps` are already in the
+canonical set.
 
 The "die when parent dies" link that Linux gets via
 `prctl(PR_SET_PDEATHSIG)` is abstracted through the new
