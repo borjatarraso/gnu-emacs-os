@@ -235,21 +235,31 @@ for kt in rsa ecdsa ed25519; do
 done
 
 cat > "${STAGING_DIR}/init.args" <<'INIT_ARGS_EOF'
-# v0.9.18 minimal-to-SSH init.args
-# the full 35-file -l chain (see git history of hurd-bootstrap.sh) has
-# an unresolved regression that causes the supervised emacs to exit
-# (kill-emacs trampoline build wedge) on the first pid1-as-real-PID-1
-# boot.  this minimal variant proves the rerolled image boots end-to-
-# end (pid1 -> emacs -> settrans pfinet -> sshd reachable via QEMU
-# SLIRP host-forward).  the full chain regression is the v0.9.19
-# follow-on; see /tmp/v0918-*.log receipts for the discovery.
+# /etc/geos/init.args -- v0.9.22 canonical 35-file Hurd boot chain
+# pid1 reads this when the kernel hands us argc==1 (/hurd/startup).
+# one arg per line; blanks and '#' lines are ignored.
 #
-# v0.9.21 update: slice B retry (35-file chain bake) reproducibly
-# wedges on rumpdisk wd0 enumeration race BEFORE init runs at all.
-# the race is in the canonical pristine image's gnumach boot path,
-# not in the slice B init.args chain itself.  shipping v0.9.21 as
-# efficiency-only; slice B re-opened as v0.9.22 follow-on once the
-# wd0 settle / retry mechanism lands in pid1's pre-init phase.
+# slot 2 = `:` because the STATIC=1 pid1 build (Makefile EMACS_INIT_STATIC=1)
+# inlines pid1-module.o into the emacs-init binary itself; there is no
+# .so on disk to dlopen.  the pid1 cmdline parser treats `:` as "skip
+# this slot, no module path".  for the dynamic build, slot 2 would be
+# /usr/lib/geos/pid1-module.so.
+#
+# slot 3 = `:` because Xorg is opt-in and disabled by default.  if the
+# operator does `apt install xvfb` then edits this slot to the Xvfb
+# command, pid1's x-display.el will spawn and supervise it.
+#
+# slot 4+ becomes the emacs argv after pid1 forks into emacs.
+# --no-site-file/--no-splash/--no-site-lisp drop the three Debian-stock
+# behaviours that interfere with PID 1 boot (no /etc/emacs/site-start
+# files, no graphical splash on the tty, no /usr/share/emacs/site-lisp
+# path additions).  we do NOT pass --no-init-file because early-init.el
+# is load-bearing for the native-comp opt-out -- without it, tty-setup-
+# hook fires gpm-mouse-mode which triggers a trampoline build, gcc looks
+# for as(1), wedges if missing.  v0.9.19 + v0.9.20 confirmed canonical
+# Debian Hurd 0.9 ships gcc 15.2.0 + binutils 2.46 so the trampoline
+# build CAN succeed, but the opt-out is still required because each
+# build adds ~3 s to boot per .el file touched at load time.
 /usr/bin/emacs
 :
 :
@@ -257,11 +267,69 @@ cat > "${STAGING_DIR}/init.args" <<'INIT_ARGS_EOF'
 --no-splash
 --no-site-lisp
 -l
-/usr/share/geos/emacs-init/early-init.el
---eval
-(progn (setq native-comp-jit-compilation nil) (setq native-comp-enable-subr-trampolines nil) (with-temp-file "/dev/console" (insert "v0918-min: native-comp opted out\n")) (let ((settrans "/bin/settrans") (pfinet "/hurd/pfinet")) (when (and (file-executable-p settrans) (file-executable-p pfinet)) (with-temp-file "/dev/console" (insert "v0918-min: settrans pfinet eth0 10.0.2.15/24 gw 10.0.2.2\n")) (call-process settrans nil nil nil "-fgap" "/servers/socket/2" pfinet "-i" "/dev/eth0" "-a" "10.0.2.15" "-m" "255.255.255.0" "-g" "10.0.2.2"))) (let ((sshd "/usr/sbin/sshd")) (if (file-executable-p sshd) (progn (with-temp-file "/dev/console" (insert "v0918-min: starting sshd -D -e\n")) (start-process "sshd" "*sshd*" sshd "-D" "-e")) (with-temp-file "/dev/console" (insert "v0918-min: /usr/sbin/sshd MISSING\n")))) (with-temp-file "/dev/console" (insert "v0918-min: ready, dropping into event loop\n")))
+/usr/share/geos/emacs-init/core/panic.el
+-l
+/usr/share/geos/emacs-init/core/port.el
+-l
+/usr/share/geos/emacs-init/core/cmdline.el
+-l
+/usr/share/geos/emacs-init/core/state.el
+-l
+/usr/share/geos/emacs-init/core/supervise.el
+-l
+/usr/share/geos/emacs-init/core/power.el
+-l
+/usr/share/geos/emacs-init/core/use-package-shim.el
+-l
+/usr/share/geos/emacs-init/core/network.el
+-l
+/usr/share/geos/emacs-init/core/hostname.el
+-l
+/usr/share/geos/emacs-init/core/passwd.el
+-l
+/usr/share/geos/emacs-init/core/session.el
+-l
+/usr/share/geos/emacs-init/core/x-display.el
+-l
+/usr/share/geos/emacs-init/core/rpc-server.el
+-l
+/usr/share/geos/emacs-init/buffers/network.el
+-l
+/usr/share/geos/emacs-init/buffers/processes.el
+-l
+/usr/share/geos/emacs-init/buffers/journal.el
+-l
+/usr/share/geos/emacs-init/buffers/services.el
+-l
+/usr/share/geos/emacs-init/buffers/disks.el
+-l
+/usr/share/geos/emacs-init/buffers/packages.el
+-l
+/usr/share/geos/emacs-init/buffers/reconfigure.el
+-l
+/usr/share/geos/emacs-init/buffers/users.el
+-l
+/usr/share/geos/emacs-init/buffers/login.el
+-l
+/usr/share/geos/emacs-init/services/journal-tail.el
+-l
+/usr/share/geos/emacs-init/services/dhcp.el
+-l
+/usr/share/geos/emacs-init/services/hurd-essentials.el
+-l
+/usr/share/geos/emacs-init/install/disk.el
+-l
+/usr/share/geos/emacs-init/install/mkfs.el
+-l
+/usr/share/geos/emacs-init/install/copy.el
+-l
+/usr/share/geos/emacs-init/install/grub.el
+-l
+/usr/share/geos/emacs-init/buffers/install.el
+-l
+/usr/share/geos/emacs-init/core/boot-marker.el
 INIT_ARGS_EOF
-log "init.args staged ($(wc -l < "${STAGING_DIR}/init.args") lines, minimal-to-SSH variant)"
+log "init.args staged ($(wc -l < "${STAGING_DIR}/init.args") lines, full v0.9.22 35-file chain)"
 
 ###############################################################################
 # step 3c: start guestfish --listen daemon, mount once
@@ -515,16 +583,27 @@ else
         # no KVM accel flag in case the host kernel module is missing;
         # smoke is slower without it but still bounded by SMOKE_TIMEOUT_S.
         # NOTE: nohup + & means this script keeps running while QEMU boots.
+        # NOTE: -drive if=ide is load-bearing.  rumpdisk on canonical
+        # Debian Hurd 0.9 has no virtio-blk driver, so if=virtio shows
+        # "vendor 1af4 product 1001 ... not configured" and ext2fs
+        # wedges on "part:2:device:wd0: No such device or address".
+        # if=ide enumerates the disk as wd0 at atabus0 drive 0 (IDE
+        # primary) which rumpdisk drives via its piixide back-end.
         # NOTE: tried -snapshot here (would keep OUTPUT_IMG byte-identical
-        # to post-step-6 state), but it deterministically lost the rumpdisk
-        # wd0 enumeration race on the canonical Debian Hurd 0.9 pristine.
-        # without -snapshot the smoke writes land in the qcow2 overlay;
-        # operator should treat post-smoke OUTPUT_IMG as "boot-tested, not
-        # boot-pristine" and re-roll if a fresh image is required.
+        # to post-step-6 state), but it caused a different boot regression
+        # that this commit does not bother chasing.  without -snapshot the
+        # smoke writes land in the qcow2 overlay; operator should treat
+        # post-smoke OUTPUT_IMG as "boot-tested, not boot-pristine" and
+        # re-roll if a fresh image is required.
+        # NIC: -device e1000 is load-bearing.  Hurd's netdde does NOT
+        # drive virtio-net-pci (vendor 1af4 product 1000 logs as
+        # "not configured"); pfinet settrans then returns exit=4 and
+        # sshd has no IPv4 routing.  e1000 binds to netdde cleanly,
+        # settrans pfinet returns exit=0, ssh -p ${SMOKE_PORT} works.
         nohup qemu-system-x86_64 -enable-kvm -cpu host -m 2048 \
-            -drive file="${OUTPUT_IMG}",if=virtio,format=qcow2 \
+            -drive file="${OUTPUT_IMG}",if=ide,format=qcow2 \
             -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"${SMOKE_PORT}"-:22 \
-            -device virtio-net-pci,netdev=net0 \
+            -device e1000,netdev=net0 \
             -nographic -serial file:"${SMOKE_SERIAL}" -display none \
             >/dev/null 2>&1 &
         SMOKE_PID=$!
@@ -577,7 +656,7 @@ else
                 log "  serial log: ${SMOKE_SERIAL} ($(wc -l < "${SMOKE_SERIAL}") lines)"
                 ;;
             fail-wd0)
-                log "smoke FAIL: rumpdisk wd0 enumeration race (the v0.9.20 wedge)"
+                log "smoke FAIL: ext2fs cannot reach wd0 (was the if=virtio wedge; check qemu drive flag)"
                 log "  last 30 serial lines:"
                 tail -30 "${SMOKE_SERIAL}" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/^/    /'
                 exit 2
@@ -603,7 +682,7 @@ log "output image sha256: ${OUT_SHA}"
 log "done: ${OUTPUT_IMG} ($(stat -c '%s' "${OUTPUT_IMG}") bytes)"
 log "next: boot with"
 log "  qemu-system-x86_64 -enable-kvm -cpu host -m 2048 \\"
-log "    -drive file=${OUTPUT_IMG},if=virtio,format=qcow2 \\"
+log "    -drive file=${OUTPUT_IMG},if=ide,format=qcow2 \\"
 log "    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2266-:22 \\"
-log "    -device virtio-net-pci,netdev=net0 \\"
+log "    -device e1000,netdev=net0 \\"
 log "    -nographic -serial file:/tmp/v0918-first-boot-serial.log"

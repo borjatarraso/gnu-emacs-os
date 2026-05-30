@@ -351,6 +351,21 @@ version:
     v0.9.20 image with byte-identical serial output.  receipt
     at
     [docs/runlogs/2026-05-30-hurd-v0921-efficiency-triple.md](docs/runlogs/2026-05-30-hurd-v0921-efficiency-triple.md).
+  - v0.9.22: tagged. slice B done.  the "wd0 race" of v0.9.21
+    turned out to be a flat missing-driver bug: Hurd's
+    rumpdisk has no virtio-blk driver, so `-drive if=virtio`
+    cannot enumerate wd0 at all.  iso-build/hurd-image-reroll.sh
+    and iso-build/hurd-fast-iterate.sh both flip to
+    `-drive if=ide` (wd0 enumerates via piixide first try) and
+    `-device e1000` (netdde has no virtio-net driver either, so
+    pfinet settrans wedges at exit=4 under virtio-net-pci;
+    e1000 brings settrans to exit=0).  the full 35-file
+    canonical init.args HEREDOC is now the default bake and
+    boots end-to-end to an SSH-able supervised emacs with
+    four supervisor registry entries (journal-kmsg,
+    journal-syslog, hurd-syslogd, hurd-sshd) autostarting.
+    receipt at
+    [docs/runlogs/2026-05-30-hurd-v0922-slice-b-ide-e1000.md](docs/runlogs/2026-05-30-hurd-v0922-slice-b-ide-e1000.md).
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.

@@ -51,10 +51,14 @@ cmd_boot() {
     [ -f "${IMG}" ] || { log "FATAL: image missing: ${IMG}"; exit 1; }
     : > "${SERIAL_LOG}"
     log "booting ${IMG} (ephemeral, port ${SSH_PORT})"
+    # if=ide because rumpdisk has no virtio-blk driver (wd0 enumerates
+    # via piixide on the IDE primary).  -device e1000 because Hurd's
+    # netdde has no virtio-net driver (pfinet settrans wedges at exit=4
+    # under virtio-net-pci; e1000 brings settrans to exit=0).
     nohup qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -snapshot \
-        -drive file="${IMG}",if=virtio \
+        -drive file="${IMG}",if=ide \
         -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"${SSH_PORT}"-:22 \
-        -device virtio-net-pci,netdev=net0 \
+        -device e1000,netdev=net0 \
         -nographic -serial file:"${SERIAL_LOG}" -display none \
         >/dev/null 2>&1 &
     echo $! > "${QEMU_PIDFILE}"
