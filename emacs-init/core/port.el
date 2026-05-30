@@ -85,6 +85,39 @@ one missing-feature event must not abort the rest of the boot."
    (cons 'geos-port-unimplemented feature))
   nil)
 
+;; the helper below was extracted at user request from two byte-for-byte
+;; copies in services/journal-tail.el (`--ensure-kern-log-hurd' and
+;; `--ensure-syslog-hurd').  it sits in port.el because the whole reason
+;; the touch is needed is a hurd kernel-surface invariant: pid1 mounts
+;; a fresh tmpfs over /var on Hurd boot so on-disk /var/log is masked
+;; and the directory itself may be absent on the live FS until the
+;; first writer creates it.  on Linux the file lifecycle is the
+;; kernel's problem (journald owns /var/log/journal, kmsg is a /dev
+;; node), so the helper short-circuits to nil there with no I/O.
+(defun geos-hurd-ensure-path (path)
+  "Touch PATH on Hurd if it does not exist, creating parent dirs.
+No-op on Linux.  Designed for /var/log/* files that Debian Hurd's
+syslogd has not created yet when pid1's supervised emacs first
+tries to read them; pid1 tmpfs-mounts /var on Hurd boot so the
+parent directory may also be absent on the live FS, hence the
+recursive `make-directory' before `write-region'.
+
+Errors route through `panic-handle' and the function returns nil
+without raising; the caller's downstream consumer (typically a
+supervised `tail -F') is expected to be resilient to the file
+still not existing.  Returns non-nil only when this call actually
+created the file: Linux always nil, Hurd-but-already-exists also
+nil, Hurd-just-touched-it t."
+  (when (and (not (geos-kernel-linux-p))
+             (not (file-exists-p path)))
+    (condition-case err
+        (let ((write-region-inhibit-fsync t))
+          (make-directory (file-name-directory path) t)
+          (write-region "" nil path 'append 'nomsg)
+          t)
+      (error (panic-handle err (cons 'geos-hurd-ensure-path path))
+             nil))))
+
 ;; consumer notes, kept here so the next reader can see the whole
 ;; portability picture in one place:
 ;;

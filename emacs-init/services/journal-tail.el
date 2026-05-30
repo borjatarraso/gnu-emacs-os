@@ -403,60 +403,27 @@ counterpart today, so an explicit teardown means
 ;; from byte 1) the early-window behaviour is fragile; creating a
 ;; zero-byte file makes the contract trivial.
 ;;
-;; pure elisp, no shell-out: write-region of "" to the path with
-;; nomsg + a no-fsync inhibit so this stays cheap during boot.
-;; we also `make-directory' the parent first because pid1 mounts a
-;; fresh tmpfs over `/var' on Hurd boot (see `pid1: /var on tmpfs'
-;; breadcrumb) so the on-disk `/var/log' is masked and the directory
-;; doesn't exist on the live FS.  this was the actual failure mode
-;; observed in the v0.9.13 slice-1 VM-verify (file-missing on
-;; write-region, routed through panic-handle, touch never happened).
-;;
-;; best-effort: any error routes through panic-handle and the
-;; supervisor still spawns tail (where it may then crashloop until
-;; syslogd creates the file the hard way, which is the same failure
-;; mode as today).
+;; v0.9.17 added a sibling touch for /var/log/syslog and the two
+;; copies were byte-for-byte identical modulo the path.  the touch
+;; logic now lives in core/port.el as `geos-hurd-ensure-path' (linux
+;; short-circuits to nil, hurd does mkdir-parent + write-region "" +
+;; panic-handle on error), and the two call sites below collapse to
+;; one funcall each.  see port.el for the design contract; the user
+;; explicitly waived the no-premature-abstraction rule for this one
+;; helper on 2026-05-30.
 (defun journal-tail--ensure-kern-log-hurd ()
   "Touch /var/log/kern.log on Hurd if it does not exist.
-No-op on Linux (the kmsg path does not need this), no-op on Hurd
-if the file already exists from a previous syslogd run.  Ensures
-/var/log exists first because pid1 tmpfs-mounts /var on Hurd
-boot and the directory may be absent on the live FS.  Returns
-non-nil only when we actually created the file; the no-op paths
-and the panic-handle error path both return nil."
-  (when (and (not (geos-kernel-linux-p))
-             (not (file-exists-p "/var/log/kern.log")))
-    (condition-case err
-        (let ((write-region-inhibit-fsync t))
-          (make-directory "/var/log" t)
-          (write-region "" nil "/var/log/kern.log" 'append 'nomsg)
-          t)
-      (error (panic-handle err 'journal-tail--ensure-kern-log-hurd)
-             nil))))
+Thin wrapper around `geos-hurd-ensure-path' kept for the autostart
+call below and any external code still naming this entry point."
+  (geos-hurd-ensure-path "/var/log/kern.log"))
 
-(journal-tail--ensure-kern-log-hurd)
-
-;; v0.9.17: same race-window guard for /var/log/syslog as the kern.log
-;; one above.  on a fresh Debian Hurd 0.9 boot the file may not exist
-;; before syslogd's first write; pre-touching it under the same tmpfs
-;; /var caveat makes the `tail -F' contract trivial and stops the
-;; respawn cap from burning on a transient ENOENT.
 (defun journal-tail--ensure-syslog-hurd ()
   "Touch /var/log/syslog on Hurd if it does not exist.
-No-op on Linux, no-op on Hurd if the file already exists.  Same
-shape as `journal-tail--ensure-kern-log-hurd' (mkdir /var/log
-first because pid1 tmpfs-mounts /var on Hurd boot).  Errors route
-through panic-handle and the supervised tail still spawns."
-  (when (and (not (geos-kernel-linux-p))
-             (not (file-exists-p "/var/log/syslog")))
-    (condition-case err
-        (let ((write-region-inhibit-fsync t))
-          (make-directory "/var/log" t)
-          (write-region "" nil "/var/log/syslog" 'append 'nomsg)
-          t)
-      (error (panic-handle err 'journal-tail--ensure-syslog-hurd)
-             nil))))
+Thin wrapper around `geos-hurd-ensure-path' for symmetry with
+`journal-tail--ensure-kern-log-hurd'."
+  (geos-hurd-ensure-path "/var/log/syslog"))
 
+(journal-tail--ensure-kern-log-hurd)
 (journal-tail--ensure-syslog-hurd)
 
 ;; the `dd' we spawn on linux here is the same coreutils binary the
