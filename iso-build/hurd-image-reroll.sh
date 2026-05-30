@@ -243,6 +243,13 @@ cat > "${STAGING_DIR}/init.args" <<'INIT_ARGS_EOF'
 # end (pid1 -> emacs -> settrans pfinet -> sshd reachable via QEMU
 # SLIRP host-forward).  the full chain regression is the v0.9.19
 # follow-on; see /tmp/v0918-*.log receipts for the discovery.
+#
+# v0.9.21 update: slice B retry (35-file chain bake) reproducibly
+# wedges on rumpdisk wd0 enumeration race BEFORE init runs at all.
+# the race is in the canonical pristine image's gnumach boot path,
+# not in the slice B init.args chain itself.  shipping v0.9.21 as
+# efficiency-only; slice B re-opened as v0.9.22 follow-on once the
+# wd0 settle / retry mechanism lands in pid1's pre-init phase.
 /usr/bin/emacs
 :
 :
@@ -508,6 +515,12 @@ else
         # no KVM accel flag in case the host kernel module is missing;
         # smoke is slower without it but still bounded by SMOKE_TIMEOUT_S.
         # NOTE: nohup + & means this script keeps running while QEMU boots.
+        # NOTE: tried -snapshot here (would keep OUTPUT_IMG byte-identical
+        # to post-step-6 state), but it deterministically lost the rumpdisk
+        # wd0 enumeration race on the canonical Debian Hurd 0.9 pristine.
+        # without -snapshot the smoke writes land in the qcow2 overlay;
+        # operator should treat post-smoke OUTPUT_IMG as "boot-tested, not
+        # boot-pristine" and re-roll if a fresh image is required.
         nohup qemu-system-x86_64 -enable-kvm -cpu host -m 2048 \
             -drive file="${OUTPUT_IMG}",if=virtio,format=qcow2 \
             -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"${SMOKE_PORT}"-:22 \
