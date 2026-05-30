@@ -27,15 +27,14 @@
 ;; code, verbatim.  zero-behavior-change on linux is the whole point
 ;; of step 2.
 ;;
-;; the GEOS_KERNEL env var is the source of truth.  pid1 will export
-;; it at boot once the hurd port lands (step 4 of the work order in
-;; docs/v04-item11-hurd-spike.md).  for now nothing exports it; we
-;; default to 'linux and that is the only value any consumer ever
-;; sees.  TODO(hurd): pid1 exports GEOS_KERNEL=linux on linux and
-;; GEOS_KERNEL=hurd on hurd, both as part of the per-process env
-;; passed to emacs.  the export is intentionally NOT in this file: a
-;; userland change should not require touching pid1 just to flip the
-;; default.
+;; the GEOS_KERNEL env var is the source of truth.  pid1 exports it
+;; at boot from port_caps.kernel_name (linux on linux, hurd on hurd),
+;; spliced into the per-process env passed to emacs and forwarded by
+;; session.el into the per-user emacs.  the export is intentionally
+;; NOT in this file: a userland change should not require touching
+;; pid1 just to flip the default, and the default here ('linux) is
+;; the right fallback for any host that runs the elisp outside the
+;; pid1 contract (dev sessions, byte-compile, tests).
 
 (require 'panic)
 
@@ -43,9 +42,10 @@
   (intern (or (getenv "GEOS_KERNEL") "linux"))
   "Symbol naming the running kernel.
 read from the GEOS_KERNEL environment variable at load time and
-interned.  pid1 sets this in the child env once the hurd port has
-landed; until then GEOS_KERNEL is unset on every boot we ship and
-this defvar resolves to \\='linux.
+interned.  pid1 sets this in the child env from port_caps.kernel_name
+(linux on linux, hurd on hurd); a dev host that runs the elisp
+outside the pid1 contract leaves GEOS_KERNEL unset and this defvar
+resolves to \\='linux.
 
 valid values today: \\='linux, \\='hurd.  any other value still
 works mechanically (every predicate just returns nil and consumers
