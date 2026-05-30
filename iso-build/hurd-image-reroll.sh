@@ -31,8 +31,17 @@
 #                 default: /tmp/v0918-reroll-staging/emacs-init-tree.tar.gz
 #   SSH_PUBKEY    public key to authorize for root
 #                 default: /tmp/hurd_vm_key.pub
-#   OUTPUT_IMG    rerolled image written here, IDEMPOTENT (rm -f first)
+#   OUTPUT_IMG    rerolled image written here, IDEMPOTENT (rm -f first).
+#                 since v0.9.21 this is a qcow2 OVERLAY whose backing
+#                 file is PRISTINE_IMG.  the extension stays .img so
+#                 downstream tooling does not need updating; QEMU
+#                 auto-detects qcow2 by magic bytes.
 #                 default: /home/overdrive/hurd-vm/debian-hurd-amd64-geos-v0918.img
+#   SMOKE         opt-out for the step 7 boot smoke gate.  default "1"
+#                 (on); set SMOKE=0 to skip the ~3-minute throwaway boot.
+#   SMOKE_TIMEOUT_S  deadline for the smoke gate (default 240).
+#   SMOKE_PORT    host port for the smoke gate's hostfwd (default 2299,
+#                 chosen to not collide with operator's 2266 manual boot).
 #
 # OUTPUT:
 #   $OUTPUT_IMG  rerolled Debian GNU/Hurd 0.9 image with:
@@ -95,6 +104,14 @@ if ! command -v guestfish >/dev/null 2>&1; then
     exit 1
 fi
 
+# qemu-img is the qcow2 overlay constructor (step 2).  qemu-system-x86_64
+# is the optional smoke gate (step 7).  fail fast on the constructor;
+# smoke gate handles its own missing-binary case (SKIP if absent).
+if ! command -v qemu-img >/dev/null 2>&1; then
+    log "FATAL: qemu-img not on PATH (apt install qemu-utils)"
+    exit 1
+fi
+
 PID1_SIZE="$(stat -c '%s' "${PID1_BIN}")"
 PID1_SHA="$(sha256sum "${PID1_BIN}" | cut -d' ' -f1)"
 TAR_SHA="$(sha256sum "${SUPERVISOR_TAR}" | cut -d' ' -f1)"
@@ -104,15 +121,32 @@ log "pristine base: ${PRISTINE_IMG}"
 log "output target: ${OUTPUT_IMG}"
 
 ###############################################################################
-# step 2: copy pristine to output (idempotent)
+# step 2: qcow2 overlay on top of pristine (idempotent)
 ###############################################################################
-# rm -f first so a re-run starts from a clean copy of the pristine, not
-# from a half-mutated previous run. this is the whole reason the script
-# exists: idempotent re-rolls.
-log "step 2: copy ${PRISTINE_IMG} -> ${OUTPUT_IMG}"
+# WAS a 4 GB cp (~30-60s on ext4, ~1s on reflink-capable fs).  NOW a
+# qcow2 overlay whose backing-file is the pristine.  pristine stays
+# read-only; mutations land in the overlay only.  initial overlay file
+# is ~200 KB; grows to a few hundred MB as guestfish mutates blocks.
+# typical end-of-run size is ~50-200 MB vs the previous 4 GB.
+# qemu-img create is ~10 ms.
+#
+# tradeoff: the overlay embeds an absolute path to the backing file.
+# moving PRISTINE_IMG after re-roll breaks OUTPUT_IMG (it'll fail
+# at QEMU open with "Could not open backing file").  if you relocate
+# the pristine, re-run this script.
+#
+# file extension stays .img so existing downstream tooling that
+# references ${OUTPUT_IMG} (hurd-fast-iterate.sh, operator boot
+# commands) keeps working.  QEMU auto-detects qcow2 by magic bytes;
+# the "next:" message at end-of-script prints an explicit
+# format=qcow2 to make it unambiguous.
+#
+# rm -f first so a re-run starts from a clean overlay; otherwise
+# qemu-img would refuse to overwrite an existing file.
+log "step 2: qcow2 overlay ${OUTPUT_IMG} -> ${PRISTINE_IMG}"
 rm -f "${OUTPUT_IMG}"
-cp --reflink=auto "${PRISTINE_IMG}" "${OUTPUT_IMG}"
-log "copy done; output is ${OUTPUT_IMG} ($(stat -c '%s' "${OUTPUT_IMG}") bytes)"
+qemu-img create -q -f qcow2 -F raw -b "${PRISTINE_IMG}" "${OUTPUT_IMG}" >/dev/null
+log "overlay done; ${OUTPUT_IMG} ($(stat -c '%s' "${OUTPUT_IMG}") bytes initial, backing=${PRISTINE_IMG})"
 
 ###############################################################################
 # step 3: stage temp files for guestfish upload
@@ -412,12 +446,127 @@ for hk in ssh_host_rsa_key.pub ssh_host_ecdsa_key.pub ssh_host_ed25519_key.pub; 
 done
 rm -rf "${VERIFY_TMP}"
 
+###############################################################################
+# step 7: boot smoke gate (opt-out via SMOKE=0)
+###############################################################################
+# WHY: v0.9.20 re-roll burned ~30 minutes on a silent rumpdisk wd0
+# enumeration race -- gnumach loaded, ext2fs.static printed
+# `ext2fs: part:2:device:wd0: No such device or address`, and the
+# boot wedged with no further output.  zero indication from the
+# re-roll script that the artifact was broken.  fix: boot the
+# rerolled image in a throwaway QEMU for up to SMOKE_TIMEOUT_S
+# (default 240s), tail the serial log, fail fast on the known FAIL
+# substring and exit 0 on a PASS marker proving the init.args eval
+# fired.  pass means the full chain works: GRUB -> gnumach loaded
+# -> wd0 enumerated -> ext2fs root mounted -> pid1 ran -> emacs
+# spawned -> init.args eval reached.
+#
+# opt-out is for cycles where the operator wants the artifact
+# without paying the ~3-minute smoke cost (e.g. iterating offline
+# changes only).  set SMOKE=0 to skip; SMOKE_TIMEOUT_S overrides
+# the deadline; SMOKE_PORT (default 2299) avoids colliding with
+# the operator's manual boot on 2266.
+SMOKE="${SMOKE:-1}"
+SMOKE_TIMEOUT_S="${SMOKE_TIMEOUT_S:-240}"
+SMOKE_PORT="${SMOKE_PORT:-2299}"
+SMOKE_SERIAL="${SMOKE_SERIAL:-/tmp/hurd-image-reroll-smoke-serial.log}"
+SMOKE_PIDFILE="${SMOKE_PIDFILE:-/tmp/hurd-image-reroll-smoke-qemu.pid}"
+
+if [ "${SMOKE}" = "0" ]; then
+    log "step 7: SMOKE=0, skipping boot smoke gate"
+else
+    log "step 7: boot smoke gate (timeout ${SMOKE_TIMEOUT_S}s, port ${SMOKE_PORT})"
+    if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+        log "step 7: qemu-system-x86_64 not on PATH, skipping smoke (SMOKE=0 to silence)"
+    else
+        : > "${SMOKE_SERIAL}"
+        # background QEMU.  pidfile so we can kill it deterministically.
+        # no KVM accel flag in case the host kernel module is missing;
+        # smoke is slower without it but still bounded by SMOKE_TIMEOUT_S.
+        # NOTE: nohup + & means this script keeps running while QEMU boots.
+        nohup qemu-system-x86_64 -enable-kvm -cpu host -m 2048 \
+            -drive file="${OUTPUT_IMG}",if=virtio,format=qcow2 \
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"${SMOKE_PORT}"-:22 \
+            -device virtio-net-pci,netdev=net0 \
+            -nographic -serial file:"${SMOKE_SERIAL}" -display none \
+            >/dev/null 2>&1 &
+        SMOKE_PID=$!
+        echo "${SMOKE_PID}" > "${SMOKE_PIDFILE}"
+        log "smoke qemu pid=${SMOKE_PID}, serial=${SMOKE_SERIAL}"
+
+        # poll loop.  FAIL markers exit immediately; PASS marker exits
+        # 0; deadline exit logs the last 30 serial lines.
+        SMOKE_RESULT="timeout"
+        SMOKE_DEADLINE="$(($(date +%s) + SMOKE_TIMEOUT_S))"
+        while [ "$(date +%s)" -lt "${SMOKE_DEADLINE}" ]; do
+            sleep 3
+            if [ ! -s "${SMOKE_SERIAL}" ]; then
+                continue
+            fi
+            # FAIL: rumpdisk wd0 enumeration race (the v0.9.20 wedge).
+            if grep -aq 'No such device or address' "${SMOKE_SERIAL}"; then
+                SMOKE_RESULT="fail-wd0"
+                break
+            fi
+            # FAIL: gnumach panic.
+            if grep -aq 'Kernel panic' "${SMOKE_SERIAL}"; then
+                SMOKE_RESULT="fail-panic"
+                break
+            fi
+            # PASS: init.args eval reached final marker.  the canonical
+            # marker is the "ready, dropping into event loop" line from
+            # the eval body in step 3.  if the operator customised the
+            # eval, "starting sshd" and "settrans pfinet" are earlier
+            # fall-back PASS markers proving the supervised emacs ran
+            # the eval far enough to mean the boot chain works.
+            if grep -aqE 'ready, dropping into event loop|starting sshd|settrans pfinet|v[0-9]+-min: native-comp opted out' "${SMOKE_SERIAL}"; then
+                SMOKE_RESULT="pass"
+                break
+            fi
+        done
+
+        # tear down before reporting; the script must not leak QEMU.
+        if kill -0 "${SMOKE_PID}" 2>/dev/null; then
+            kill "${SMOKE_PID}" 2>/dev/null || true
+            # give QEMU 2s to settle, then SIGKILL if still up.
+            sleep 2
+            kill -9 "${SMOKE_PID}" 2>/dev/null || true
+        fi
+        rm -f "${SMOKE_PIDFILE}"
+
+        case "${SMOKE_RESULT}" in
+            pass)
+                log "smoke PASS: init.args eval reached PASS marker"
+                log "  serial log: ${SMOKE_SERIAL} ($(wc -l < "${SMOKE_SERIAL}") lines)"
+                ;;
+            fail-wd0)
+                log "smoke FAIL: rumpdisk wd0 enumeration race (the v0.9.20 wedge)"
+                log "  last 30 serial lines:"
+                tail -30 "${SMOKE_SERIAL}" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/^/    /'
+                exit 2
+                ;;
+            fail-panic)
+                log "smoke FAIL: gnumach panic during boot"
+                log "  last 30 serial lines:"
+                tail -30 "${SMOKE_SERIAL}" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/^/    /'
+                exit 2
+                ;;
+            timeout)
+                log "smoke FAIL: deadline ${SMOKE_TIMEOUT_S}s exceeded with no PASS/FAIL marker"
+                log "  last 30 serial lines:"
+                tail -30 "${SMOKE_SERIAL}" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/^/    /'
+                exit 2
+                ;;
+        esac
+    fi
+fi
+
 OUT_SHA="$(sha256sum "${OUTPUT_IMG}" | cut -d' ' -f1)"
 log "output image sha256: ${OUT_SHA}"
 log "done: ${OUTPUT_IMG} ($(stat -c '%s' "${OUTPUT_IMG}") bytes)"
 log "next: boot with"
 log "  qemu-system-x86_64 -enable-kvm -cpu host -m 2048 \\"
-log "    -drive file=${OUTPUT_IMG},if=virtio \\"
+log "    -drive file=${OUTPUT_IMG},if=virtio,format=qcow2 \\"
 log "    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2266-:22 \\"
 log "    -device virtio-net-pci,netdev=net0 \\"
 log "    -nographic -serial file:/tmp/v0918-first-boot-serial.log"
