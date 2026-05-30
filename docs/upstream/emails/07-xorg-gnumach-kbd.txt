@@ -1,0 +1,80 @@
+To: bug-hurd@gnu.org
+Subject: [gnumach] /dev/cons/kbd rejects kbd_drv.so set-event-mode ioctl with EBADF; please implement KDSKBMODE or expose /dev/input/event*
+From: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+---8<---  body below this line  ---8<---
+
+Hi,
+
+On Debian GNU/Hurd 0.9 (gnumach 1.8+git20230410-1,
+hurd 1:0.9.git20230520-7), Xorg's kbd_drv.so cannot bring up the
+console keyboard because the gnumach console translator at
+/dev/cons/kbd (/hurd/chrdev 156 33685736) returns EBADF for the
+Linux-style set-event-mode ioctl that kbd_drv.so issues.
+
+User impact: no native Xorg on real hardware, even with the kbd
+input driver that hurd-amd64 does package.  evdev and libinput are
+not packaged for hurd-amd64 (filed separately on debian-hurd as
+"[debian-hurd] no evdev / libinput on hurd-amd64; ..."), so
+kbd_drv.so is the only available path, and it dies on this exact
+ioctl.
+
+Trace excerpt from a startx attempt with Driver "dummy":
+
+  [295.286] (II) Using input driver 'mouse' for '<default pointer>'
+  [295.286] (II) <default pointer>: Setting Device option to "/dev/mouse"
+  [295.286] (II) XINPUT: Adding extended input device "<default pointer>"
+                  (type: MOUSE, id 6)
+  [295.287] (II) Using input driver 'kbd' for '<default keyboard>'
+  [295.287] (II) XINPUT: Adding extended input device "<default keyboard>"
+                  (type: KEYBOARD, id 7)
+  [295.287] (EE)
+  Fatal server error:
+  [295.288] (EE) Cannot set event mode on keyboard (Bad file descriptor)
+
+Xwrapper.config is allowed_users=anybody, so this is not a
+permissions failure; the chrdev rejects the ioctl because it has
+no handler.
+
+Request: two options.
+
+Option 1 (smaller change, existing kbd_drv.so works unmodified):
+teach the gnumach console translator to honour the KDGKBMODE and
+KDSKBMODE ioctl family that kbd_drv.so issues.
+
+  --- gnumach: i386/i386at/kd.c  (console keyboard driver)
+  +++ gnumach: i386/i386at/kd.c
+  @@ kd_ioctl (...)
+  +    case KDGKBMODE:
+  +      *(int *)data = current_kb_mode;
+  +      /* K_RAW | K_XLATE | K_MEDIUMRAW | K_UNICODE */
+  +      return 0;
+  +    case KDSKBMODE:
+  +      if (*(int *)data not in
+  +          { K_RAW, K_XLATE, K_MEDIUMRAW, K_UNICODE })
+  +        return EINVAL;
+  +      current_kb_mode = *(int *)data;
+  +      /* tell the rest of the driver to stop translating
+  +         scancodes when K_RAW / K_MEDIUMRAW is selected, which
+  +         is what kbd_drv.so wants so X.org can do its own
+  +         keymap. */
+  +      return 0;
+
+Option 2 (larger, but cleaner long-term): expose a Hurd-native
+/dev/input/event0 surface that returns struct input_event records,
+so evdev can be ported unchanged across Linux and Hurd.
+
+Reproduction: same as the debian-hurd filing (subject
+"[debian-hurd] no evdev / libinput on hurd-amd64; native Xorg
+blocked on kbd_drv.so + /dev/cons ioctl gap").  Steps 1 through 5
+reproduce the EBADF; step 6 confirms the driver inventory; step 7
+confirms the absent /dev/input/ tree.
+
+No patch attached.  Happy to test once a draft lands.
+
+Alternative filing channel if a tracker entry is preferred:
+https://savannah.gnu.org/bugs/?group=hurd
+
+Thanks,
+Borja Tarraso
+borja.tarraso@member.fsf.org

@@ -1,0 +1,57 @@
+To: debian-hurd@lists.debian.org
+Subject: [debian-hurd] no native audio translator on hurd-amd64; suggesting pulseaudio in the live-image task
+From: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+---8<---  body below this line  ---8<---
+
+Hi,
+
+On Debian GNU/Hurd 0.9 there is no audio surface in the base
+install:
+
+  - /hurd/ ships 74 translator binaries, zero match
+    audio|snd|dsp|sound|mixer|oss|alsa
+  - /dev/ has no audio nodes (no /dev/dsp, /dev/audio, /dev/mixer,
+    /dev/snd, /dev/sound)
+  - /servers/ has 13 entries, none audio
+  - gnumach boot enumerates no audio hardware
+  - dpkg -L hurd matches zero files with audio names
+
+pulseaudio 17.0+dfsg1-2.1 from debian-ports sid/main is installable
+on hurd-amd64 and works for null-sink and module-pipe-source paths.
+The gap is purely that it is not bundled in the canonical image.
+
+Proposal: add pulseaudio (and the userland that goes with it) to a
+future hurd-amd64 live-image flavor so audio-aware userland comes up
+zero-config without the user needing apt install pulseaudio + the
+debian-ports splice for a sid main candidate.
+
+The deeper translator / driver work (native /hurd/audio, native
+gnumach audio driver) is filed separately on bug-hurd@gnu.org as an
+RFC.  This filing is just for the packaging side.
+
+Context for the use case: I am building GEOS (GNU/Emacs Operating
+System), an Emacs-as-userland OS.  GEOS has a *audio* buffer that
+lists cards / sinks / sources / volume; on Linux it parses
+/proc/asound and shells out to pactl, on Hurd it currently renders
+"no cards visible" honestly because no surface is available.  If
+the canonical hurd-amd64 image bundled pulseaudio, GEOS (and every
+other audio-aware userland) would come up with the pactl side
+working out of the box.
+
+Reproduction:
+
+  1. Boot canonical Debian GNU/Hurd 0.9 image.
+  2. apt-cache search pulseaudio
+     -> not in the canonical apt sources.
+  3. Add debian-ports sid main, apt update, apt install pulseaudio.
+  4. pulseaudio --start && pactl info && pactl list short sinks
+     -> works, null sink visible.
+  5. dpkg -l pulseaudio
+     -> ii pulseaudio 17.0+dfsg1-2.1+b1 (or similar)
+
+Happy to help test once the live-image task picks this up.
+
+Thanks,
+Borja Tarraso
+borja.tarraso@member.fsf.org

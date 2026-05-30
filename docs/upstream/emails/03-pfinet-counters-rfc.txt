@@ -1,0 +1,110 @@
+To: bug-hurd@gnu.org
+Subject: [pfinet] no per-interface byte / packet counter RPC; please add SIOCGIFSTATS or equivalent
+From: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+---8<---  body below this line  ---8<---
+
+Hi,
+
+On Debian GNU/Hurd 0.9 (pfinet as shipped in the hurd source package,
+hurd 1:0.9.git20230520-7), there is no RPC, no ioctl, and no procfs
+file that returns per-interface byte / packet counters.  Every tool
+that reads /proc/net/dev (ifconfig byte counts, bmon, vnstat,
+prometheus node_exporter, my own GEOS *network* buffer, anything
+else) reports zero traffic on every interface regardless of actual
+load.
+
+Seven independent probes (in increasing order of authority):
+
+  1. /usr/include/x86_64-gnu/bits/ioctls.h defines SIOC* constants
+     for ADDR / DSTADDR / FLAGS / BRDADDR / CONF / NETMASK / METRIC /
+     ARP / MTU / INDEX / NAME / HWADDR only.  No SIOCGIFSTATS,
+     no SIOCGIFMIB, no SIOCGIFDATA, no SIOCGIFCOUNTERS macro
+     anywhere under /usr/include.
+
+  2. pfinet.defs (subsystem 37000) at
+     /usr/include/x86_64-gnu/hurd/pfinet.defs declares the complete
+     pfinet RPC surface as exactly two routines: pfinet_siocgifconf
+     and pfinet_getroutes.  The MIG-generated pfinet.h matches.
+
+  3. iioctl.defs (subsystem 112000) enumerates every per-iface
+     ioctl pfinet implements.  No stats routine is reserved, not
+     even as an unimplemented slot.  Slots 0-11, 13, 15, 18,
+     20-21, 26-32, 36, 38, 40-50, 53-89 are all marked skip.
+
+  4. Runtime SIOCGIFSTATS probe (30-line C, socket(AF_INET,
+     SOCK_DGRAM, 0) then the standard ioctl menu against lo and
+     /dev/eth0) returns errno=1073741849 "Inappropriate ioctl for
+     device" (Hurd-encoded ENOTTY).  The baseline ioctls
+     (SIOCGIFCONF, SIOCGIFFLAGS) round-trip cleanly, so the socket
+     is genuinely talking to pfinet.
+
+  5. Binary symbol scan of /hurd/pfinet finds exactly one
+     _get_stats match: tunnel_get_stats, a Linux-net tunnel-device
+     internal callback, not an RPC entry.  No pfinet_getstats,
+     no inet_stats, no siocgifstats strings anywhere in the binary.
+
+  6. Procfs walk: /proc/net/ does not exist on this image.  The
+     top-level /proc/ namespace contains cmdline cpuinfo
+     filesystems hostinfo loadavg meminfo mounts route self
+     slabinfo stat swaps uptime version vmstat and per-pid dirs.
+     No snmp, no netstat, no dev.  /proc/route exists at the top
+     level (not under net/) and carries the routing table, but
+     its Use and RefCnt columns are always 0.
+
+  7. Translator identity: showtrans /servers/socket/2 returns
+     /hurd/pfinet -6 /servers/socket/26; fsysopts /servers/socket/2
+     returns the live pfinet command line with all configured v4
+     and v6 addresses.  So the AF_INET socket the probe in
+     finding 4 used is definitely talking to pfinet, not a stub.
+
+The request is to add a per-iface stats getter so the counters
+pfinet already maintains internally (via its Linux-net glue layer)
+become readable.
+
+Scope sketch (for a hurd hacker):
+
+  - Add a new iioctl routine.  Obvious shape:
+      iioctl_siocgifstats (port_t iface)
+        -> (struct iioctl_net_device_stats)
+    returning a fixed-width record:
+      struct iioctl_net_device_stats {
+        uint64_t rx_bytes;
+        uint64_t tx_bytes;
+        uint64_t rx_packets;
+        uint64_t tx_packets;
+        uint64_t rx_errors;
+        uint64_t tx_errors;
+        uint64_t rx_dropped;
+        uint64_t tx_dropped;
+      };
+    The Linux glue layer pfinet wraps already maintains these
+    counters (linux/net/core/dev.c equivalent increments on every
+    recv and xmit).  The patch needs the RPC surface and a
+    getter, not a new accounting layer.
+
+  - Alternative shape: extend pfinet.defs (subsystem 37000) with
+    a third routine pfinet_get_iface_stats.  I prefer the iioctl
+    form because it parallels the existing per-iface getters
+    (SIOCGIFFLAGS, SIOCGIFADDR, ...) and reuses the same per-iface
+    port the caller already holds.
+
+  - One of the reserved iioctl.defs slots (0-11, 13, 15, 18,
+    20-21, 26-32, 36, 38, 40-50, 53-89 are all skip today) is
+    the right home.
+
+  - libc-side: add a SIOCGIFSTATS ioctl macro and a thin glibc
+    shim that issues the new MIG routine.
+
+Estimation: small patch by absolute size (one MIG entry, one
+getter, one libc shim).  The risk is in agreeing the record shape
+upstream so it does not have to change later.
+
+No patch attached.  Happy to test once a draft lands.
+
+Alternative filing channel if a tracker entry is preferred:
+https://savannah.gnu.org/bugs/?group=hurd
+
+Thanks,
+Borja Tarraso
+borja.tarraso@member.fsf.org

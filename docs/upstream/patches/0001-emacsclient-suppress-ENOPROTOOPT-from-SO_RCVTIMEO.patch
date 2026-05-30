@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Borja Tarraso <borja.tarraso@member.fsf.org>
+Date: Sat, 30 May 2026 12:00:00 +0300
+Subject: [PATCH] emacsclient: suppress ENOPROTOOPT noise from SO_RCVTIMEO on
+ GNU/Hurd
+
+* lib-src/emacsclient.c (set_local_socket): do not surface the
+SO_RCVTIMEO setsockopt failure when errno is ENOPROTOOPT.  GNU/Hurd's
+pflocal does not implement the option; the timeout is best-effort and
+the warning is noise.  Other errors from setsockopt still surface so a
+real failure on Linux is not masked.
+
+Reported on Debian GNU/Hurd 0.9 with emacs 29.4 (glibc GLIBC_2.38):
+every emacsclient invocation against a running emacs daemon prints
+
+  /usr/bin/emacsclient.emacs: setsockopt: Protocol not available
+
+once on stderr, then proceeds correctly (eval result on stdout, exit
+code 0).  Confirmed via gdb break on setsockopt: arg shape
+fd=3 level=65535 (SOL_SOCKET) optname=4102 (SO_RCVTIMEO).  pflocal
+returns ENOPROTOOPT for this option; glibc's strerror text for it
+on Hurd is "Protocol not available".
+---
+ lib-src/emacsclient.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/lib-src/emacsclient.c b/lib-src/emacsclient.c
+--- a/lib-src/emacsclient.c
++++ b/lib-src/emacsclient.c
+@@
+   struct timeval tv;
+   tv.tv_sec  = MINIBUF_WAIT_SECONDS;
+   tv.tv_usec = 0;
+-  if (setsockopt (s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0)
+-    message (true, "%s: setsockopt: %s\n", progname, strerror (errno));
++  /* GNU/Hurd's pflocal does not implement this option; the timeout
++     is best-effort, the warning is noise.  Suppress only the
++     ENOPROTOOPT case so a real failure on Linux still surfaces.  */
++  if (setsockopt (s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0
++      && errno != ENOPROTOOPT)
++    message (true, "%s: setsockopt: %s\n", progname, strerror (errno));
+--
+2.43.0
+

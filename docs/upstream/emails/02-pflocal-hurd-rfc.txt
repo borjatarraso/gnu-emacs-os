@@ -1,0 +1,72 @@
+To: bug-hurd@gnu.org
+Subject: [pflocal] SO_RCVTIMEO returns ENOPROTOOPT; please implement on the AF_UNIX socket-option path
+From: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+---8<---  body below this line  ---8<---
+
+Hi,
+
+On Debian GNU/Hurd 0.9 (pflocal as shipped in the hurd source
+package), setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, ...) on an AF_UNIX
+socket fails with ENOPROTOOPT.  Linux implements SO_RCVTIMEO on
+AF_UNIX and userland sets it routinely (emacsclient, libcurl, systemd,
+others).  On Hurd those callers either print stderr noise or drop
+into longer blocking reads than they intended.
+
+This is a request to add SO_RCVTIMEO (and SO_SNDTIMEO by symmetry) to
+pflocal's socket-option dispatch.  An emacs-side workaround patch
+that just suppresses the ENOPROTOOPT message is filed separately on
+bug-gnu-emacs@gnu.org (subject "[PATCH] emacsclient: suppress
+ENOPROTOOPT noise from SO_RCVTIMEO on GNU/Hurd"); that closes the
+user-visible symptom for emacs, but the proper fix is here.
+
+Reproducer (20-line C program, runs on canonical Debian GNU/Hurd 0.9):
+
+  #include <sys/socket.h>
+  #include <sys/un.h>
+  #include <sys/time.h>
+  #include <stdio.h>
+  #include <errno.h>
+  #include <string.h>
+  int main(void) {
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    int r = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    printf("r=%d errno=%d (%s)\n", r, errno, strerror(errno));
+    return 0;
+  }
+
+  gcc -o rcvtimeo rcvtimeo.c && ./rcvtimeo
+  -> r=-1 errno=1073741875 (Protocol not available)   [Hurd]
+  -> r=0  errno=0 (Success)                            [Linux]
+
+Scope sketch (for a hurd hacker who has not seen the gap):
+
+  - pflocal's socket-option dispatch is in hurd/pflocal/socket.c
+    (alternately io.c depending on the cut).  Today it handles a
+    short list of SOL_SOCKET options and returns EOPNOTSUPP /
+    ENOPROTOOPT for everything else.
+
+  - SO_RCVTIMEO is per-socket state, a struct timeval that bounds
+    the recv() path.  The implementation has to add a field to the
+    per-socket state, parse the optval as a struct timeval, and
+    honour it on the server-side recv path that pflocal already
+    runs to multiplex AF_UNIX traffic through Mach IPC.
+
+  - Timeout semantics across the Mach IPC boundary are the
+    tricky bit.  Linux's recv() with SO_RCVTIMEO returns EAGAIN
+    when the timer expires; pflocal's Mach-shaped reply has to map
+    that back to the libc errno.  pflocal already does similar
+    translation for non-blocking IO, so the precedent exists.
+
+  - SO_SNDTIMEO would land in the same patch by symmetry.
+
+No patch attached.  Happy to test once a draft lands.
+
+Alternative filing channel if a tracker entry is preferred over a
+list post: https://savannah.gnu.org/bugs/?group=hurd (same set of
+maintainers reads both).
+
+Thanks,
+Borja Tarraso
+borja.tarraso@member.fsf.org

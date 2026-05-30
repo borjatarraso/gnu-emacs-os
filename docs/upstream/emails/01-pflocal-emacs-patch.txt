@@ -1,0 +1,72 @@
+To: bug-gnu-emacs@gnu.org
+Subject: [PATCH] emacsclient: suppress ENOPROTOOPT noise from SO_RCVTIMEO on GNU/Hurd
+From: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+(Attach docs/upstream/patches/0001-emacsclient-suppress-ENOPROTOOPT-from-SO_RCVTIMEO.patch
+or inline it below the body.  bug-gnu-emacs accepts both shapes; if
+inlined, paste the diff verbatim under a "Patch follows:" header so
+debbugs picks it up as a patch attachment.)
+
+---8<---  body below this line  ---8<---
+
+Hi,
+
+On Debian GNU/Hurd 0.9 with emacs 29.4 (the canonical-image
+emacsclient, glibc GLIBC_2.38), every emacsclient invocation against
+a running emacs daemon prints one stderr line:
+
+  /usr/bin/emacsclient.emacs: setsockopt: Protocol not available
+
+The call that produces it is the SO_RCVTIMEO setsockopt in
+lib-src/emacsclient.c.  Hurd's pflocal (the translator that backs
+AF_UNIX) returns ENOPROTOOPT for this option, and the existing code
+surfaces every setsockopt error via the message() helper.
+
+The user impact is cosmetic: the eval still returns, exit code is 0,
+behaviour is functionally correct (the read just blocks until the
+server replies, which is what we want anyway when the timeout cannot
+be installed).  But every editor save, git commit hook, org-capture
+binding, or autocompile invocation emits the line, which makes
+terminal output noisy and confuses tooling that scans stderr.
+
+I confirmed the call site with gdb (strace is not on the canonical
+image):
+
+  break setsockopt
+  run -e '(+ 1 2)'
+  print args
+  -> fd=3 level=65535 optname=4102
+
+Decoded against /usr/include/x86_64-gnu/bits/socket.h:
+  level   = 0xFFFF = SOL_SOCKET
+  optname = 0x1006 = SO_RCVTIMEO
+
+The patch suppresses only the ENOPROTOOPT case; every other failure
+from setsockopt still surfaces, so a real bug on Linux would not be
+masked.
+
+Reproduction (canonical Debian GNU/Hurd 0.9 image, emacs 29.4 from
+apt):
+
+  1. apt install emacs
+  2. emacs --daemon  (wait for it to come up)
+  3. emacsclient -e '(+ 1 2)'
+  4. observe stdout "3" and stderr
+     "/usr/bin/emacsclient.emacs: setsockopt: Protocol not available"
+  5. for the call-site confirmation, attach gdb to emacsclient,
+     break setsockopt, run, read the args.
+
+Patch follows.  Also filed a feature request against pflocal proper
+on bug-hurd@gnu.org (subject "[pflocal] SO_RCVTIMEO returns ENOPROTOOPT;
+please implement on the AF_UNIX socket-option path") so the deeper
+fix is tracked there.
+
+Thanks,
+Borja Tarraso
+borja.tarraso@member.fsf.org
+
+---8<---  patch below this line  ---8<---
+
+(Paste the contents of
+ docs/upstream/patches/0001-emacsclient-suppress-ENOPROTOOPT-from-SO_RCVTIMEO.patch
+ here, or attach the .patch file.)

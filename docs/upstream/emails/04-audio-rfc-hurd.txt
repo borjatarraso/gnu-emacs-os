@@ -1,0 +1,98 @@
+To: bug-hurd@gnu.org
+Subject: [RFC] no native audio translator on Debian GNU/Hurd 0.9; design discussion for /hurd/audio
+From: Borja Tarraso <borja.tarraso@member.fsf.org>
+
+---8<---  body below this line  ---8<---
+
+Hi,
+
+On Debian GNU/Hurd 0.9 (hurd 1:0.9.git20230520-7, gnumach
+1.8+git20230410-1), there is no native audio surface.  /hurd/ ships
+74 translator binaries and none match audio|snd|dsp|sound|mixer|oss|alsa;
+/dev/ has no audio nodes; /servers/ enumerates 13 entries and none
+are audio; gnumach boot enumerates no audio hardware in dmesg.
+
+User impact: no application that opens an audio device works on
+Hurd, everything from aplay through pulseaudio's real-hardware sinks.
+The pragmatic workaround is apt install pulseaudio, which installs
+cleanly on hurd-amd64 from debian-ports sid/main and exercises null
+sinks / module-pipe-source paths, but cannot reach hardware because
+nothing under it does.
+
+This RFC asks for design feedback on three remediation levels
+before any patch attempt.
+
+Level (a): apt-installed pulseaudio path
+
+  Shipped today, lives in userland.  Userland code that drives pactl
+  works unchanged once the user has pulseaudio running.  No upstream
+  change needed.  A future Debian apt-image flavor that bundles
+  pulseaudio would make this zero-config.
+
+Level (b): native /hurd/audio translator
+
+  v2.x scope.  A new /hurd/audio translator binary structurally
+  parallel to /hurd/pfinet and /hurd/streamio, attached to /dev/dsp
+  (and friends) via settrans.  Client opens the device node and
+  reads/writes PCM with ioctls for format / rate / channel selection.
+  OSS API (SNDCTL_DSP_*) is the lowest-common-denominator target;
+  it is well-documented and matches the file-IO + ioctl shape the
+  Hurd device interface already serves for other translators.
+
+  The hard part is the driver layer.  gnumach has no AC97 / HDA /
+  SB16 driver enumeration today.  Options:
+    - Port a NetBSD audio driver via the rumpkernel path
+      (rumpdisk / rumpnet are the precedent on hurd-amd64; a
+      rumpaudio translator would be a natural sibling).
+    - Write a native gnumach driver against the QEMU intel-hda
+      or ac97 device first to get a known-good target before any
+      real-hardware bring-up.
+
+  Userland comparison points: libpulse, libcanberra, sndio.  sndio
+  in particular is small enough to inform the IPC shape.
+
+  Integration: settrans /dev/dsp /hurd/audio at boot, exposed
+  through /servers/socket/audio (or similar) for daemon-style
+  clients.
+
+  Estimation: large.  Full new-translator work plus a new gnumach
+  driver subsystem.  Multi-month even with the rumpkernel shortcut.
+
+Level (c): Mach-RPC sound server
+
+  v2.x+ scope.  Parallel to pulseaudio's daemon model: a Hurd-native
+  sound server holds the device, clients talk to it over Mach RPC
+  for volume / sink switching / per-app routing.  Builds on top of
+  level (b)'s translator.  I would not recommend starting at (c);
+  level (b) is the prerequisite and pulseaudio (level a) already
+  covers the multi-client / per-app-volume use case once installed.
+
+Reproduction (canonical Debian GNU/Hurd 0.9):
+
+  1. Boot the canonical image.
+  2. ls /hurd/ | grep -iE 'audio|snd|dsp|sound|mixer|oss|alsa'
+     -> prints nothing.
+  3. ls /dev/dsp /dev/audio /dev/mixer /dev/snd /dev/sound
+     -> ENOENT on every path.
+  4. ls /servers/  -> 13 names, none audio.
+  5. dmesg | grep -iE 'audio|snd|sound|dsp|oss|alsa'
+     -> no matches.
+  6. dpkg -L hurd | grep -iE 'audio|snd|sound|dsp|oss|alsa'
+     -> no matches.
+  7. For the pulseaudio workaround:
+     apt install pulseaudio && pulseaudio --start
+       && pactl list short sinks
+     -> succeeds with a null sink; no hardware reachable.
+
+Looking for design feedback on rumpaudio-vs-native, OSS-vs-ALSA-style
+API, and settrans path under /dev/ vs /servers/ before any
+implementation work.
+
+The debian-hurd packaging side of the same gap (bundle pulseaudio in
+the live-image task) is filed separately on debian-hurd@lists.debian.org.
+
+Alternative filing channel: https://savannah.gnu.org/bugs/?group=hurd
+
+Thanks,
+Borja Tarraso
+borja.tarraso@member.fsf.org
