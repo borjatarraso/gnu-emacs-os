@@ -86,6 +86,42 @@
          nil "/dev/console" 'append 'nomsg))
     (error nil))
 
+  ;; /var translator detach.  canonical Debian GNU/Hurd 0.9 ships /var
+  ;; as a /hurd/tmpfs translator (256M) that masks the populated
+  ;; /var/lib/dpkg, /var/cache/apt, and the rest of the Debian /var
+  ;; tree on the underlying ext2fs.  with the translator in place,
+  ;; dpkg-query and dpkg --list return zero rows even though every
+  ;; package is physically installed; apt-get update bails on a missing
+  ;; /var/lib/dpkg/lock-frontend.  v0.9.19 anomaly #2 documented the
+  ;; symptom and the one-liner remediation.  settrans -fg detaches the
+  ;; tmpfs and exposes the underlying tree, which is what every other
+  ;; tool already expects.
+  ;;
+  ;; order matters: this runs BEFORE the defservice entries because the
+  ;; supervised tail -F /var/log/syslog wants to see the underlying
+  ;; /var/log (the tmpfs has only the empty `log/` dir created by
+  ;; canonical's first-boot scripts).  state.el's auto-init at top-level
+  ;; load already mkdir'd /var/emacs on the tmpfs by this point, and
+  ;; those throwaway dirs disappear with the tmpfs.  state-write
+  ;; re-creates them on the underlying ext2fs on first write via
+  ;; state--ensure-dir; nothing has written yet at this load step, so
+  ;; the dir loss is invisible.
+  ;;
+  ;; safe under a re-load: settrans -fg on a path that is not currently
+  ;; translated is a documented no-op (exit 0).  the file-executable-p
+  ;; guard skips this entire block on a dev host where /bin/settrans
+  ;; does not exist.
+  (when (file-executable-p "/bin/settrans")
+    (supervise--console
+     "hurd-essentials: settrans -fg /var (detach canonical /hurd/tmpfs)")
+    (let ((exit (condition-case err
+                    (call-process "/bin/settrans" nil nil nil "-fg" "/var")
+                  (error
+                   (supervise--console
+                    "hurd-essentials: settrans -fg /var FAILED %S" err)
+                   -1))))
+      (supervise--console "hurd-essentials: settrans -fg /var exit=%S" exit)))
+
   ;; sshd's /run/sshd privsep chroot dir is recreated by pid1
   ;; (emacs-init.c, after the /run tmpfs mount, #ifdef PORT_HURD).
   ;; doing it in C means it lands deterministically before emacs even
