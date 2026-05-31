@@ -75,8 +75,14 @@ operator notes outside the repo.
 
   what I did: agreed on the pivot on-list, scoped the two BSD
   candidates with a provisional preference for the one with
-  the smaller new surface, and raised two open design
-  questions before drafting anything.  awaiting answer.
+  the smaller new surface, and raised two open design questions
+  before drafting anything.  a follow-up reaction gave a
+  concrete patch shape: implement a BSD-defined ioctl in pfinet
+  and have glibc's getifaddrs consume it, rather than adding a
+  new MIG routine.  ball is technically in my court but my
+  reply already declined the patch slot near-term, so silence
+  is the current state; no further follow-up planned unless I
+  pick up the slot.
 
   GEOS impact: none today.  `core/network.el` hurd arm reads
   `/proc/route` and surfaces routes and interfaces but not
@@ -172,25 +178,42 @@ operator notes outside the repo.
   is obsolete on the newer baseline.
 
   while reproducing the working setup on a fresh canonical
-  image I found a second gap: the manual invocation the debian
-  install doc spells out runs as a live process with no error
-  but does not populate `/dev/cons` on the current baseline;
-  the chrdev nodes never appear across two fresh ephemeral
-  boots.
+  image I initially saw what looked like a second gap and
+  raised three follow-up questions about a possibly-missing
+  install doc prerequisite, a chrdev major change between
+  baselines, and the hurd-console enable default.  the
+  subsequent reactions corrected my diagnostic approach
+  (`fsysopts` shows active translators, `showtrans` shows only
+  passive ones) and noted that the enable default is already
+  flipped on the latest preinstalled image, plus a follow-up
+  recommendation to test on hurd-i386 before assuming
+  doc-level issues exist.
 
-  what I did: acknowledged the layer correction on-list,
-  committed to withdraw the gnumach ask once the rest is
-  clear, and raised three questions about whether the install
-  doc is missing a prerequisite step, whether the chrdev major
-  change between baselines is deliberate, and whether the
-  hurd-console enable default should flip.  awaiting answer.
+  what I did: re-probed with `fsysopts` and confirmed the
+  premise of my report does not hold on the current image
+  (`/dev/vcs` is the directory with the active `/hurd/console`
+  translator and is correctly empty for now; `/dev/cons` is
+  just a regular file on the rootfs; `ENABLE='true'` is
+  already the default).  withdrew the gnumach ask on-list and
+  noted that any real amd64-specific issue I find on
+  hurd-i386 later will be filed fresh against the right layer
+  rather than reviving this thread.  thread closed from my
+  side.
 
-  GEOS impact: conditional.  if a missing setup step is
-  confirmed, it could be pre-run from
-  `install/hurd-bootstrap.sh`, but only if we want native xorg
-  on real keyboard hardware.  today Xvfb sidesteps the entire
-  /dev/cons surface, so this is "unlocked future work" if we
-  ever flip from Xvfb to native xorg on hurd.
+  GEOS impact: conditional, refined.  the corrected probe
+  surfaced that `/etc/init.d/hurd-console` exists and is
+  marked executable on the canonical image but is not
+  autostarted in the GEOS supervisor flow (we supervise pid1,
+  emacs, sshd, syslogd; not hurd-console).  if we ever flip
+  from Xvfb to native xorg on hurd, `services/hurd-essentials.el`
+  would need to also supervise the hurd-console daemon so
+  `/dev/vcs` gets populated with `kbd`/`mouse` children.  not
+  v0.9.x scope.  separately: running the install-doc manual
+  `console -d vga ... -c /dev/vcs` form on top of an
+  already-attached `/hurd/console` translator on `/dev/vcs`
+  destabilizes the supervised emacs (the existing translator
+  is its tty); a future hurd-console supervisor entry must
+  avoid double-launch.
 
 ## adjacent signal
 
