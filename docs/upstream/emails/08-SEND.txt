@@ -1,0 +1,65 @@
+send instructions: email 08 ext2fs file_pager_write_pages assertion
+-------------------------------------------------------------------
+
+type:     NEW filing (not a reply to any existing thread)
+list:     bug-hurd@gnu.org
+archive:  https://lists.gnu.org/archive/html/bug-hurd/
+gmane:    n/a, post-filing archive URL appears within a few hours
+
+from:     Borja Tarraso <borja.tarraso@member.fsf.org>
+to:       bug-hurd@gnu.org
+cc:       (none, the list itself is enough)
+in-reply-to:  (none, this is a new thread)
+references:   (none)
+
+subject (copy verbatim, no leading "Re:"):
+  [ext2fs] file_pager_write_pages assertion 'blk' failed under apt-get install onto the underlying /var of a canonical Debian GNU/Hurd 0.9 image
+
+body source:
+  docs/upstream/emails/08-ext2fs-pager-blk-assertion.txt
+  start copying at the line AFTER the "---8<--- body below this line ---8<---"
+  marker; everything from "Hi," down to "Borja Tarraso\nborja.tarraso@member.fsf.org"
+  is the body.  do NOT include the To/Subject/From headers from the
+  draft file, gmail's compose UI sets those itself.
+
+step-by-step (gmail web UI):
+  1. compose -> new message
+  2. To:        bug-hurd@gnu.org
+  3. Subject:   paste the verbatim subject line above
+  4. body:      paste from "Hi," through the closing signature
+  5. plain-text mode (no html, no fancy quoting), monospace if available
+  6. send
+
+after sending:
+  - watch for the message to appear in the bug-hurd archive index for
+    the current month: https://lists.gnu.org/archive/html/bug-hurd/2026-06/
+  - update docs/upstream/STATUS.md section "08 ext2fs file_pager_write_pages
+    assertion": change the state line from "drafted, not yet sent" to
+    something like "FILED 2026-06-01, awaiting on-list response", and
+    add the archive URL once it lands.
+  - update memory file reference_upstream_mailing_check.md with the
+    new message id once gmail reports the sent message id.
+
+what to expect:
+  - bug-hurd is moderated for first-time posters; if this is the first
+    time you post from this address there may be a delay before the
+    message appears.  watch the archive.
+  - the likely replies will come from samuel thibault (Hurd maintainer)
+    or sergey bugaev (ext2fs translator hacker).  if either says "known,
+    fix in flight" we close the ticket on our side; if they ask for a
+    debug build / extra logging we run the reproducer again with the
+    debug ext2fs and forward the output.
+
+internal state this filing reflects (operator notes, NOT in the
+email body, which deliberately mentions no downstream project):
+  - hurd-essentials.el boot-time /var detach reverted at 5e19fd9
+  - iso-build/apt-image-verify.sh has the detach on the verify path
+    only (3f72960)
+  - iso-build/hurd-image-reroll.sh has the detach in the bake's own
+    ssh session pre-apt (24b555b), so the apt-image flavor bakes
+    end-to-end without tripping the assertion for the current
+    5-package manifest
+
+the draft body has been deliberately stripped of every reference
+to the downstream project that motivated the report; do not paste
+anything from this operator-notes section into the outgoing mail.

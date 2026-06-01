@@ -6,40 +6,28 @@ From: Borja Tarraso <borja.tarraso@member.fsf.org>
 
 Hi,
 
-On canonical Debian GNU/Hurd 0.9 with the stock /var /hurd/tmpfs
-translator detached, a substantial write workload (apt-get install
-of around 14 MB of packages, which fans out to /var/cache/apt and
-/var/lib/dpkg under the underlying ext2fs) reproducibly trips an
-ext2fs translator assertion and wedges the rootfs.  Wall-clock from
-the first dpkg unpack to the panic is on the order of one to two
-minutes.
+On canonical Debian GNU/Hurd 0.9, an apt-get install of around
+14 MB of packages onto the underlying ext2fs /var reproducibly
+trips an ext2fs translator assertion within a minute or two and
+wedges the rootfs.
 
-Reproducer outline:
+Reproducer:
 
   1. Boot a canonical Debian GNU/Hurd 0.9 image (gnumach
-     2:1.8+git20260224-8, hurd 1:0.9.git20251029-7+b1, ext2fs as
-     shipped in that hurd package).  /var is mounted via
-     /hurd/tmpfs (size 256M) by default and masks the underlying
-     ext2fs /var on the rootfs.
+     2:1.8+git20260224-8, hurd 1:0.9.git20251029-7+b1).  /var is
+     mounted via /hurd/tmpfs (size 256M) by default and masks the
+     underlying ext2fs /var on the rootfs.
 
-  2. Detach the tmpfs to expose the underlying /var:
+  2. Drop the tmpfs to expose the underlying /var:
 
        settrans -fg /var
 
-     fsysopts /var now returns the ext2fs command line of the
-     rootfs translator, not the tmpfs.  /var/lib/dpkg becomes
-     visible with the populated Debian admin state from image
-     build (around 485 kB of /var/lib/dpkg/status).
-
-  3. Run a multi-package apt install that lands in the 10 MB
-     range, e.g.:
+  3. apt-install a multi-package set, for example:
 
        apt-get install -y --no-install-recommends \
          xvfb emacs-lucid elpa-exwm elpa-xelb pulseaudio
 
-     dpkg unpacks the first few packages successfully and then,
-     while writing into the underlying ext2fs /var, the kernel
-     log emits:
+     dpkg unpacks a few packages and then the kernel log emits:
 
        ext2fs: ../../ext2fs/pager.c:455:
            file_pager_write_pages: Assertion 'blk' failed.
@@ -47,61 +35,29 @@ Reproducer outline:
      The translator does not recover; subsequent writes to /
      hang and the VM has to be reset.
 
-Surrounding context:
+The same install runs to completion against the /hurd/tmpfs
+overlay (nothing persists in that case, of course).  The rootfs
+is well under any size limit (5 GB qcow2 with around 3.6 GB
+free per df before the install).  Reading pager.c around line
+455 the failing condition looks like an indirect-block lookup
+returning zero for a block the pager is about to write out,
+which on the face of it reads like a metadata coherency issue
+between the inode block map and the pager's view of the dirty
+page; I am not an ext2fs maintainer, so that reading may be
+wrong.
 
-  - The rootfs is small (a 5 GB qcow2 over the canonical pristine
-    backing file), well under the ext2fs file-system size limit.
-  - Free space on / before the apt install is around 3.6 GB
-    reported by df.
-  - The same apt install runs to completion on the same image
-    without the settrans step, i.e. with apt writing into the
-    /hurd/tmpfs overlay rather than the underlying ext2fs.  Of
-    course nothing persists in that case, which is what motivated
-    the detach in the first place.
-  - The assertion source line is pager.c:455 inside
-    file_pager_write_pages.  Reading the surrounding code, the
-    failing condition appears to be an indirect-block lookup
-    returning zero for a block that the pager is about to write
-    out, which on the face of it looks like a metadata coherency
-    issue between the inode block map and the pager's view of
-    the dirty page.  I am not an ext2fs maintainer; that read may
-    be wrong.
+I would appreciate:
 
-Why this matters for GEOS:
-
-  GEOS is an Emacs-as-PID-1 distribution that targets both Linux
-  and Hurd.  The v1.x apt-image flavor of the Hurd port bakes a
-  workable apt host on top of the canonical Debian image.  The
-  natural design is to detach the /var tmpfs at boot so the
-  underlying /var/lib/dpkg state persists across boots and apt-
-  install of further packages works without losing the dpkg admin
-  database on each shutdown.  This assertion is the load-bearing
-  blocker on that design.
-
-  Short term I have moved the detach out of the production boot
-  path and into the verify-and-query path only, so dpkg-query
-  works post-boot but apt-install of additional packages is not
-  supported by the flavor.  That is a workaround, not a fix.
-
-What I am asking for:
-
-  - Confirmation of the assertion shape (reproduces on a vanilla
-    canonical image with the steps above) or a pointer if this is
+  - Confirmation that this reproduces, or a pointer if it is
     a known bug already in flight.
-  - Guidance on whether the root cause is in ext2fs's pager (the
-    'blk' lookup), in the inode block map maintenance during the
-    apt-install workload, or somewhere upstream of both (a known
-    interaction between the rootfs translator and heavy write
-    workloads on the canonical image).
-  - If a patch exists or is planned, an idea of which release it
-    will appear in.
+  - Guidance on whether the root cause sits in ext2fs's pager,
+    in inode block-map maintenance under the apt-install
+    workload, or upstream of both.
+  - If a patch exists or is planned, which release it lands in.
 
-I am happy to:
-  - Test patches in a qemu loop against the canonical image.
-  - Run the same workload against a debug build of ext2fs with
-    extra logging if that helps narrow the failure.
-  - Provide the full serial console trace from the failed boot;
-    I trimmed the boot log noise here for readability.
+Happy to test patches in a qemu loop, run the workload against
+a debug build of ext2fs with extra logging, or send the full
+serial trace if any of that helps.
 
 Alternative filing channel if a tracker entry is preferred:
 https://savannah.gnu.org/bugs/?group=hurd

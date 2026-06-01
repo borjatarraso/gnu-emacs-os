@@ -786,7 +786,11 @@ if [ "${FLAVOR}" = "apt-image" ]; then
     # fresh sshd host keys in step 3b; UserKnownHostsFile=/dev/null so
     # the operator's ~/.ssh/known_hosts does not collect throwaway
     # entries.  ConnectTimeout keeps the polling loop tight.
-    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR -i ${SSH_PRIVKEY} -p ${APT_PORT}"
+    # ServerAliveInterval/Count: cap any single ssh call's blocking
+    # window to about 10 s after the remote stops responding.  Hurd
+    # never sends FIN when `shutdown -h now` brings sshd down, so
+    # without these knobs the step 8e shutdown ssh blocks forever.
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o LogLevel=ERROR -i ${SSH_PRIVKEY} -p ${APT_PORT}"
 
     # wait for ssh.  poll every 5 s until ssh succeeds or the deadline
     # passes.  the supervised emacs needs to come up, settrans pfinet
@@ -868,7 +872,7 @@ if [ "${FLAVOR}" = "apt-image" ]; then
     log "step 8c: apt-get install -y --no-install-recommends ${APT_PKGS}"
     if ! ssh ${SSH_OPTS} root@127.0.0.1 "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${APT_PKGS}"; then
         log "FATAL: apt-get install failed"
-        ssh ${SSH_OPTS} root@127.0.0.1 'shutdown -h now' >/dev/null 2>&1 || true
+        timeout 15 ssh ${SSH_OPTS} root@127.0.0.1 'shutdown -h now' >/dev/null 2>&1 || true
         wait "${APT_QEMU_PID}" 2>/dev/null || true
         rm -f "${APT_PIDFILE}"
         exit 2
@@ -886,7 +890,7 @@ if [ "${FLAVOR}" = "apt-image" ]; then
     if [ "${APT_INSTALLED}" != "5" ]; then
         log "FATAL: apt-image verify saw only ${APT_INSTALLED}/5 of ${APT_PKGS}"
         ssh ${SSH_OPTS} root@127.0.0.1 'dpkg -l | grep -E "(xvfb|emacs-lucid|elpa-exwm|elpa-xelb|pulseaudio)"' 2>&1 | sed 's/^/    /'
-        ssh ${SSH_OPTS} root@127.0.0.1 'shutdown -h now' >/dev/null 2>&1 || true
+        timeout 15 ssh ${SSH_OPTS} root@127.0.0.1 'shutdown -h now' >/dev/null 2>&1 || true
         wait "${APT_QEMU_PID}" 2>/dev/null || true
         rm -f "${APT_PIDFILE}"
         exit 2
@@ -899,7 +903,7 @@ if [ "${FLAVOR}" = "apt-image" ]; then
     # to SIGTERM then SIGKILL; this is best-effort, the worst case is a
     # dirty qcow2 that ext2fs will fsck on next boot.
     log "step 8e: graceful shutdown over ssh"
-    ssh ${SSH_OPTS} root@127.0.0.1 'shutdown -h now' >/dev/null 2>&1 || true
+    timeout 15 ssh ${SSH_OPTS} root@127.0.0.1 'shutdown -h now' >/dev/null 2>&1 || true
     SHUTDOWN_DEADLINE="$(($(date +%s) + 60))"
     while kill -0 "${APT_QEMU_PID}" 2>/dev/null; do
         if [ "$(date +%s)" -ge "${SHUTDOWN_DEADLINE}" ]; then
