@@ -7,12 +7,13 @@ snapshot of where the eight emails in `emails/` stand after hitting
 their lists.  pair this with `HOW-TO-SEND.md` (the recipe for
 filing) to understand the full lifecycle.  last updated 2026-06-01.
 
-short summary: seven landed and one (08 ext2fs pager assertion) is
-drafted and pending send.  of the seven on-list: one (01
+short summary: all eight on-list.  of the eight: one (01
 emacsclient) closed with an accept-and-broaden verdict; one (06
-evdev) closed with a no-engagement; the other five drew substantive
-on-list reactions.  no GEOS-side code change is required by anything
-received so far.  the reactions unlock future work but do not force
+evdev) closed with a no-engagement; one (08 ext2fs pager
+assertion) just sent today, awaiting on-list response; the other
+five drew substantive on-list reactions earlier in this cycle.
+no GEOS-side code change is required by anything received so
+far.  the reactions unlock future work but do not force
 present-day work.
 
 this file deliberately stays at the level of "where does the thread
@@ -222,10 +223,12 @@ operator notes outside the repo.
   is its tty); a future hurd-console supervisor entry must
   avoid double-launch.
 
-### 08 ext2fs file_pager_write_pages assertion (pending send)
+### 08 ext2fs file_pager_write_pages assertion
 
   - list: bug-hurd
-  - draft: `emails/08-ext2fs-pager-blk-assertion.txt`
+  - archive: https://lists.gnu.org/archive/html/bug-hurd/2026-06/
+  - body: `emails/08-ext2fs-pager-blk-assertion.txt`
+  - send notes (operator-only): `emails/08-SEND.txt`
 
   why I filed it: while trying to bake the v1.x apt-image flavor
   with a boot-time `settrans -fg /var` to expose persistent
@@ -236,11 +239,18 @@ operator notes outside the repo.
   detach is incompatible with apt-install under canonical until
   this assertion is fixed.
 
-  state: drafted, not yet sent.  GEOS-side work for the present
-  is the revert of the boot-time detach (commit 5e19fd9) and the
-  move of the detach into `iso-build/apt-image-verify.sh`'s
-  pre-P1 step so dpkg-query still surfaces persistent state on
-  the verify path.
+  state: SENT 2026-06-01, awaiting on-list response.  the body
+  was scrubbed of every downstream-project reference before
+  sending, per filing policy; what went out is the public,
+  upstream-clean text in `emails/08-ext2fs-pager-blk-assertion.txt`.
+  GEOS-side work for the present is the revert of the boot-time
+  detach (commit 5e19fd9), the move of the detach into
+  `iso-build/apt-image-verify.sh`'s pre-P1 step so dpkg-query
+  still surfaces persistent state on the verify path (3f72960),
+  and the move of the same detach into the bake's own ssh
+  session in `iso-build/hurd-image-reroll.sh` step 8a-pre
+  (24b555b + f0020c8) so the v1.x apt-image flavor re-rolls
+  end-to-end for the current 5-package manifest.
 
   GEOS impact: short term, apt-image flavor is dpkg-queryable on
   the verify path but not safely apt-installable beyond the bake
