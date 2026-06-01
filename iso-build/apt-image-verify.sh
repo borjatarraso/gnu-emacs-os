@@ -181,11 +181,34 @@ log "ssh up"
 P1=skip P2=skip P3=skip P4=skip P5=skip
 
 # ---------------------------------------------------------------------
+# pre-P1 step: detach the /hurd/tmpfs translator masking /var so the
+# underlying ext2fs /var/lib/dpkg becomes visible.
+#
+# this was originally going to live in hurd-essentials.el (boot-time
+# detach), but that breaks the bake's own apt-install phase: when the
+# detach happens at the apt-install boot, dpkg writes 14 MB into the
+# exposed underlying ext2fs and the gnumach ext2fs translator panics
+# at pager.c:455 file_pager_write_pages "Assertion 'blk' failed".
+# the conflict is fundamental: the bake needs the tmpfs mounted so
+# apt's writes succeed in RAM, the verify path needs the tmpfs
+# detached so dpkg-query sees the persistent underlying state.  doing
+# the detach here (verify path) leaves the bake's tmpfs path
+# untouched and surfaces the underlying state for P1.
+#
+# the ext2fs assertion itself is a gnumach/Hurd bug filed upstream
+# as the 08 thread in docs/upstream/.  best-effort: even with the
+# detach here, heavy writes to underlying /var can still trip the
+# assertion if the kernel is the canonical 1.8+git20260224 version;
+# we read only, so the probe is safe.
+# ---------------------------------------------------------------------
+log "pre-P1: settrans -fg /var to expose underlying ext2fs dpkg state"
+ssh_to_vm 'showtrans /var; settrans -fg /var 2>&1; echo settrans=$?' \
+    > "${OUT_DIR}/preP1-var-detach.log" 2>&1 || true
+
+# ---------------------------------------------------------------------
 # probe 1: dpkg-query for the five baked packages.  expect 5 ii rows.
-# pre-v0.9.20 this returned zero rows because /var was a /hurd/tmpfs
-# masking /var/lib/dpkg; v0.9.20 hurd-essentials.el settrans -fg /var
-# at boot fixes that.  this probe is what catches a regression of that
-# fix.
+# the canonical /var/hurd/tmpfs masks /var/lib/dpkg; the pre-P1 step
+# above detaches it.  if this returns 0 ii rows the detach failed.
 # ---------------------------------------------------------------------
 log "probe 1: dpkg-query of the five baked packages"
 ssh_to_vm \

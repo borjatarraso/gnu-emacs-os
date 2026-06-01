@@ -3,14 +3,17 @@
 
 # upstream filings: status
 
-snapshot of where the seven emails in `emails/` stand after hitting
+snapshot of where the eight emails in `emails/` stand after hitting
 their lists.  pair this with `HOW-TO-SEND.md` (the recipe for
-filing) to understand the full lifecycle.  last updated 2026-05-31.
+filing) to understand the full lifecycle.  last updated 2026-06-01.
 
-short summary: all seven landed, six drew at least one substantive
-on-list reaction, one closed without further engagement.  no
-GEOS-side code change is required by anything received so far.
-the reactions unlock future work but do not force present-day work.
+short summary: seven landed and one (08 ext2fs pager assertion) is
+drafted and pending send.  of the seven on-list: one (01
+emacsclient) closed with an accept-and-broaden verdict; one (06
+evdev) closed with a no-engagement; the other five drew substantive
+on-list reactions.  no GEOS-side code change is required by anything
+received so far.  the reactions unlock future work but do not force
+present-day work.
 
 this file deliberately stays at the level of "where does the thread
 stand and what does it mean for GEOS".  the actual on-list
@@ -32,12 +35,16 @@ operator notes outside the repo.
   correct, just noisy).  the patch ships as
   `patches/0001-emacsclient-suppress-ENOPROTOOPT-from-SO_RCVTIMEO.patch`.
 
-  state: routed for review, awaiting verdict.
+  state: CLOSED 2026-05-31 by Paul Eggert.  the on-list verdict
+  agreed with the suppression intent and broadened the fix:
+  POSIX says SO_RCVTIMEO might not work and does not specify the
+  errno value, so the right shape is to ignore the error
+  unconditionally rather than match a specific errno.  Eggert
+  installed that broader form on master and closed the bug.
 
-  GEOS impact: none.  the patch lands in emacs upstream when
-  accepted; GEOS uses system emacs, so we inherit the fix.  if
-  rejected, the existing "deferred-upstream" stance on
-  HURD_PORT.md row 298 stands.
+  GEOS impact: none.  the fix lands in emacs upstream; GEOS uses
+  system emacs, so we inherit it the moment our emacs package
+  rolls forward.  no in-tree carry needed.
 
 ### 02 pflocal SO_RCVTIMEO
 
@@ -214,6 +221,31 @@ operator notes outside the repo.
   destabilizes the supervised emacs (the existing translator
   is its tty); a future hurd-console supervisor entry must
   avoid double-launch.
+
+### 08 ext2fs file_pager_write_pages assertion (pending send)
+
+  - list: bug-hurd
+  - draft: `emails/08-ext2fs-pager-blk-assertion.txt`
+
+  why I filed it: while trying to bake the v1.x apt-image flavor
+  with a boot-time `settrans -fg /var` to expose persistent
+  `/var/lib/dpkg`, apt-install of around 14 MB of packages onto
+  the underlying ext2fs reproducibly trips
+  `ext2fs: ../../ext2fs/pager.c:455: file_pager_write_pages:
+  Assertion 'blk' failed` and wedges the rootfs.  the boot-time
+  detach is incompatible with apt-install under canonical until
+  this assertion is fixed.
+
+  state: drafted, not yet sent.  GEOS-side work for the present
+  is the revert of the boot-time detach (commit 5e19fd9) and the
+  move of the detach into `iso-build/apt-image-verify.sh`'s
+  pre-P1 step so dpkg-query still surfaces persistent state on
+  the verify path.
+
+  GEOS impact: short term, apt-image flavor is dpkg-queryable on
+  the verify path but not safely apt-installable beyond the bake
+  manifest.  long term, fixing this assertion unblocks the boot-
+  time detach and a fully apt-mutable hurd-amd64 flavor.
 
 ## adjacent signal
 
