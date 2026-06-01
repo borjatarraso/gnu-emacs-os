@@ -17,7 +17,10 @@ dynamic module, so the supervisor lives inside the supervised process.
 Every system concept (`top`, `ip a`, `journalctl`, `df`, `apt`) is a
 buffer with a major mode and a refresh timer.
 
-This is v0.7. It runs. I use it. Per-release notes in
+This is v1.0.0. Emacs is PID 1 on both Linux and canonical Debian
+GNU/Hurd 0.9, end-to-end through a multi-user EXWM session.  As
+far as I know, this is the first project where GNU/Emacs runs as
+PID 1 with Hurd support of this depth.  Per-release notes in
 [CHANGELOG.md](CHANGELOG.md).
 
 ## try it
@@ -62,11 +65,13 @@ For Hurd: on a fresh Debian GNU/Hurd 0.9 image, run
   - EXWM brings up real Xorg with the modesetting driver against
     virtio_gpu's KMS device. Keyboard and mouse work in QEMU. X11
     windows are buffers.
-  - `eshell/uname` reads `GEOS lambda <release> ... GNU/Emacs (Linux)`,
+  - `eshell/uname` reads `GEOS lambda <release> ... GNU/Emacs (Linux)`
+    on Linux and `GNU/Emacs (Hurd)` on canonical Debian GNU/Hurd 0.9,
     so the user-facing kernel string says what GEOS actually is and
     keeps the real kernel name visible at the end.
   - `M-x geos-poweroff` and `M-x geos-reboot` go through `reboot(2)`
-    via the pid1 module. No `/sbin/poweroff`, no socket, no sudo.
+    on Linux and `host_reboot` via `get_privileged_ports` on Hurd,
+    both via the pid1 module. No `/sbin/poweroff`, no socket, no sudo.
   - `*processes*`, `*network*`, `*journal*`, `*services*`, `*disks*`,
     `*packages*`, `*users*`, `*audio*` are all live buffers with
     sensible keybindings.
@@ -91,19 +96,48 @@ For Hurd: on a fresh Debian GNU/Hurd 0.9 image, run
   - Package install and remove from `*packages*`, driven by
     `guix package` via `make-process` with the build log streamed
     into the buffer.
-  - User accounts: `passwd.el` store under `/var/emacs/users/` and a
-    `*users*` buffer. The login flow itself is v0.5; right now this is
-    the account store and the UI on top of it.
+  - Multi-user: `passwd.el` store under `/var/emacs/users/` plus a
+    `*users*` buffer, the `*login*` flow with audit / throttle /
+    lockout / last-login footer, and concurrent per-user EXWM
+    sessions with workspace isolation. Peer-cred is `SO_PEERCRED`
+    on Linux and `auth_server_authenticate` on Hurd.
   - Suspend to RAM via `M-x geos-suspend`. pid1 writes `mem` to
     `/sys/power/state` after the supervisor quiesces timers.
-  - Audio (preview): `*audio*` buffer wraps `amixer` and `aplay`
-    through `make-process`. No pid1-side audio module yet.
+    No-op on Hurd (no suspend analogue; degrades to a banner).
+  - Audio: the `*audio*` buffer drives `amixer` / `aplay` /
+    `pactl` through `make-process`. Real-hardware audio on Hurd
+    is deferred-upstream (canonical Debian GNU/Hurd 0.9 ships no
+    `/hurd/audio*` translator and no ALSA/OSS surface, see
+    [docs/HURD_PORT.md](docs/HURD_PORT.md)).
   - `M-x install` opens the `*install*` wizard: pick a disk and a
     partition, the wizard does `mkfs.ext4` + `pid1-mount` + `cp -a`
     of `/gnu/store`, `/var/guix`, `/run/current-system` + GRUB
-    install, then offers `r` to reboot. MVP: the operator must
-    pre-partition from a Guix live ISO; partition-from-scratch is
-    v0.4.1.
+    install, then offers `r` to reboot. Live-verified end-to-end
+    on canonical Debian GNU/Hurd 0.9 in `v0.9.23`. The operator
+    must pre-partition from a Guix live ISO (or any live Linux
+    with parted); partition-from-scratch inside the wizard is
+    still a known gap.
+  - Supervisor RPC over `/run/geos/super.sock` (`AF_UNIX` peer-
+    cred gated). Verbs: `ping`, `journal-tail`, `services-list`,
+    `processes`, `reboot`, `poweroff`. Userland buffers
+    (`*services*`, `*journal*`, `*processes*`) render the RPC
+    snapshot every few seconds and keep the last good frame
+    visible when the supervisor is unreachable.
+  - End-to-end SSH on canonical Debian GNU/Hurd 0.9 (`v0.9.12`):
+    `ssh -p 2266 root@127.0.0.1` opens an interactive session
+    against the supervised emacs.
+  - Port seam (`port_caps` in `pid1/port_layer.h`): every
+    Linux-only syscall in `pid1/` routes through a function-
+    pointer struct with `port_linux.c` and `port_hurd.c`
+    backends. `STATIC=1` builds inline the supervisor primitives
+    into a statically linked `emacs-init` (verified at
+    `v0.9.17`: ~1.5 MiB, zero dynamic deps).
+  - `iso-build/hurd-image-reroll.sh` bakes a derivative of the
+    canonical Debian GNU/Hurd 0.9 image: static `pid1` + supervisor
+    tree + serial GRUB + SSH authorized_keys. `FLAVOR=apt-image`
+    layers EXWM-on-Xvfb + pulseaudio userland on top.
+    `GEOS_BYPASS=1` produces a stock canonical image with
+    `/sbin/init` + bash + sysvinit for emergency comparison work.
   - `iso-build/freeze-tests.el` is an in-VM abuse suite that asserts
     the panic buffer survives runaway loops, catastrophic regex, slow
     network, bad tramp, `kill-emacs`, and a state-write round trip.
@@ -113,20 +147,25 @@ For Hurd: on a fresh Debian GNU/Hurd 0.9 image, run
 
 ## what does not work yet
 
-The Hurd variant end-to-end (the port-layer abstraction landed on
-main in the v0.7.x cycle and the Hurd backend skeleton lives on the
-`hurd` side branch with mount/reboot/hostname and three pfinet
-verbs implemented; boot verification waits on a Hurd cross-toolchain
-and the v0.8 self-hosted runner, see
-[docs/HURD_PORT.md](docs/HURD_PORT.md)). Real hardware (only QEMU
-is exercised; KVM-gated boot smoke on a self-hosted runner is the
-v0.8 follow-up). Bluetooth. Wayland. DNS UI (static IPv4 and DHCP
-land packets but the resolver configuration is manual).
-Partition-from-scratch in the install wizard (MVP requires a
-pre-partitioned disk; full parted-driven partitioning is v0.4.1).
-LUKS-rooted boot is documented as a config-edit path (see
+Real desktop-class hardware (testing has been QEMU + a small set
+of x86_64 laptops; the KVM-gated boot smoke on a self-hosted
+runner is wired but not run on a hardware matrix yet).
+Real-hardware audio on Hurd (canonical Debian GNU/Hurd 0.9 ships
+no `/hurd/audio*` translator and no ALSA/OSS surface; the v1.x
+apt-image flavor bundles pulseaudio userland for the elisp side,
+but the audio layer itself is deferred-upstream, see
+[docs/HURD_PORT.md](docs/HURD_PORT.md) and
+[docs/upstream/hurd-audio-translator.md](docs/upstream/hurd-audio-translator.md)).
+Per-interface byte/packet counters on Hurd pfinet (also
+deferred-upstream, the elisp arm renders zeros until the
+translator surface lands).  Bluetooth.  Wayland.  DNS UI (static
+IPv4 and DHCP land packets but the resolver configuration is
+manual).  Partition-from-scratch inside the install wizard (the
+operator still pre-partitions from a Guix live ISO; a
+parted-driven flow is on the roadmap).  LUKS-rooted boot is
+documented as a config-edit path (see
 [docs/INSTALL.md](docs/INSTALL.md)) but integration-tested only
-by a future install-wizard pass. The list lives in
+by a future install-wizard pass.  The list lives in
 [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## the failure mode I have accepted
@@ -397,6 +436,22 @@ version:
     non-reproduction", zero SIGSEGV/__mach_msg markers, PID
     stable at 30 across 63 side-polls.  receipt at
     [docs/runlogs/2026-05-30-hurd-pselect-soak-35min.md](docs/runlogs/2026-05-30-hurd-pselect-soak-35min.md).
+  - v1.0.0: tagged.  state declaration.  Emacs as PID 1 on both
+    Linux and canonical Debian GNU/Hurd 0.9, end-to-end through
+    a multi-user EXWM session.  every row in
+    [docs/HURD_PORT.md](docs/HURD_PORT.md) is YES modulo two
+    upstream-translator gaps (audio translator, pfinet per-iface
+    counters) documented in-tree as deferred-upstream.  upstream
+    filings: eight emails on-list, none blocking GEOS.
+    `GEOS_BYPASS=1 ./iso-build/hurd-image-reroll.sh` is the
+    documented escape hatch for operators who want canonical
+    Debian userland (bash + sysvinit + getty) instead of the
+    Emacs PID 1, while keeping the bake-time conveniences
+    (serial console, root authorized_keys, sshd host keys); see
+    [docs/HURD_BOOT.md](docs/HURD_BOOT.md) under "bash console
+    option (GEOS_BYPASS, build-time)".  the first GEOS release
+    where the "full Hurd support" claim is defensible from the
+    matrix alone, no asterisks.
 
 I am the only contributor. If you want to send a patch, read the
 manifesto first so you know what you are signing up for.

@@ -3257,7 +3257,7 @@ up the shadow correctly."
 ;;     silently returning nil with no audit trail.
 ;;
 ;;   port/install-partitions-for-hurd-shape
-;;     v1.0 slice A pin: `install--partitions-for-hurd' must not
+;;     v1.0.0 slice A pin: `install--partitions-for-hurd' must not
 ;;     raise on a dev host where /dev/wd0s* nodes are absent (returns
 ;;     nil), AND when slices ARE present every entry must carry the
 ;;     four documented plist keys (:name :node :size-bytes :mounted-p).
@@ -3520,7 +3520,7 @@ nil, and the *panic* buffer grew with a record mentioning the
 
 (defun freeze-test--port-install-partitions-for-hurd-shape ()
   "Sub-check: `install--partitions-for-hurd' shape pin.
-two assertions for v1.0 slice A:
+two assertions for v1.0.0 slice A:
 
   (a) on a dev host with no /dev/<probe>s* nodes, the function
       returns nil and does NOT raise.  uses a probe name

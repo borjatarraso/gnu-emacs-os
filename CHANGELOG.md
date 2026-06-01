@@ -7,9 +7,132 @@ the tagged commit. The signed tag for each release carries the
 full per-slice commit list; this file is the short version. The
 matching GitHub release page mirrors each entry.
 
-## unreleased
+## v1.0.0 (2026-06-01)
 
-(empty — see v0.7.1 for the port-seam slice landed since v0.7.)
+State declaration.  Emacs as PID 1 on both Linux and canonical
+Debian GNU/Hurd 0.9, end-to-end through a multi-user EXWM session.
+Every row in `docs/HURD_PORT.md` is YES modulo two upstream
+translator-level gaps (native audio translator, pfinet per-iface
+counters) documented in-tree as deferred-upstream.  Of the eight
+upstream filings under `docs/upstream/emails/`, all eight are
+on-list; none blocks GEOS.  The "full Hurd support" claim is
+defensible from the matrix alone, no asterisks.  This is the
+first GEOS release I am willing to ship under that label.
+
+What this tag captures, by area:
+
+  - **pid1 + port seam**: every Linux-only syscall in `pid1/`
+    routes through the `port_caps` function-pointer struct
+    (`port_linux.c`, `port_hurd.c`).  the Hurd backend covers
+    network ioctls, `host_reboot` via `get_privileged_ports`,
+    `MACH_NOTIFY_DEAD_NAME` parent-death watcher,
+    `file_get_storage_info` for disk size, `auth_server_authenticate`
+    peer-cred handshake, kmsg via `tail -F` on `/var/log/syslog`
+    with the syslog-format parser, and a STATIC=1 build that
+    inlines `pid1-module.o` into the emacs-init binary
+    (`emacs-init` statically linked, zero dynamic deps).  the
+    two `port_caps` rows that remain ENOSYS on Hurd are the
+    upstream-translator gaps cited above.
+
+  - **multi-user**: peer-cred end-to-end (`v0.8`), supervisor
+    RPC over `/run/geos/super.sock` with verbs `ping`,
+    `journal-tail`, `services-list`, `reboot`, `poweroff`,
+    concurrent session allocation with isolation tests
+    (`v0.6`), login audit + throttle + lockout + last-login
+    footer (`v0.6` item 5), `*users*` buffer +
+    `passwd-create-user-and-home` (`v0.6` item 4).
+
+  - **EXWM-on-Xvfb on Hurd**: live-verified at `v0.9.10`.
+    EXWM 0.33 + xelb 0.20 on emacs-lucid 30.2 is the EWMH
+    WM over a `v0.9.8`-spawned Xvfb.  apt prereqs (xvfb,
+    emacs-lucid, elpa-exwm, elpa-xelb) bundled by the
+    `FLAVOR=apt-image` knob in `iso-build/hurd-image-reroll.sh`
+    (`v0.9.24`).
+
+  - **end-to-end SSH on Hurd**: `v0.9.12`.  twelve-slice
+    cycle landed `remount_root_rw` via `fsys_set_options`,
+    a native-comp opt-out for the boot-time trampoline build,
+    breadcrumbs to supervise `/dev/console`, and static
+    eth0 via `settrans pfinet` with the full SLIRP shape
+    inline.  `host ssh -p 2266 root@127.0.0.1` opens an
+    interactive session.
+
+  - **journal-kmsg on Hurd**: `v0.9.13` arc (`afd1f3f`,
+    `7e4fc42`, `211aeee`); also closes the emacs-respawn
+    case from task #171.
+
+  - **install wizard on Hurd**: `v0.9.23` live-verified.
+    `install-mkfs-ext4` and `install-grub-install` end-to-end
+    PASS through the elisp wrappers on canonical Hurd; fresh
+    ext4 mounts, GRUB MBR + `i386-pc/core.img` written.
+
+  - **iso-build/hurd-image-reroll.sh**: qcow2 backing-chain
+    over a read-only pristine, single `guestfish --listen`
+    daemon, smoke gate that fails fast on `No such device or
+    address` or `Kernel panic`, IDE + e1000 device flags
+    (Hurd's rumpdisk has no virtio-blk and netdde has no
+    virtio-net), `FLAVOR=apt-image` derivative for the
+    EXWM-on-Xvfb + pulseaudio userland, `GEOS_BYPASS=1`
+    escape hatch that produces a canonical Debian image with
+    stock /sbin/init.
+
+  - **upstream filings**: `docs/upstream/STATUS.md` tracks
+    eight emails on bug-hurd / debian-hurd / bug-gnu-emacs.
+    `01` (emacsclient SO_RCVTIMEO) closed by Paul Eggert with
+    a broader accept-and-rewrite.  `06` (evdev) closed with
+    no engagement.  `08` (ext2fs `file_pager_write_pages`
+    `blk` assertion under apt-install) sent 2026-06-01.
+    none of the on-list reactions force a present-day GEOS
+    code change.
+
+  - **bash console escape hatch**: `GEOS_BYPASS=1
+    ./iso-build/hurd-image-reroll.sh` keeps stock
+    `/sbin/init` (no swap), skips the GEOS overlay steps,
+    reroutes the output to `BYPASS_OUTPUT_IMG`, and leaves
+    the bake-time conveniences (serial console patch, root
+    `authorized_keys`, pre-generated sshd host keys) in
+    place.  documented in `docs/HURD_BOOT.md`.
+
+CI: `.github/workflows/checks.yml` runs attribution +
+no-shell gates on every push.  `.github/workflows/hurd-smoke.yml`
+plus `docs/CI_HURD_RUNNER.md` carry the self-hosted KVM
+boot-smoke gate; goes live the day a runner labelled
+`hurd-kvm` registers.
+
+## v0.8 through v0.9.24
+
+This range covers the full Hurd port arc from the peer-cred
+end-to-end land (`v0.8`) to the upstream-drafts + apt-image
+flavor + CI scaffolding (`v0.9.24`).  The per-slice commit
+list lives on each signed tag; the signed `v1.0.0` tag carries
+the summary above.  Notable intermediate markers:
+
+  - `v0.8` (2026-05-18): peer-cred end-to-end multi-user on
+    both kernels.
+  - `v0.8.1` (2026-05-18): `poll(POLLOUT)` gate + retry-loop
+    drain on the supervisor RPC path.
+  - `v0.8.2` (2026-05-20): 64 KiB stack frame for the
+    multi-user code path.
+  - `v0.9` (2026-05-20): every v0.9 elisp arm flipped YES on
+    Hurd.
+  - `v0.9.5` (2026-05-20) through `v0.9.7` (2026-05-21): the
+    remaining `port_hurd.c` slots (disk size, kmsg, audio)
+    land or are confirmed deferred-upstream.
+  - `v0.9.8` (2026-05-21) + `v0.9.9` (2026-05-21):
+    `arm_parent_death` watcher on Hurd, with the
+    `err_hurd`-not-`err_kern` ground-truth lesson recorded.
+  - `v0.9.12` (2026-05-22): end-to-end SSH on Hurd.
+  - `v0.9.18` (2026-05-23): canonical Hurd image re-roll
+    script (`iso-build/hurd-image-reroll.sh`).
+  - `v0.9.19` (2026-05-24): trampoline-wedge closed; full
+    35-file init.args boots to `*scratch*`.
+  - `v0.9.22` (2026-05-30): IDE + e1000 flip; SSH-able
+    supervised emacs first-try on every bake.
+  - `v0.9.23` (2026-05-30): install wizard slice C
+    live-verified on Hurd.
+  - `v0.9.24` (2026-05-30): four parallel slices (upstream
+    drafts, `FLAVOR=apt-image`, CI hurd-smoke draft,
+    35-min pselect soak).
 
 ## v0.7.1 (2026-05-17)
 

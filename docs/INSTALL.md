@@ -2,11 +2,13 @@
 
 Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
 
-This document covers the v0.3.1 release plus the v0.4 in-flight tree.
-I have only tested GEOS in QEMU. Real hardware boots are part of the
-v0.4 meta-task, see `docs/ROADMAP.md`. If you put this on a laptop
-and it eats your filesystem I will take the bug report but I will not
-be surprised.
+This document covers the v1.0.0 release.  GEOS runs on a Linux host
+via a Guix-built qcow2, and on canonical Debian GNU/Hurd 0.9 via
+the `iso-build/hurd-image-reroll.sh` derivative.  I have tested
+both in QEMU.  Real desktop-class hardware testing has been done
+on a small set of x86_64 laptops.  If you put this on a laptop
+and it eats your filesystem I will take the bug report but I will
+not be surprised.
 
 ## what you need
 
@@ -25,8 +27,7 @@ the build.
 
 The current pin is Guix commit
 `230aa373f315f247852ee07dff34146e9b480aec`, carried forward unchanged
-from v0.1 through the v0.4 in-flight tree. This is non-negotiable
-inside a release. The ISO is reproducible byte-for-byte (modulo
+from v0.1 through v1.0.0. This is non-negotiable inside a release. The ISO is reproducible byte-for-byte (modulo
 kernel build-id) against that pin and only against that pin. Bumping
 it is a release-cut concern, not a per-patch one.
 

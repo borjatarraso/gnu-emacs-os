@@ -330,9 +330,10 @@ the VM and is gated on the boot-as-PID-1 milestone.
     translator (`/hurd/procfs`), `/dev` is real, `/sys` does not
     exist. The Hurd boot path has to skip these or treat the
     syscalls as no-ops.
-  - **EXWM**: Hurd ships Xorg, but the modesetting DRM path that
-    works on Linux QEMU needs a Hurd-side equivalent. Out of scope
-    for the v0.7.x abstraction; tracked separately.
+  - **EXWM**: Hurd ships Xorg but no modesetting DRM analogue.
+    The v1.x apt-image flavor of the re-rolled Hurd image runs
+    EXWM 0.33 over Xvfb (see v0.9.10); native Xorg on Hurd
+    real hardware is tracked separately and is deferred-upstream.
   - **suspend**: Hurd has no analogue. `port->suspend` returns
     ENOSYS forever; the `*audio*` buffer's mixer is the only
     user-facing place that cares, and it degrades to a banner.

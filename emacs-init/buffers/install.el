@@ -108,7 +108,7 @@ inside).  returns a list of /dev/X path strings.  no mounted
 check here; the caller (the format-confirm step) re-checks
 against /proc/mounts to refuse a mounted partition.
 
-hurd arm (v1.0 slice A): defers to
+hurd arm (v1.0.0 slice A): defers to
 `install--partitions-for-hurd', which returns a list of plists
 shaped (:name :node :size-bytes :mounted-p) because hurd has no
 sysfs and the slice convention is the storeio translator

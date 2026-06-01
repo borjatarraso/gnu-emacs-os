@@ -9,13 +9,15 @@ Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ## reading order
 
-The OS is still small enough to read in a long evening. As of v0.4
-in flight: roughly 2100 lines of C (pid1 binary + dynamic module +
-shstub), roughly 5900 lines of Elisp (core, wm, userland, buffers,
-services), roughly 840 lines of Scheme (the operating-system record
-and the iso-build wrappers). The numbers drift between releases;
-treat them as orders of magnitude, not contracts. This document is
-a guided tour. The truth is in the source.
+The OS is still small enough to read in a long evening. As of
+v1.0.0: roughly 5600 lines of C (pid1 binary + dynamic module +
+shstub + port layer; the `hurd` side branch adds another ~3K for
+`port_hurd.c` and friends), roughly 15800 lines of Elisp (core,
+wm, userland, buffers, services, auth, install), roughly 1500
+lines of Scheme (the operating-system record and the iso-build
+wrappers).  The numbers drift between releases; treat them as
+orders of magnitude, not contracts.  This document is a guided
+tour.  The truth is in the source.
 
 The lifecycle below is one continuous chain from kernel handoff to
 power off. Read top to bottom on the first pass.

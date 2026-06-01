@@ -92,7 +92,7 @@ I lose maybe one session a week to a freeze I have to recover from in
 QEMU. I am fine with that ratio. You may not be. That is a real reason
 to not use this OS.
 
-## what is in GEOS today (v0.3.1 shipped, v0.4 in flight)
+## what is in GEOS today (v1.0.0)
 
   - PID 1 is a C binary that becomes Emacs and then loads itself back
     in as an Emacs module so the reaper, the mount helper, the
@@ -101,41 +101,62 @@ to not use this OS.
   - The panic buffer catches every uncaught Elisp error and refuses to
     let Emacs exit. The freeze-test suite abuses it on every release.
   - eshell is the only shell. `/bin/sh` is the stub. `uname -a` reads
-    `GEOS lambda <release> ... GNU/Emacs (Linux)`.
+    `GEOS lambda <release> ... GNU/Emacs (Linux)` on Linux and
+    `GNU/Emacs (Hurd)` on canonical Debian GNU/Hurd 0.9.
   - EXWM with the modesetting Xorg driver. Real keyboard and mouse in
-    QEMU. X11 windows are buffers. Console mode (`geos.mode=console`)
-    is also supported for headless boxes.
+    QEMU on Linux. EXWM 0.33 over Xvfb on canonical Debian GNU/Hurd
+    0.9 (`v0.9.10`). X11 windows are buffers. Console mode
+    (`geos.mode=console`) is also supported for headless boxes.
   - `M-x geos-poweroff` and `M-x geos-reboot` go through `reboot(2)`
-    via the pid1 module. There is no `/sbin/poweroff` to call; the
-    supervisor IS Emacs and the answer to "shut down" lives in elisp.
-  - Persistent state under `/var/emacs/` (v0.4 item 1): atomic writes
-    via tmpfile + rename + `pid1-fsync-dir`, ext4 (`geos-var` label)
-    or tmpfs fallback. The contract is `docs/STATE_LAYOUT.md`.
-  - First-class service supervision in Elisp (v0.4 item 2):
-    `core/supervise.el` with the `defservice` macro, restart policies,
-    a rolling 60s respawn cap, and persisted restart counters. The
-    `*journal*` follower is the first consumer; the rest of the
-    long-running processes migrate as the userland gains them.
+    on Linux and `host_reboot` via `get_privileged_ports` on Hurd,
+    both via the pid1 module. There is no `/sbin/poweroff` to call;
+    the supervisor IS Emacs and the answer to "shut down" lives in
+    elisp.
+  - Persistent state under `/var/emacs/`: atomic writes via tmpfile
+    + rename + `pid1-fsync-dir`, ext4 (`geos-var` label) or tmpfs
+    fallback. The contract is `docs/STATE_LAYOUT.md`.
+  - First-class service supervision in Elisp: `core/supervise.el`
+    with the `defservice` macro, restart policies, a rolling 60s
+    respawn cap, and persisted restart counters.
+  - Multi-user: SO_PEERCRED-on-Linux + `auth_server_authenticate`
+    peer-cred handshake on Hurd; login audit, throttle, lockout,
+    last-login footer, concurrent sessions with isolation.
   - System concepts have buffers: `*processes*`, `*network*`,
-    `*journal*`, `*services*`, `*disks*`, `*packages*`. Each has a
-    major mode, sensible keybindings, and a refresh timer.
-  - The whole thing builds reproducibly from a pinned Guix channel.
-    The qcow2 boots in about eleven seconds on KVM.
+    `*journal*`, `*services*`, `*disks*`, `*packages*`, `*users*`,
+    `*audio*`, `*install*`. Each has a major mode, sensible
+    keybindings, and a refresh timer.
+  - End-to-end SSH on canonical Debian GNU/Hurd 0.9 (`v0.9.12`):
+    `host ssh -p 2266 root@127.0.0.1` opens an interactive session
+    against the supervised emacs.
+  - Install wizard live-verified on Hurd (`v0.9.23`): `mkfs.ext4`
+    and `grub-install` end-to-end PASS through the elisp wrappers
+    on canonical Hurd against a second IDE disk.
+  - Port seam (`port_caps`): every Linux-only syscall in `pid1/`
+    routes through a function-pointer struct with `port_linux.c`
+    and `port_hurd.c` backends. STATIC=1 builds inline the
+    supervisor primitives into a statically linked `emacs-init`
+    binary with zero dynamic deps.
+  - The whole thing builds reproducibly from a pinned Guix channel
+    on Linux and rolls into a derivative of the canonical Debian
+    GNU/Hurd 0.9 image via `iso-build/hurd-image-reroll.sh`.
 
 ## what is not in GEOS yet
 
-The Hurd variant. Real hardware. Multi-user. Audio. Bluetooth.
-Anything Wayland.
+Real desktop-class hardware (testing has been QEMU + a small set
+of x86_64 laptops). Audio on Hurd waits on either a native
+`/hurd/audio*` translator or pulseaudio with a working sink (the
+v1.x apt-image flavor bundles pulseaudio userland; real-hardware
+audio on Hurd is deferred-upstream because Hurd ships no ALSA or
+OSS translator). Bluetooth. Anything Wayland.
 
-These are real, they are tracked, and I will get to them. v0.1
-proved that Emacs as PID 1, no Shepherd, no shell, actually holds
-together under a normal day of work. v0.2 added the things you cannot
-live without on a daily driver (input, poweroff, hostname). v0.3
-made the boot mode operator-toggleable and tightened the pid1 module
-ABI. v0.4 is the persistence and supervision pass: `/var/emacs/` and
-`defservice` have already landed; networking UI, package management,
-suspend/resume, multi-user, and an in-system reconfigure follow in
-the rest of the v0.4 plan (`docs/v04-plan.md`).
+These are real and tracked. v0.1 proved the thesis that Emacs as
+PID 1, no Shepherd, no shell, actually holds together. v0.2
+through v0.7 fleshed out the Linux daily driver (input, multi-user,
+EXWM polish, supervisor RPC). v0.8 through v0.9.24 ported pid1
+and the userland to canonical Debian GNU/Hurd 0.9 end-to-end. v1.0.0
+is the state declaration: Emacs as PID 1 on both kernels, multi-user
+EXWM session on both, every row of `docs/HURD_PORT.md` YES modulo
+two upstream-translator gaps documented in-tree.
 
 ## relationship to GNU
 

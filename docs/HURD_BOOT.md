@@ -2,13 +2,40 @@
 
 # Booting GEOS on GNU/Hurd
 
-The Hurd-side code (`pid1/port_hurd.c`, `guix-system/system-hurd.scm`,
-`iso-build/hurd-smoke-test.sh`) is written and skeptic-reviewed but
-has never been compiled against real Hurd headers or run on a Hurd
-kernel. This document is the recipe for taking it from "written" to
-"verified" without further code changes. Every step is something an
-operator with a working Hurd environment can do; the work is
-infrastructure, not code design.
+GEOS runs on canonical Debian GNU/Hurd 0.9 as of v1.0.0.  Emacs is
+PID 1, the full supervisor tree comes up, the multi-user EXWM
+session lands, end-to-end SSH works (`v0.9.12`), and the install
+wizard formats + GRUB-installs onto a second disk (`v0.9.23`).
+Every row of [HURD_PORT.md](HURD_PORT.md) is YES modulo two
+deferred-upstream rows (real-hardware audio and pfinet per-iface
+counters); see [docs/upstream/](upstream/) for the on-list
+filings.
+
+This document is the operator runbook.  There are two paths:
+
+  - **Image re-roll (recommended)**: run
+    `iso-build/hurd-image-reroll.sh` on a Linux host against the
+    canonical Debian GNU/Hurd 0.9 image.  Out comes a derivative
+    image with the static `pid1`, the supervisor tree, serial GRUB,
+    and SSH authorized_keys baked in.  Boot it under QEMU and `ssh
+    -p 2266 root@127.0.0.1`.  See
+    [iso-build/hurd-image-reroll.sh](../iso-build/hurd-image-reroll.sh)
+    for the flags; `FLAVOR=apt-image` adds EXWM-on-Xvfb plus
+    pulseaudio userland on top, `GEOS_BYPASS=1` re-routes to a
+    stock canonical image with `/sbin/init` + bash for comparison
+    work.
+  - **Manual bootstrap (for the curious or for porting work)**:
+    boot a fresh canonical Debian GNU/Hurd 0.9 install, run
+    `install/hurd-bootstrap.sh` as root, reboot.  The recipe below
+    walks through the apt prereqs, the build, the init.args
+    contract, the rollback path, and what a healthy console
+    transcript looks like.
+
+The `pid1/port_hurd.c` source still lives only on the `hurd` side
+branch (rebased onto main weekly per the side-branch contract).
+`port_layer.h` and `port_linux.c` live on main.  The static
+`pid1` and the supervisor tree that ship in the re-rolled image
+are built from the `hurd` branch.
 
 ## Prerequisites
 
@@ -67,15 +94,20 @@ make clean
 make PORT=hurd STATIC=0
 ```
 
-`STATIC=0` is required on Debian Hurd: the static `libfshelp.a`
-shipped by libhurd-dev references `__assert_fail_backtrace`, a
-glibc-debug symbol that the static glibc archive does not export.
-A dynamic link picks it up fine.  The downside is that the boot
-binary now has DT_NEEDED entries on libfshelp / libhurduser /
+`STATIC=0` is the default Debian Hurd path: the static
+`libfshelp.a` shipped by libhurd-dev references
+`__assert_fail_backtrace`, a glibc-debug symbol the static glibc
+archive does not export.  A dynamic link picks it up fine.  The
+downside is DT_NEEDED entries on libfshelp / libhurduser /
 libmachuser; those are provided by libhurd-dev and ship under
 /lib on the Debian Hurd rootfs, so the dynamic linker resolves
-them at boot.  When the v0.8 cross-toolchain runner comes online
-we revisit whether a static link is achievable upstream.
+them at boot.
+
+`STATIC=1` works too as of v0.9.17 (the supervisor primitives are
+inlined and the binary has zero dynamic deps, about 1.5 MiB).
+The image re-roll script uses `STATIC=1` for the binary it bakes
+into the canonical image so the rootfs's runtime libs are not on
+the boot critical path.
 
 Expected output: `pid1/emacs-init` (and `pid1/pid1-module.so` if
 you also `make module`), linked against `-lfshelp -lhurduser
@@ -83,8 +115,9 @@ you also `make module`), linked against `-lfshelp -lhurduser
 files are gone on a modern Debian Hurd toolchain (folded into
 glibc); the Makefile reflects this.
 
-**Known unknowns** (this is the first time anyone runs this; expect
-breakage in any of):
+**Things that can still surprise you** (the recipe below is
+what works on canonical Debian GNU/Hurd 0.9; if you have a
+different snapshot expect breakage in any of):
 
   - `mig`-generated header includes may need explicit `-I` flags
     that `pkg-config --cflags hurd` should provide. If `make`
@@ -338,36 +371,39 @@ The script boots the VM headless and greps the serial log for the
 went all the way to userland and core/port.el resolved
 `geos-kernel` to `'hurd` via the GEOS_KERNEL env propagation.
 
-## What "verified" means
+## What "verified" means in v1.0.0
 
-The bar is intentionally modest for the first pass:
+Every row in [HURD_PORT.md](HURD_PORT.md) is YES modulo two
+deferred-upstream rows.  Concretely, on canonical Debian GNU/Hurd
+0.9 the expected steady-state is:
 
   - pid1 boots to a Hurd prompt without panicking.
   - `geos-kernel` is `'hurd` in `*scratch*`.
-  - `(geos-port-call 'reboot 'halt)` reboots the VM cleanly.
-  - `*processes*` lists at least the pid1 process and the emacs
-    supervisor process.
-  - `*disks*`, `*network*`, `*audio*` render the
-    not-on-this-kernel banner where appropriate (intentional
-    degradation, not crash).
-
-Multi-user, EXWM, install wizard, and audio are explicitly OUT OF
-SCOPE for the first verification pass. Those are v0.8+ work.
+  - `(geos-port-call 'reboot 'halt)` reboots the VM cleanly via
+    `host_reboot` through `get_privileged_ports`.
+  - `*processes*` lists pid1, the emacs supervisor, and any
+    `defservice` children that have spawned.
+  - `*network*` shows the pfinet interface and the routing table
+    (counters render as zeros, the deferred-upstream gap).
+  - `*disks*` shows the storeio nodes and mount table.
+  - `*audio*` renders the not-on-this-kernel banner; the v1.x
+    apt-image flavor instead surfaces pulseaudio via `pactl`.
+  - SSH to the supervised emacs works on `:2266` (see v0.9.12).
+  - Multi-user `*login*` flow + concurrent per-user EXWM sessions
+    work on the apt-image flavor (Xvfb + EXWM 0.33).
+  - `M-x install` end-to-end onto a second disk: mkfs.ext4 +
+    pid1-mount + cp -a + grub-install (see v0.9.23).
 
 ## After verification
 
-Once the smoke test passes:
+For routine re-verification:
 
-  - update `docs/HURD_PORT.md` "Verification status" section to
-    promote each surface from "untested" to "verified on Hurd
-    YYYY-MM-DD".
-  - tag a `v0.7.2` on the `hurd` branch (NOT on main) marking
-    "first Hurd boot to userland".
-  - any deltas to `port_hurd.c` discovered during verification
-    stay on the `hurd` branch.
-
-The first verification will surface things that the desk-review
-missed. That is the point: the work order's step 6 ("Hurd smoke
-test green") is the loop that closes the speculative-code risk in
-`port_hurd.c`. Until it runs once, every line in that file is a
-hypothesis.
+  - `iso-build/hurd-image-reroll.sh` re-bakes the image from
+    current `hurd` branch HEAD; the in-script smoke gate boots
+    the result and waits for the supervised emacs to come up.
+  - any deltas to `port_hurd.c` land on the `hurd` branch and
+    rebase forward onto main during the weekly side-branch
+    rebase.
+  - per-milestone receipts live under `docs/runlogs/`; the
+    convention is one file per verified slice with the raw
+    serial / VM transcripts that prove the slice landed.

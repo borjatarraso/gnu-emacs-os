@@ -179,35 +179,54 @@ because `/proc` is world-readable. Host-side CI gate at
 KVM-gated boot smoke deferred to v0.8. Port status is in
 [HURD_PORT.md](HURD_PORT.md).
 
+## v0.8 through v1.0.0 recap (done)
+
+The Hurd port arc.  `v0.8` (2026-05-18) landed peer-cred
+end-to-end multi-user on both kernels (`auth_server_authenticate`
+on Hurd, SO_PEERCRED on Linux; design lives in
+[v08-hurd-peer-cred-design.md](v08-hurd-peer-cred-design.md)).
+`v0.8.1` + `v0.8.2` (2026-05-18, 2026-05-20) closed the
+`poll(POLLOUT)` + retry-loop + 64 KiB stack frame gaps on the
+RPC path.  `v0.9` (2026-05-20) flipped every v0.9 elisp Hurd
+arm to YES; `v0.9.5` through `v0.9.7` (2026-05-20, 2026-05-21)
+closed the remaining `port_hurd.c` slots (disk size, kmsg,
+audio either landed or confirmed deferred-upstream).  `v0.9.8`
++ `v0.9.9` (2026-05-21) shipped the `arm_parent_death`
+`MACH_NOTIFY_DEAD_NAME` watcher; `v0.9.10` (2026-05-21)
+live-verified EXWM 0.33 on Xvfb on canonical Hurd; `v0.9.12`
+(2026-05-22) brought end-to-end SSH on Hurd.  `v0.9.18`
+(2026-05-23) shipped `iso-build/hurd-image-reroll.sh`;
+`v0.9.22` (2026-05-30) flipped to `-drive if=ide` +
+`-device e1000` (Hurd's rumpdisk has no virtio-blk, netdde
+has no virtio-net), making the full 35-file canonical
+init.args the default bake; `v0.9.23` (2026-05-30)
+live-verified the install wizard slice on Hurd
+(`install-mkfs-ext4` + `install-grub-install` PASS).
+`v0.9.24` (2026-05-30) landed four parallel slices: upstream
+bug-report + patch drafts under `docs/upstream/`, the
+`FLAVOR=apt-image` derivative that bundles xvfb + emacs-lucid
++ elpa-exwm + elpa-xelb + pulseaudio, the self-hosted KVM
+boot-smoke gate skeleton at `.github/workflows/hurd-smoke.yml`,
+and a 35-minute / 1383-eval pselect soak.  `v1.0.0` (2026-06-01)
+is the state declaration: Emacs as PID 1 on both Linux and
+canonical Debian GNU/Hurd 0.9, end-to-end through a multi-user
+EXWM session, every row of [HURD_PORT.md](HURD_PORT.md) YES
+modulo two upstream-translator gaps documented in-tree.
+`GEOS_BYPASS=1 ./iso-build/hurd-image-reroll.sh` is the
+documented bash-console escape hatch.
+
 ## what's next
 
-The detailed v0.7.1 / v0.8 list is not yet a plan file; the
-current candidates are:
-
-  - QEMU interactive validation pass for the v0.7 items
-    (currently shipped on freeze-tests + smoke markers).
-  - KVM-gated boot smoke test on a self-hosted runner.
+  - Real install media on a non-virtualized x86_64 laptop, both
+    Linux and Hurd.
+  - Self-hosted KVM runner labelled `hurd-kvm` registered so
+    `.github/workflows/hurd-smoke.yml` goes live.
+  - Native `/hurd/audio*` translator (upstream territory; once
+    it exists, the `userland/audio.el` Hurd arm wires to it).
+  - pfinet per-iface counter surface (upstream territory; once
+    `pfinet.defs` carries a stats slot, the network buffer
+    counters flip from stub-zero to real).
   - `kmsg-tail` RPC verb to lift `/dev/kmsg` user-side without
     touching the existing `journal-tail` shape.
-  - Real install media on a non-virtualized x86_64 laptop.
-  - Hurd port progress (single-user PID-1 boot, emacs spawn,
-    and `host_reboot` Mach RPC all landed on the side branch
-    on 2026-05-18; see runlogs and `HURD_PORT.md`).  Next gates
-    toward multi-user on Hurd:
-      * `port->get_peer_cred` Mach auth-port handshake (replace
-        the current ENOSYS stub; pflocal has no SO_PEERCRED so
-        the supervisor needs `auth_server_authenticate` against
-        a rendezvous port the client transmits over the AF_UNIX
-        RPC channel).  Design: see
-        [v08-hurd-peer-cred-design.md](v08-hurd-peer-cred-design.md).
-      * GEOS-side service supervisor that survives `host_reboot`
-        (pid1 today only supervises emacs; Debian's sysvinit
-        services do not come back because /sbin/init is now
-        emacs-init, not sysvinit).
-      * Second PID-1 boot runlog after the 2026-05-18 bootstrap-
-        order fix round (tmpfs argv `3b77e06`, mkdir EROFS
-        access-gate `031d933`, sethostname EROFS rationale
-        `b5e00e2`) to confirm the EROFS noise and "too many
-        arguments" lines are gone from the transcript.
   - Bluetooth, Wayland, microphone capture, and webcam stay
     punted; the reasons listed above still apply.

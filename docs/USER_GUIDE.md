@@ -94,9 +94,10 @@ signal init from this buffer regardless of who owns it.
 ### `*network*`
 
 Interfaces with addresses, link state, RX/TX counters, plus the
-routing table from `/proc/net/route`. The OS only brings up loopback
-automatically; for anything else use `pid1-set-address` directly from
-elisp until the DHCP work lands (Phase B of the v0.4 plan). The buffer
+routing table from `/proc/net/route`. The OS brings up loopback
+automatically; press `s` for static IPv4 (prompts for address and
+gateway, ioctls through `pid1-set-address` + `pid1-set-route-default`)
+or `d` for DHCP (one-shot `dhcpcd` via `make-process`). The buffer
 refreshes every two seconds.
 
 ### `*journal*`
@@ -124,9 +125,11 @@ user-side without disturbing this view.
 ### `*services*`
 
 The supervised-process registry from `core/supervise.el`. Every
-service registered with `defservice` (the journal follower today,
-DHCP and friends as Phase B of v0.4 lands) shows up here with its
-restart policy, restart count, and last-death timestamp. `r`
+service registered with `defservice` (journal-kmsg, the DHCP
+one-shot, Xorg on Linux and Xvfb on the Hurd apt-image flavor,
+sshd on Hurd, plus whatever else userland registers) shows up
+here with its restart policy, restart count, and last-death
+timestamp. `r`
 requests an immediate restart. `D` deregisters (the supervisor will
 not respawn it). Xorg is supervised by PID 1 directly, not by this
 registry, because it has to come up before Emacs.
@@ -147,9 +150,8 @@ Block devices from `/proc/partitions` plus mounts from
 ### `*packages*`
 
 The active Guix profile, rendered from the on-disk manifest. Read-only;
-to actually change package state you reconfigure the system (the
-`*reconfigure*` buffer is item 3 of the v0.4 plan, see
-`docs/v04-plan.md`).
+to actually change package state you reconfigure the system through
+the `*reconfigure*` buffer (`M-x reconfigure`).
 
 ### `*users*`
 
@@ -386,8 +388,8 @@ ran emacs by hand outside the boot path).
 
 There is no `~/.emacs.d/init.el` for you. The userland is the boot
 gexp; to change it you edit a file in `emacs-init/` and rebuild the
-image. There is no in-system `M-x customize-system` yet (item 3 of
-the v0.4 plan, see `*reconfigure*` in `docs/v04-plan.md`).
+image. The `*reconfigure*` buffer (`M-x reconfigure`) is
+the in-system path for `guix system reconfigure`-style changes.
 
 For one-off tweaks during a session, `M-x eval-expression` (`M-:`) and
 write some Lisp. The change lasts until the next reboot.

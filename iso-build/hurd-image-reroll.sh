@@ -111,7 +111,7 @@ APT_TIMEOUT_S="${APT_TIMEOUT_S:-300}"
 # (serial console patch, root ssh authorized_keys, pre-generated sshd
 # host keys) so the operator can ssh in and poke at the canonical
 # userland with no GEOS supervisor in the way.  the use case is the
-# v1.0 "give me a bash console" escape hatch documented in
+# v1.0.0 "give me a bash console" escape hatch documented in
 # docs/HURD_BOOT.md.  default 0 keeps every existing invocation
 # byte-identical to the pre-knob behavior.
 GEOS_BYPASS="${GEOS_BYPASS:-0}"
