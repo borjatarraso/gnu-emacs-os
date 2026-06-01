@@ -104,6 +104,19 @@ APT_OUTPUT_IMG="${APT_OUTPUT_IMG:-/home/overdrive/hurd-vm/debian-hurd-amd64-geos
 APT_PORT="${APT_PORT:-2298}"
 APT_TIMEOUT_S="${APT_TIMEOUT_S:-300}"
 
+# GEOS_BYPASS: when set to 1, produce a canonical Debian GNU/Hurd 0.9
+# image WITHOUT swapping /sbin/init for the emacs-init PID 1.  the
+# rerolled image keeps the stock Debian sysvinit + bash + getty; it is
+# the same canonical Hurd image except for the bake-time conveniences
+# (serial console patch, root ssh authorized_keys, pre-generated sshd
+# host keys) so the operator can ssh in and poke at the canonical
+# userland with no GEOS supervisor in the way.  the use case is the
+# v1.0 "give me a bash console" escape hatch documented in
+# docs/HURD_BOOT.md.  default 0 keeps every existing invocation
+# byte-identical to the pre-knob behavior.
+GEOS_BYPASS="${GEOS_BYPASS:-0}"
+BYPASS_OUTPUT_IMG="${BYPASS_OUTPUT_IMG:-/home/overdrive/hurd-vm/debian-hurd-amd64-canonical.img}"
+
 # log prefix on every line so the operator can grep the run for
 # [hurd-image-reroll] and see exactly what happened, in order.
 log() {
@@ -124,7 +137,16 @@ gf() {
 # step 1: input sanity
 ###############################################################################
 log "step 1: input sanity"
-for f in "${PRISTINE_IMG}" "${PID1_BIN}" "${SUPERVISOR_TAR}" "${SSH_PUBKEY}"; do
+# under GEOS_BYPASS=1 the script never reads PID1_BIN or SUPERVISOR_TAR
+# (steps 5.1/5.2/5.6 are skipped), so don't fail the sanity check on
+# them.  this lets an operator who has never built GEOS still produce
+# a canonical-Debian rerolled image.
+if [ "${GEOS_BYPASS}" = "1" ]; then
+    SANITY_INPUTS="${PRISTINE_IMG} ${SSH_PUBKEY}"
+else
+    SANITY_INPUTS="${PRISTINE_IMG} ${PID1_BIN} ${SUPERVISOR_TAR} ${SSH_PUBKEY}"
+fi
+for f in ${SANITY_INPUTS}; do
     if [ ! -f "${f}" ]; then
         log "FATAL: input missing: ${f}"
         exit 1
@@ -146,12 +168,27 @@ if ! command -v qemu-img >/dev/null 2>&1; then
     exit 1
 fi
 
-PID1_SIZE="$(stat -c '%s' "${PID1_BIN}")"
-PID1_SHA="$(sha256sum "${PID1_BIN}" | cut -d' ' -f1)"
-TAR_SHA="$(sha256sum "${SUPERVISOR_TAR}" | cut -d' ' -f1)"
-log "pid1 binary: ${PID1_BIN} (${PID1_SIZE} bytes, sha256=${PID1_SHA})"
-log "supervisor tar: ${SUPERVISOR_TAR} (sha256=${TAR_SHA})"
+if [ "${GEOS_BYPASS}" = "1" ]; then
+    log "pid1 binary: skipped (GEOS_BYPASS=1)"
+    log "supervisor tar: skipped (GEOS_BYPASS=1)"
+else
+    PID1_SIZE="$(stat -c '%s' "${PID1_BIN}")"
+    PID1_SHA="$(sha256sum "${PID1_BIN}" | cut -d' ' -f1)"
+    TAR_SHA="$(sha256sum "${SUPERVISOR_TAR}" | cut -d' ' -f1)"
+    log "pid1 binary: ${PID1_BIN} (${PID1_SIZE} bytes, sha256=${PID1_SHA})"
+    log "supervisor tar: ${SUPERVISOR_TAR} (sha256=${TAR_SHA})"
+fi
 log "pristine base: ${PRISTINE_IMG}"
+
+# GEOS_BYPASS rerouting: when bypass is on, the rerolled image is
+# canonical Debian (stock /sbin/init untouched), so we route it to a
+# different OUTPUT_IMG path to avoid clobbering the operator's GEOS
+# image.  the override is applied here, before any logging of the
+# target path, so every subsequent log line reflects the bypass route.
+if [ "${GEOS_BYPASS}" = "1" ]; then
+    OUTPUT_IMG="${BYPASS_OUTPUT_IMG}"
+    log "GEOS_BYPASS=1: stock Debian sysvinit kept; output rerouted to ${OUTPUT_IMG}"
+fi
 log "output target: ${OUTPUT_IMG}"
 
 # FLAVOR gate.  minimal is the historical default and is byte-identical
@@ -165,6 +202,17 @@ case "${FLAVOR}" in
         exit 1
         ;;
 esac
+# GEOS_BYPASS + FLAVOR=apt-image is mutually exclusive: apt-image bakes
+# the v1.x X+audio userland over a working GEOS supervisor (it ssh's
+# in and apt-installs while the emacs PID 1 runs).  with bypass the
+# rerolled image runs canonical sysvinit; the apt-image overlay would
+# be pointless and the smoke markers it depends on never fire.  fail
+# fast so the operator catches the combo before paying for a bake.
+if [ "${GEOS_BYPASS}" = "1" ] && [ "${FLAVOR}" = "apt-image" ]; then
+    log "FATAL: GEOS_BYPASS=1 is incompatible with FLAVOR=apt-image"
+    log "  bypass keeps stock /sbin/init; apt-image needs the GEOS supervisor"
+    exit 1
+fi
 log "flavor: ${FLAVOR}"
 if [ "${FLAVOR}" = "apt-image" ]; then
     log "apt-image output target: ${APT_OUTPUT_IMG}"
@@ -215,13 +263,18 @@ log "step 3: staging dir ${STAGING_DIR}"
 # unpack the supervisor tree. the tarball's root entry must be
 # emacs-init/ (one level), so after unpack we have
 # ${STAGING_DIR}/emacs-init/{core,buffers,services,user,install}/...
-tar xzf "${SUPERVISOR_TAR}" -C "${STAGING_DIR}"
-if [ ! -d "${STAGING_DIR}/emacs-init" ]; then
-    log "FATAL: tarball did not unpack a top-level emacs-init/ dir"
-    exit 1
+# skipped under GEOS_BYPASS=1 (step 5.6 won't upload it either).
+if [ "${GEOS_BYPASS}" = "1" ]; then
+    log "supervisor tree: skipped (GEOS_BYPASS=1)"
+else
+    tar xzf "${SUPERVISOR_TAR}" -C "${STAGING_DIR}"
+    if [ ! -d "${STAGING_DIR}/emacs-init" ]; then
+        log "FATAL: tarball did not unpack a top-level emacs-init/ dir"
+        exit 1
+    fi
+    SUPERVISOR_FILES="$(find "${STAGING_DIR}/emacs-init" -type f | wc -l)"
+    log "unpacked ${SUPERVISOR_FILES} files under ${STAGING_DIR}/emacs-init"
 fi
-SUPERVISOR_FILES="$(find "${STAGING_DIR}/emacs-init" -type f | wc -l)"
-log "unpacked ${SUPERVISOR_FILES} files under ${STAGING_DIR}/emacs-init"
 
 # build init.args. v0.9.18 carries no /usr/lib/geos/pid1-module.so
 # because STATIC=1 pid1 inlines the supervisor primitives the module
@@ -274,6 +327,9 @@ for kt in rsa ecdsa ed25519; do
     log "  generated ${kt} host key: $(ssh-keygen -lf "${kf}.pub" | awk '{print $2}')"
 done
 
+if [ "${GEOS_BYPASS}" = "1" ]; then
+    log "init.args: skipped (GEOS_BYPASS=1)"
+else
 cat > "${STAGING_DIR}/init.args" <<'INIT_ARGS_EOF'
 # /etc/geos/init.args -- v0.9.22 canonical 35-file Hurd boot chain
 # pid1 reads this when the kernel hands us argc==1 (/hurd/startup).
@@ -370,6 +426,7 @@ cat > "${STAGING_DIR}/init.args" <<'INIT_ARGS_EOF'
 /usr/share/geos/emacs-init/core/boot-marker.el
 INIT_ARGS_EOF
 log "init.args staged ($(wc -l < "${STAGING_DIR}/init.args") lines, full v0.9.22 35-file chain)"
+fi
 
 ###############################################################################
 # step 3c: start guestfish --listen daemon, mount once
@@ -465,16 +522,22 @@ log "grub.cfg patched (${GRUB_DELTA}-line unified diff)"
 #   8. upload pre-generated sshd host keys into /etc/ssh/, perms 0600/0644
 log "step 5: gf mutate ${OUTPUT_IMG} via daemon pid=${GUESTFISH_PID}"
 
-# 5.1: backup /sbin/init. the rm -f in step 2 guarantees we're working
-# on a fresh copy of the pristine, where /sbin/init is the stock
-# Debian binary and /sbin/init.debian-stock does NOT exist yet. so
-# the mv is unconditional; no re-run safety branch needed here, because
-# the re-run safety lives at the qcow2-overwrite level (step 2 rm -f).
-gf mv /sbin/init /sbin/init.debian-stock
-
-# 5.2: drop new /sbin/init
-gf upload "${PID1_BIN}" /sbin/init
-gf chmod 0755 /sbin/init
+# 5.1 + 5.2: swap /sbin/init for the GEOS emacs-init PID 1 (skipped
+# under GEOS_BYPASS=1 so the rerolled image keeps stock Debian sysvinit).
+# the rm -f in step 2 guarantees we're working on a fresh copy of the
+# pristine, where /sbin/init is the stock Debian binary and
+# /sbin/init.debian-stock does NOT exist yet. so the mv is unconditional;
+# no re-run safety branch needed here, because the re-run safety lives
+# at the qcow2-overwrite level (step 2 rm -f).
+if [ "${GEOS_BYPASS}" = "1" ]; then
+    log "step 5.1+5.2: GEOS_BYPASS=1, leaving /sbin/init as stock Debian"
+else
+    # 5.1: backup /sbin/init
+    gf mv /sbin/init /sbin/init.debian-stock
+    # 5.2: drop new /sbin/init
+    gf upload "${PID1_BIN}" /sbin/init
+    gf chmod 0755 /sbin/init
+fi
 
 # 5.3: patched grub.cfg in place
 gf upload "${STAGING_DIR}/grub.cfg" /boot/grub/grub.cfg
@@ -489,23 +552,30 @@ gf chmod 0700 /root/.ssh
 gf chown 0 0 /root/.ssh
 gf chown 0 0 /root/.ssh/authorized_keys
 
-# 5.5: init.args
-gf mkdir-p /etc/geos
-gf upload "${STAGING_DIR}/init.args" /etc/geos/init.args
-gf chmod 0644 /etc/geos/init.args
-gf chown 0 0 /etc/geos/init.args
+# 5.5 + 5.6 + 5.7: GEOS-specific overlays (init.args, supervisor tree,
+# early-init.el symlink).  skipped under GEOS_BYPASS=1 because there
+# is no GEOS supervisor in the bypassed image to consume any of them.
+if [ "${GEOS_BYPASS}" = "1" ]; then
+    log "step 5.5+5.6+5.7: GEOS_BYPASS=1, skipping init.args + supervisor tree + early-init.el"
+else
+    # 5.5: init.args
+    gf mkdir-p /etc/geos
+    gf upload "${STAGING_DIR}/init.args" /etc/geos/init.args
+    gf chmod 0644 /etc/geos/init.args
+    gf chown 0 0 /etc/geos/init.args
 
-# 5.6: supervisor tree under /usr/share/geos/emacs-init/. tar-in
-# streams the tarball into the named guest directory. the tarball's
-# root entry is emacs-init/, so we extract into /usr/share/geos/
-# and the result lands at /usr/share/geos/emacs-init/.
-gf mkdir-p /usr/share/geos
-gf tar-in "${SUPERVISOR_TAR}" /usr/share/geos/ compress:gzip
+    # 5.6: supervisor tree under /usr/share/geos/emacs-init/. tar-in
+    # streams the tarball into the named guest directory. the tarball's
+    # root entry is emacs-init/, so we extract into /usr/share/geos/
+    # and the result lands at /usr/share/geos/emacs-init/.
+    gf mkdir-p /usr/share/geos
+    gf tar-in "${SUPERVISOR_TAR}" /usr/share/geos/ compress:gzip
 
-# 5.7: symlink early-init.el into /root/.emacs.d/ so the supervised
-# emacs picks it up BEFORE tty-setup-hook fires. see v0.9.12 slice 6.
-gf mkdir-p /root/.emacs.d
-gf ln-sf /usr/share/geos/emacs-init/early-init.el /root/.emacs.d/early-init.el
+    # 5.7: symlink early-init.el into /root/.emacs.d/ so the supervised
+    # emacs picks it up BEFORE tty-setup-hook fires. see v0.9.12 slice 6.
+    gf mkdir-p /root/.emacs.d
+    gf ln-sf /usr/share/geos/emacs-init/early-init.el /root/.emacs.d/early-init.el
+fi
 
 # 5.8: pre-generated sshd host keys.  mkdir-p /etc/ssh because on a
 # minimal canonical image the dir may exist already (openssh-server is
@@ -543,18 +613,24 @@ VERIFY_TMP="$(mktemp -d /tmp/hurd-image-reroll-verify.XXXXXX)"
 # `ll` and `ls` are diagnostic-only here; their stdout goes to the
 # operator log so a forensic re-roll can be grepped after the fact.
 echo "--- /sbin/init ---";                              gf ll /sbin/init
-echo "--- /sbin/init.debian-stock ---";                 gf ll /sbin/init.debian-stock
-echo "--- /etc/geos/init.args (stat) ---";              gf ll /etc/geos/init.args
+if [ "${GEOS_BYPASS}" != "1" ]; then
+    echo "--- /sbin/init.debian-stock ---";                 gf ll /sbin/init.debian-stock
+    echo "--- /etc/geos/init.args (stat) ---";              gf ll /etc/geos/init.args
+fi
 echo "--- /root/.ssh/authorized_keys (stat) ---";       gf ll /root/.ssh/authorized_keys
-echo "--- /usr/share/geos/emacs-init (top dirs) ---";   gf ls /usr/share/geos/emacs-init
-echo "--- /root/.emacs.d/early-init.el (stat) ---";     gf ll /root/.emacs.d/early-init.el
+if [ "${GEOS_BYPASS}" != "1" ]; then
+    echo "--- /usr/share/geos/emacs-init (top dirs) ---";   gf ls /usr/share/geos/emacs-init
+    echo "--- /root/.emacs.d/early-init.el (stat) ---";     gf ll /root/.emacs.d/early-init.el
+fi
 echo "--- /etc/ssh/ssh_host_*_key* (stat) ---"
 for kt in rsa ecdsa ed25519; do
     gf ll "/etc/ssh/ssh_host_${kt}_key"
     gf ll "/etc/ssh/ssh_host_${kt}_key.pub"
 done
 gf download /boot/grub/grub.cfg                   "${VERIFY_TMP}/grub.cfg"
-gf download /etc/geos/init.args                   "${VERIFY_TMP}/init.args"
+if [ "${GEOS_BYPASS}" != "1" ]; then
+    gf download /etc/geos/init.args                   "${VERIFY_TMP}/init.args"
+fi
 gf download /root/.ssh/authorized_keys            "${VERIFY_TMP}/authorized_keys"
 gf download /etc/ssh/ssh_host_rsa_key.pub         "${VERIFY_TMP}/ssh_host_rsa_key.pub"
 gf download /etc/ssh/ssh_host_ecdsa_key.pub       "${VERIFY_TMP}/ssh_host_ecdsa_key.pub"
@@ -575,8 +651,10 @@ log "verify: ${MB_PATCHED}/${MB_TOTAL} multiboot lines carry console=com0"
 if [ "${MB_PATCHED}" != "${MB_TOTAL}" ]; then
     log "WARNING: some multiboot lines were not patched (re-run from rescue if a recovery boot is needed)"
 fi
-log "verify: init.args first slot:"
-grep -v '^#' "${VERIFY_TMP}/init.args" | grep -v '^$' | head -1 | sed 's/^/    /'
+if [ "${GEOS_BYPASS}" != "1" ]; then
+    log "verify: init.args first slot:"
+    grep -v '^#' "${VERIFY_TMP}/init.args" | grep -v '^$' | head -1 | sed 's/^/    /'
+fi
 log "verify: authorized_keys fingerprint:"
 ssh-keygen -lf "${VERIFY_TMP}/authorized_keys" 2>&1 | sed 's/^/    /'
 log "verify: sshd host key fingerprints (rsa + ecdsa + ed25519):"
@@ -613,6 +691,14 @@ SMOKE_PIDFILE="${SMOKE_PIDFILE:-/tmp/hurd-image-reroll-smoke-qemu.pid}"
 
 if [ "${SMOKE}" = "0" ]; then
     log "step 7: SMOKE=0, skipping boot smoke gate"
+elif [ "${GEOS_BYPASS}" = "1" ]; then
+    # smoke greps for GEOS-supervisor markers ("ready, dropping into
+    # event loop", "starting sshd" from the eval body) that never fire
+    # under stock Debian sysvinit, so the smoke gate would always time
+    # out under bypass.  the operator can boot the rerolled image
+    # manually and verify with `ssh root@localhost -p 2266` once getty
+    # comes up.
+    log "step 7: GEOS_BYPASS=1, skipping smoke (markers are GEOS-specific)"
 else
     log "step 7: boot smoke gate (timeout ${SMOKE_TIMEOUT_S}s, port ${SMOKE_PORT})"
     if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then

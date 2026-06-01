@@ -183,6 +183,33 @@ Rollback path: boot into the GRUB rescue / maintenance shell, then
 `mv /sbin/init.debian-stock /sbin/init`.  Reboot once more and you
 are back on stock Debian sysvinit.
 
+### bash console option (GEOS_BYPASS, build-time)
+
+Some operators want the canonical Debian GNU/Hurd 0.9 userland
+(bash + sysvinit + getty) instead of the Emacs PID 1, but still
+want the bake-time conveniences the reroll script provides (serial
+console patch on every GRUB multiboot line, root authorized_keys
+in place, pre-generated sshd host keys).  Set `GEOS_BYPASS=1` on
+the reroll invocation:
+
+```
+GEOS_BYPASS=1 ./iso-build/hurd-image-reroll.sh
+```
+
+Under bypass the script keeps `/sbin/init` as the stock Debian
+binary (no `/sbin/init.debian-stock` backup is created because no
+swap happens), and skips the `init.args` + supervisor tree +
+`early-init.el` overlays.  The rerolled image lands at
+`BYPASS_OUTPUT_IMG` (default
+`/home/overdrive/hurd-vm/debian-hurd-amd64-canonical.img`) so the
+operator's GEOS image is not clobbered.  The boot smoke gate is
+also skipped under bypass because its PASS markers are
+GEOS-specific; boot manually and ssh in to verify.
+
+`GEOS_BYPASS=1 FLAVOR=apt-image` is rejected by the script: the
+apt-image overlay needs the GEOS supervisor running during the
+apt pass, so the combination is not coherent.
+
 ### legacy manual install (pre-v0.9.12)
 
 The hand-rolled version of the same steps, kept here because it
