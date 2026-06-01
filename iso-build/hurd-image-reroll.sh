@@ -813,6 +813,26 @@ if [ "${FLAVOR}" = "apt-image" ]; then
     fi
     log "ssh up; running apt-get update + install"
 
+    # pre-apt: detach the canonical /hurd/tmpfs /var to expose the
+    # underlying ext2fs /var/lib/dpkg.  canonical Debian GNU/Hurd 0.9
+    # ships /var as a 256M tmpfs that starts empty on every mount with
+    # no seed mechanism, so /var/lib/dpkg does not exist until detached.
+    # apt-get install bails with a 1073741826 (err_local|err_sub_unix|
+    # ENOENT) on /var/lib/dpkg/lock-frontend without this step.  the
+    # detach has to happen in the bake's own ssh session rather than at
+    # boot in hurd-essentials.el because boot-time detach loses every
+    # mkdir state.el ran against the tmpfs view of /var/emacs/*.  known
+    # risk: heavy writes onto the underlying ext2fs may trip ext2fs's
+    # pager.c:455 file_pager_write_pages assertion (filed upstream as
+    # docs/upstream/emails/08); if that fires, the bake fails fast and
+    # the v1.x apt-image flavor stays on the verify-path-only detach.
+    PREAPT_LOG="${PREAPT_LOG:-/tmp/hurd-image-reroll-preapt-var-detach.log}"
+    log "step 8a-pre: settrans -fg /var to expose underlying ext2fs (log: ${PREAPT_LOG})"
+    ssh ${SSH_OPTS} root@127.0.0.1 'showtrans /var; settrans -fg /var 2>&1; echo settrans=$?; ls -la /var/lib/dpkg 2>&1 | head -5' \
+        > "${PREAPT_LOG}" 2>&1 || true
+    log "  pre-apt detach log tail:"
+    tail -10 "${PREAPT_LOG}" 2>/dev/null | sed 's/^/    /' || true
+
     # apt-get update.  if this fails or returns "no candidate" for the
     # EXWM stack (canonical Debian Hurd 0.9 may not have debian-ports
     # sid in sources.list), add debian-ports key + sid main and retry.
