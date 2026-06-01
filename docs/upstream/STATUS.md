@@ -116,14 +116,27 @@ operator notes outside the repo.
   early stage, CI failed on the latest commit), sent a
   follow-up with two narrow technical questions on the IPC
   shape and the CI state, and offered a small FAQ cross-link
-  patch once the branch reaches a testable state.  awaiting
-  answer.
+  patch once the branch reaches a testable state.
+
+  what came back (2026-06-01): substantive reply from Damien
+  on both questions.  IPC shape will be standard JACK: jack
+  clients connect as-is via libjack, jackd in userspace, with
+  a shm path still to be resolved.  CI state is "very
+  incomplete at this point"; design direction is to rewrite
+  the core to drop ALSA bloat and use a delay-locked loop
+  calibrated by audio IRQs to track HW pointers at sub-sample
+  accuracy, scheduling transfers on a hi-res timer for correct
+  latency reporting (credits Paul Davis for the DLL idea).
+  The FAQ cross-link offer was not addressed.
 
   GEOS impact: none today.  `user/userland/audio.el` hurd arm
-  returns nil and renders "no cards visible" cleanly.  when
-  the PoC reaches a usable state the unlocked future work is a
-  libjack-shaped backend in the hurd arm.  audio remains
-  deferred-upstream per HURD_PORT.md row 285.
+  returns nil and renders "no cards visible" cleanly.  the
+  reply concretizes the future-work shape: when the PoC reaches
+  a usable state, the unlocked work in the hurd arm is a
+  libjack client (because the IPC is unmodified libjack), not a
+  custom RPC.  the FAQ patch stays parked until there is
+  something publishable to link to.  audio remains deferred-
+  upstream per HURD_PORT.md row 285.
 
 ### 05 pulseaudio in live image
 
