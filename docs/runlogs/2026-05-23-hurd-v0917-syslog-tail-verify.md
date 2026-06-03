@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 ## 2026-05-23: v0.9.17 syslog tail second-arm live-verify on Debian Hurd 0.9
 
 this verifies the v0.9.17 ship that replaces the reverted v0.9.15 slice

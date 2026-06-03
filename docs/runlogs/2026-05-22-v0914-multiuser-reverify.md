@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-22: v0.9.14 slice 1 multi-user peer-cred re-verify on Debian Hurd 0.9
 
 Follow-on to `docs/runlogs/2026-05-18-hurd-end-to-end-vm.md` (the v0.8

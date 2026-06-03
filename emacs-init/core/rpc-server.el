@@ -1,5 +1,6 @@
 ;;; rpc-server.el --- supervisor side of the user/supervisor RPC -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.6 item 3.  the user-emacs has no `pid1-*' access by design;
 ;; privileged operations (reboot, poweroff, package install, passwd-

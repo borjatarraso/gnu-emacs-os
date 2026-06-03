@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 ## 2026-05-23: v0.9.18 canonical Debian Hurd 0.9 image re-roll with pid1 baked in
 
 this is the receipt for the v0.9.17 follow-on #1 flagged at

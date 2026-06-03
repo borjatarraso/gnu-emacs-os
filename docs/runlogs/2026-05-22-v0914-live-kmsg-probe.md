@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-22: v0.9.14 slice 2, live kmsg flow on Hurd end-to-end
 
 this slice closes the open follow-on #1 from

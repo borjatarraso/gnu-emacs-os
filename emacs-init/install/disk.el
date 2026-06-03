@@ -1,5 +1,6 @@
 ;;; disk.el --- block-device enumeration for the *install* wizard -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; pure-reader half of the v0.4 install wizard.  walks /sys/block to
 ;; produce a list of candidate target disks, augmented with the

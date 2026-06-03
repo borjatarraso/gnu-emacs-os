@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-23: v0.9.16 cold-boot verify (slice A reverted, slice B PASS, STATIC=1 PATH A Makefile)
 
 three things landed in the v0.9.16 cycle and they share a single

@@ -1,5 +1,6 @@
 ;;; exwm-config.el --- phase 5a, bring up exwm and one x11 client -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; phase 5a goal: emacs comes up as an x client, exwm takes over the
 ;; root window, i can M-x and start-process xterm and see a window.

@@ -1,5 +1,6 @@
 ;;; user-init.el --- per-user emacs userland for GEOS -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; runs in the per-user emacs, NOT the supervisor.  this is the v0.6
 ;; entry point for user-side userland: the per-user emacs loads its

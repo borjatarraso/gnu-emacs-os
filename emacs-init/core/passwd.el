@@ -1,5 +1,6 @@
 ;;; passwd.el --- /etc/passwd, /etc/shadow, /etc/group reader+writer -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; the multi-user story sits on three colon-separated text files that
 ;; have not changed shape since the 1970s.  this file owns reading and

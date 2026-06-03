@@ -1,5 +1,6 @@
 ;;; dhcp.el --- on-demand DHCP via dhcpcd, sentinel-driven -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.4 item 5 finisher.  the *network* buffer's `s' key has shipped a
 ;; static-IPv4 path that goes straight into pid1-set-address +

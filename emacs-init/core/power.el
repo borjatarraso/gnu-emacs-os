@@ -1,5 +1,6 @@
 ;;; -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 ;; power.el, M-x geos-poweroff and M-x geos-reboot.
 ;;
 ;; the eshell route ("sudo poweroff") does NOT work in GEOS:

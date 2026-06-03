@@ -1,5 +1,6 @@
 ;;; fonts.el --- declarative font config with fallback chain -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; phase 5c. font wiring for the EXWM session. three concerns, in order:
 ;;   1. default monospace face: use a family the system profile actually

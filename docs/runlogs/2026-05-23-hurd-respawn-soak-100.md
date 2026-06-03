@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-23: hurd emacs respawn soak, 100 cycles, PASS
 
 this is the v0.9.15 slice D receipt. the load-bearing claim is that the

@@ -1,5 +1,6 @@
 ;;; rpc-client.el --- user side of the user/supervisor RPC -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.6 item 3, rewired in v0.8 step 5.  the user-emacs uses this
 ;; file to ask the supervisor to do privileged things on its behalf.

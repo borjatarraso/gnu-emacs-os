@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # v0.9.2 procnet scoping verify on Debian GNU/Hurd 0.9
 
 Date: 2026-05-18

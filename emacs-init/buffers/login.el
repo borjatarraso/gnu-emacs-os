@@ -1,5 +1,6 @@
 ;;; login.el --- *login* state machine, the gate to a per-user emacs -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; the *login* buffer is the thing a human sees first.  it asks for a
 ;; username, then a password, then verifies against /etc/shadow, then

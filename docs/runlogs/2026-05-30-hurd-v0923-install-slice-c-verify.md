@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-30 v0.9.23 install wizard slice C live-verify on Hurd
 
 Continuation of docs/runlogs/2026-05-30-hurd-v0922-slice-b-ide-e1000.md.

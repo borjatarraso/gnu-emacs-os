@@ -1,5 +1,6 @@
 ;;; copy.el --- copy /gnu/store + system closure into install target -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.4 MVP install wizard, the bulk-data step.  once the target
 ;; partition is mkfs'd and mounted at TARGET-MOUNT, this file copies

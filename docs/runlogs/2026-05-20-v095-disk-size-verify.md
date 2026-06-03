@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 <!-- 2026-05-20: v0.9.5 disk_size_bytes end-to-end VM-verify on Debian Hurd 0.9 -->
 
 # 2026-05-20: v0.9.5 disk_size_bytes end-to-end VM-verify on Debian Hurd 0.9

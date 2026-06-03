@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 <!-- 2026-05-20: pfinet per-iface counter source probe, H1 confirmed -->
 
 # 2026-05-20: pfinet per-interface counter probe falsifies H2 and H3, H1 confirmed

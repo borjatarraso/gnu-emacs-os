@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-24 v0.9.19 canonical Hurd image re-roll, full 35-file init.args boots, trampoline wedge closed
 
 Continuation of docs/runlogs/2026-05-23-hurd-v0918-image-reroll.md

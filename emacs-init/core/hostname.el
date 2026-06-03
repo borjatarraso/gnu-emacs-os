@@ -1,5 +1,6 @@
 ;;; hostname.el --- apply /etc/hostname via pid1-set-hostname -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; Guix bakes operating-system host-name into /etc/hostname via
 ;; etc-service-type, regardless of whether the hostname Shepherd

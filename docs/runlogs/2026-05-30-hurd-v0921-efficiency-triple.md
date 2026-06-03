@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-30 v0.9.21 efficiency triple, slice B re-deferred on wd0 race
 
 Continuation of docs/runlogs/2026-05-30-hurd-v0920-slice-a.md. v0.9.21

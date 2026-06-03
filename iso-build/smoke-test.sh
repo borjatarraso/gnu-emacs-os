@@ -1,5 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 # Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 #
 # smoke-test.sh, headless boot of a GEOS qcow2 with serial-log marker

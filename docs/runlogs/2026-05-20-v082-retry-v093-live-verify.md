@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 <!-- 2026-05-20: v0.8.2 retry-loop drain re-verify + v0.9.3 disks/install live-verify -->
 
 # 2026-05-20: v0.8.2 retry-loop drain re-verify + v0.9.3 disks/install live-verify

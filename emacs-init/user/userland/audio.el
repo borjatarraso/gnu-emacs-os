@@ -1,5 +1,6 @@
 ;;; audio.el --- ALSA volume + playback wrappers -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; ALSA is the userland audio API GEOS uses on linux.  no PulseAudio,
 ;; no PipeWire on that arm: both want a session daemon and we are

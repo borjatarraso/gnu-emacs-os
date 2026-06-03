@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 <!-- upstream deferral, drafted 2026-05-30, covers HURD_PORT.md lines 90-112 -->
 
 # hurd-amd64 ships no evdev / libinput driver; native Xorg blocked on keyboard init

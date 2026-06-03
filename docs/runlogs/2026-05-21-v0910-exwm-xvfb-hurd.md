@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # v0.9.10 EXWM-on-Xvfb-on-Hurd live verify
 
 this receipt closes the EXWM-attaches-to-Xvfb gap that v0.9.8 and v0.9.9

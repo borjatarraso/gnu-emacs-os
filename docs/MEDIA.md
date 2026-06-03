@@ -1,0 +1,53 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
+# Media inventory and provenance
+
+Every binary asset under version control is listed here with its
+origin and license. The repository carries no third-party media; all
+images are original work by the maintainer and inherit the
+project-wide license unless noted otherwise.
+
+## Logos
+
+| File                    | Description                                          | Origin                                                                 | License            |
+| ---                     | ---                                                  | ---                                                                    | ---                |
+| `docs/img/logo.png`     | Primary project logo, "editor on silicon".           | Original work by Borja Tarraso, 2026. Created from scratch in GIMP.    | GPL-3.0-or-later   |
+| `docs/img/logo-256.png` | 256x256 variant of `logo.png` for the README header. | Scaled-down derivative of `logo.png` produced by `convert -resize`.    | GPL-3.0-or-later   |
+| `docs/img/logo-128.png` | 128x128 variant for embedded contexts and favicons.  | Scaled-down derivative of `logo.png` produced by `convert -resize`.    | GPL-3.0-or-later   |
+
+The logos contain no third-party trademarks, fonts, or stock-image
+elements. The wordmark "GEOS" and the visual motif are original.
+The chip silhouette is geometric, drawn from scratch; it depicts no
+real product.
+
+## Screenshots
+
+The runlogs directory carries serial-console screenshots captured
+from QEMU sessions of GEOS itself on canonical Debian GNU/Hurd 0.9.
+Every pixel originates from the GEOS image under test or from
+GRUB/Hurd boot output displayed by that image. There is no
+third-party UI in any frame.
+
+| File                                                              | Description                                                                                                 | Origin                                                                | License            |
+| ---                                                               | ---                                                                                                         | ---                                                                   | ---                |
+| `docs/runlogs/2026-05-18-hurd-pid1-boot-screen.png`               | Serial-console capture of the v0.8 Hurd image booting `emacs-init` as PID 1.                                | Captured by Borja Tarraso from QEMU running an image he built.        | GPL-3.0-or-later   |
+| `docs/runlogs/2026-05-18-hurd-pid1-emacs-spawn-screen.png`        | Serial-console capture of the supervised Emacs spawn message on the same image.                             | Captured by Borja Tarraso from QEMU running an image he built.        | GPL-3.0-or-later   |
+| `docs/runlogs/2026-05-18-hurd-pid1-reboot-rpc-screen.png`         | Serial-console capture of the `host_reboot` Mach RPC path taking down the system.                           | Captured by Borja Tarraso from QEMU running an image he built.        | GPL-3.0-or-later   |
+| `docs/runlogs/2026-05-18-hurd-pid1-reboot-aftertype-screen.png`   | Serial-console capture of the post-reboot console output during the same verification cycle.                | Captured by Borja Tarraso from QEMU running an image he built.        | GPL-3.0-or-later   |
+
+The screenshots include text emitted by gnumach and the Hurd
+servers under the FSF's copyright; that text is reproduced under
+fair-use / de-minimis principles for verification documentation and
+does not constitute redistribution of any covered work.
+
+## Policy for new media
+
+Any new binary asset must be added to the table above in the same
+commit that introduces the file. If a contribution carries third-
+party media, the upstream license must be listed and a copy of the
+license text must be added under `docs/licenses/<asset>/` before the
+asset can be merged.
+
+The pre-publication check is: every entry in `git ls-files | grep
+-Ei '\.(png|jpg|jpeg|gif|svg|webp)$'` must appear in a row above.

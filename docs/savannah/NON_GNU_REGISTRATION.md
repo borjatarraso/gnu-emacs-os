@@ -1,5 +1,6 @@
 <!--
 SPDX-License-Identifier: GPL-3.0-or-later
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 Paste-ready text for the Savannah non-GNU project registration
 form at https://savannah.nongnu.org/register/.  Each section

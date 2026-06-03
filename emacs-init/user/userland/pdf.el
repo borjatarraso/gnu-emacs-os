@@ -1,5 +1,6 @@
 ;;; pdf.el --- pdf-tools, render PDFs in a buffer -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; pdf-tools renders PDF pages by talking to a poppler-based helper
 ;; binary, `epdfinfo'. Guix builds that helper for us as part of the

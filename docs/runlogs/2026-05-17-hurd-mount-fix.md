@@ -1,6 +1,7 @@
 # 2026-05-17 hurd mount fix verified end-to-end
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
 
 ## Milestone
 

@@ -1,5 +1,6 @@
 ;;; journal-client.el --- user-side *journal* via supervisor RPC -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.7 item 4.3.  the supervisor's *Messages* buffer is the audit
 ;; trail: every supervised-service event, every RPC reboot/poweroff

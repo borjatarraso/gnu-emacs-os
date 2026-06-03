@@ -1,5 +1,6 @@
 ;;; audio.el --- *audio* buffer, ALSA cards + volume control -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; what does it show: the ALSA cards from /proc/asound/cards plus the
 ;; currently selected default card and control.  no live volume readback

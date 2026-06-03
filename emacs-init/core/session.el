@@ -1,5 +1,6 @@
 ;;; session.el --- per-user emacs lifecycle, supervised under PID 1 -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.5 is where the "every booted emacs is one emacs" model finally
 ;; ends.  PID-1 emacs stays root and stays the supervisor.  every

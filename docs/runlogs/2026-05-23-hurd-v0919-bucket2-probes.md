@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-23 hurd v0.9.19 bucket-2 probes: glibc .note.GNU-stack + emacsclient SO_RCVTIMEO
 
 Two diagnostic probes ran on the v0.9.16 work snapshot (QEMU pid

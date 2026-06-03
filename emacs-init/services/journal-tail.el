@@ -1,5 +1,6 @@
 ;;; journal-tail.el --- supervised /dev/kmsg follower service -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; first real defservice.  pulls the kmsg-follower dd subprocess out
 ;; of buffers/journal.el's lazy `journal' entry point and hands it to

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-20: storeio device_get_status probe falsifies the cookbook, file_get_storage_info wins
 
 this slice is the read-only probe i ran on the canonical Debian

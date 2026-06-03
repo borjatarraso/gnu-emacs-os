@@ -2,6 +2,7 @@
 # apt-image-verify.sh -- live-verify the v1.x apt-image flavor on Hurd.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 # Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 #
 # the canonical apt-image flavor produced by `hurd-image-reroll.sh

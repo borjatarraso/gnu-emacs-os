@@ -1,4 +1,5 @@
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 ;;; Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 ;; exceptions.scm, documented deviations from the GNU/Emacs Operating
 ;; System (GEOS) hard rules, kept in one file so I can grep for

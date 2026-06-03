@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 <!-- 2026-05-21: kmsg source probe on Debian Hurd 0.9, H2 + H3 confirm, no port_caps slot -->
 
 # 2026-05-21: kmsg probe lands on /dev/klog + /var/log/kern.log, no port_caps slot needed

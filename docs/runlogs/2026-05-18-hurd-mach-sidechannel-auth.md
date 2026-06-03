@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-18: auth dance is reachable on Debian GNU/Hurd 0.9
 
 Follow-up to `2026-05-18-hurd-pflocal-cmsg-fail.md`.  That run

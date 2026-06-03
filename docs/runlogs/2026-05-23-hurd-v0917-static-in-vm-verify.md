@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-23: v0.9.17 in-VM STATIC=1 link verify on Debian GNU/Hurd 0.9
 
 this is the live-verify slice that closes the v0.9.16 follow-on #2:

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # task #171 verification: emacs respawn-on-crash on Hurd
 
 this receipt closes the v0.9.12 follow-on item #171 (emacs

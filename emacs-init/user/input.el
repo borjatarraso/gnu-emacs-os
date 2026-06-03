@@ -1,5 +1,6 @@
 ;;; input.el --- input methods for the EXWM session -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; phase 5c shipped quail-only.  v0.7 item 2 grows a chooser:
 ;;

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-31 v1.x apt-image flavor first live-verify on Hurd
 
 First in-VM exercise of the apt-image flavor produced by

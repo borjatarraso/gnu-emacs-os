@@ -1,5 +1,6 @@
 ;;; v0.6 implementation plan
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
 <!-- voice: first person singular, lowercase, no em-dashes. -->
 
 # GEOS v0.6 plan

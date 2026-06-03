@@ -1,5 +1,6 @@
 ;;; supervise.el --- the elisp service supervisor -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; shepherd is gone.  long-running things in the userland used to keep
 ;; their own private process handles, their own restart policy (or none),

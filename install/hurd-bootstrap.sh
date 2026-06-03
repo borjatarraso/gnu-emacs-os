@@ -1,6 +1,7 @@
 #!/bin/sh
 # hurd-bootstrap.sh -- one-shot GEOS install on Debian GNU/Hurd 0.9
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 # Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 #
 # WHY this script exists: on Hurd, /hurd/startup execs /sbin/init with

@@ -1,5 +1,6 @@
 ;;; state.el --- persistent state under /var/emacs/ -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; Every concept buffer (journal, packages, network, ...) used to
 ;; re-derive its state from /proc on every refresh.  no scratchpad meant

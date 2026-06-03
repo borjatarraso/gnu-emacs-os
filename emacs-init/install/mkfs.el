@@ -1,5 +1,6 @@
 ;;; mkfs.el --- format partitions for the *install* wizard -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.4 MVP install wizard: format an already-partitioned target.
 ;; from-scratch partitioning (the parted dance, BLKRRPART re-read,

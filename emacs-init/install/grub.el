@@ -1,5 +1,6 @@
 ;;; grub.el --- install GRUB on the target disk for the *install* wizard -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.4 MVP install wizard, the last technical step before reboot.
 ;; assumes the target is mounted at TARGET-MOUNT and the system

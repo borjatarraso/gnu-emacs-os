@@ -1,5 +1,6 @@
 ;;; uname.el --- GEOS-aware uname for eshell -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; the kernel's uname(2) syscall returns "Linux" for sysname because
 ;; that string is hard-coded into the kernel at compile time

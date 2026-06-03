@@ -1,5 +1,6 @@
 ;;; early-init.el --- first thing emacs reads when booting as PID 1 -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 ;;; Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 ;;; Project: GNU/Emacs Operating System (GEOS)
 

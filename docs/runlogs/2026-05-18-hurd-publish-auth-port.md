@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-18: hurd_publish_auth_port slice 2 verification
 
 Follow-on to `2026-05-18-hurd-mach-sidechannel-auth.md`.  Slice 1

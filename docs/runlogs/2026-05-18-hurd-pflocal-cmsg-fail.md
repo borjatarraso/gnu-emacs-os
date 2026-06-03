@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-18: pflocal SCM_RIGHTS will not carry bare Mach ports
 
 The v0.8 multi-user-on-Hurd design (`docs/v08-hurd-peer-cred-design.md`)

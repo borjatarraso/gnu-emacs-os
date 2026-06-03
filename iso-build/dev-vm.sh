@@ -1,5 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 # Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 #
 # dev-vm.sh, build a qcow2 dev image of GEOS and boot it under qemu.

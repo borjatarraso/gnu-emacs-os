@@ -1,5 +1,6 @@
 <!--
 SPDX-License-Identifier: GPL-3.0-or-later
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 Paste-ready submission body for the GNU project evaluation
 process described at https://www.gnu.org/help/evaluation.html.

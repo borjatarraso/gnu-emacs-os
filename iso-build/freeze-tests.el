@@ -1,5 +1,6 @@
 ;;; freeze-tests.el --- abuse suite for the GEOS panic buffer -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; this file is the runnable form of the /freeze-test skill.  load it
 ;; from inside a booted GEOS VM (M-x load-file, point at this path or

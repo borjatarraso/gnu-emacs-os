@@ -1,5 +1,6 @@
 ;;; hurd-essentials.el --- essential Hurd daemons under supervise.el -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 ;;; Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; two daemons GEOS cannot afford to lose on a Hurd VM (sshd, syslogd),

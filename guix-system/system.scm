@@ -1,4 +1,5 @@
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 ;;; Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 ;; system.scm, the operating-system record for GNU/Emacs Operating
 ;; System (GEOS).

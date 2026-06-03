@@ -1,5 +1,6 @@
 ;;; boot-marker.el --- write boot sentinels to /dev/console -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; smoke-test gate.  /iso-build/smoke-test.sh boots the qcow2 with the
 ;; serial console wired to a tmpfile and greps it for sentinel

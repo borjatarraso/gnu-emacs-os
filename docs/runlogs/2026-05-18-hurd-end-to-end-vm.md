@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-18: v0.8 design-2.2 slice 5 end-to-end PASS on Debian Hurd VM
 
 Follow-on to `2026-05-18-hurd-end-to-end-multi-user.md`. That receipt

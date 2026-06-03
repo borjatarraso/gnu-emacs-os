@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 <!-- upstream deferral, drafted 2026-05-30, covers HURD_PORT.md row 280 -->
 
 # Debian GNU/Hurd 0.9 ships no native audio translator

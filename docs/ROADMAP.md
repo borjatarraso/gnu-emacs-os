@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # GEOS roadmap
 
 GNU/Emacs Operating System (GEOS) roadmap. What I want to fix and in

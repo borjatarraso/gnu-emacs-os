@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 #
 # hurd-smoke.yml, the Hurd boot smoke gate.  promised in
 # docs/HURD_PORT.md (the "v0.8 follow-up" line in the CI-shape

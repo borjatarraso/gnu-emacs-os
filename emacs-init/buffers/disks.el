@@ -1,5 +1,6 @@
 ;;; disks.el --- *disks* buffer, the live UI for lsblk + df + mount -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; what does it show: two columnar sections in one read-only buffer.
 ;; first section is the list of block devices straight out of

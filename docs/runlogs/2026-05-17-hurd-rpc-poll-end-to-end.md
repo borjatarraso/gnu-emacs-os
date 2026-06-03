@@ -1,6 +1,7 @@
 # 2026-05-17 hurd supervisor RPC end-to-end verified
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
 
 ## Milestone
 

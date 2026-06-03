@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # v0.8 design: Hurd peer-credential lookup over the supervisor RPC
 
 Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>

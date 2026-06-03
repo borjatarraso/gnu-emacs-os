@@ -1,5 +1,6 @@
 ;;; use-package-shim.el --- bootstrap use-package and the :comment keyword -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; project rule: every package goes through use-package with a
 ;; one-line :comment justification. use-package itself ships

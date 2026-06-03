@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # v0.4 item 11: Hurd kernel variant, spike report
 
 Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>

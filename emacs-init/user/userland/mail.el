@@ -1,5 +1,6 @@
 ;;; mail.el --- notmuch, mail as a tag query -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; notmuch is two pieces: a C indexer (system package `notmuch') and
 ;; an Emacs UI (system package `emacs-notmuch'). the indexer talks to

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-23: hurd v0.9.15 slices A and B live-verify, DEFERRED
 
 slice A (`hurd-essentials.el` syslog kern.* override at hurd/9a39f49 and

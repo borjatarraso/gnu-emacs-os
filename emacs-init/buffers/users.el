@@ -1,5 +1,6 @@
 ;;; users.el --- *users* buffer, the live UI for /etc/passwd -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; what does it show: every account in /etc/passwd plus a hint as to
 ;; whether a hashed password lives in /etc/shadow.  same columnar

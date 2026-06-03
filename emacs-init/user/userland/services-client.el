@@ -1,5 +1,6 @@
 ;;; services-client.el --- user-side *services* via supervisor RPC -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.7 item 4.2.  the supervisor still owns the supervised-service
 ;; registry (everything in core/supervise.el).  v0.6 item 3 shipped

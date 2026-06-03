@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 # hurd-fast-iterate.sh -- iterate on the Hurd image without re-rolling.
 #
 # the canonical hurd-image-reroll.sh cp's a 4 GB raw image, fires

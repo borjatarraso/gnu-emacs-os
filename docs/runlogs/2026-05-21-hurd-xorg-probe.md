@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 <!-- 2026-05-21: v0.9.8 Xorg + spawn-surface probe on Debian Hurd 0.9 -->
 
 # 2026-05-21: Xorg probe pins Xvfb-only path and corrects the prctl analogue

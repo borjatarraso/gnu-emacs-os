@@ -1,5 +1,6 @@
 ;;; packages.el --- *packages* buffer, the live UI for the system profile manifest -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; what does it show: the set of packages installed in the current
 ;; system profile, parsed from /run/current-system/profile/manifest.

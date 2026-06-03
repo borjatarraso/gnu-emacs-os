@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 <!-- 2026-05-21: audio translator surface probe on Debian Hurd 0.9, all native hypotheses falsified, no port_hurd.c slot -->
 
 # 2026-05-21: audio probe finds no native translator surface, closes deferred-upstream

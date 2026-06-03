@@ -4,6 +4,7 @@
 # baked by iso-build/hurd-image-reroll.sh.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 # Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 #
 # WHY this exists: v0.9.24 shipped a 35-min / 1383-eval soak that

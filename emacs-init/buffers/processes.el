@@ -1,5 +1,6 @@
 ;;; processes.el --- *processes* buffer, the live UI for top / htop -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; what does it show: the current set of running processes, walked
 ;; directly out of /proc. one row per pid with pid, user, state, rss

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # v0.9.13 journal-kmsg on Debian GNU/Hurd 0.9
 
 this receipt closes the v0.9.13 slice arc that takes the

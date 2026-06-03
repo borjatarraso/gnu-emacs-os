@@ -1,5 +1,6 @@
 ;;; x-display.el --- supervisor side of the EXWM display-release dance -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.7 item 1 spike artifact.
 ;;

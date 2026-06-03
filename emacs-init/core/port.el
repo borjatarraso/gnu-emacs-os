@@ -1,5 +1,6 @@
 ;;; port.el --- kernel-portability seam for the elisp data layer -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; companion to pid1/port_layer.h on the C side.  the pid1 port layer
 ;; abstracts syscalls (mount, reboot, ioctl-via-pfinet, ...) so the

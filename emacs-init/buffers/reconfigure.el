@@ -1,5 +1,6 @@
 ;;; reconfigure.el --- *reconfigure* buffer, the live UI for guix system reconfigure -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; what does it show: three short sections in one read-only buffer.
 ;; first is the active-system pointer (resolved store path of

@@ -1,5 +1,6 @@
 ;;; network.el --- interface bring-up and /proc network state -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; HARD RULE: any failure-path error in this file goes through
 ;; `panic-handle'. no bare `error' for "i could not do my job".

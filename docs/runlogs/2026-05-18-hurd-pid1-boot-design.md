@@ -1,6 +1,7 @@
 # 2026-05-18 hurd boot-as-PID-1 design gap
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
 
 ## Milestone
 

@@ -1,5 +1,6 @@
 ;;; install.el --- *install* wizard buffer for v0.4 MVP -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; v0.4 item 3.  the bare-metal install wizard.  this is the
 ;; orchestrator buffer that glues the install/ tree together:

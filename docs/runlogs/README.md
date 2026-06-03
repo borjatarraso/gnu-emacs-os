@@ -1,6 +1,7 @@
 # runlogs
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
 <!-- voice: first person singular, lowercase, no em-dashes. -->
 
 Verification logs from real hardware or real-kernel VM runs.  one

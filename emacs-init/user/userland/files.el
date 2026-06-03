@@ -1,5 +1,6 @@
 ;;; files.el --- dired wiring for the file manager role -*- lexical-binding: t -*-
 ;;; SPDX-License-Identifier: GPL-3.0-or-later
+;;; Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ;; the project rule says "every user-facing system concept is a buffer".
 ;; the file manager is dired. nothing more, nothing less. there is no

@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # v0.9.11 GEOS end-to-end on Debian GNU/Hurd 0.9 VM-verify
 
 this receipt covers the v0.9.11 slice that wires GEOS through to a

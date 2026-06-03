@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-24 v0.9.19 bucket closeout: pulseaudio Y, install slice C, glibc SIGSEGV, trampoline root cause
 
 Four probes ran against snapshots of the canonical v0.9.18 Hurd image

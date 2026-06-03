@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 <!-- 2026-05-23: STATIC=1 link investigation for pid1 on the Hurd branch -->
 
 # 2026-05-23: STATIC=1 link investigation for pid1 on the Hurd branch

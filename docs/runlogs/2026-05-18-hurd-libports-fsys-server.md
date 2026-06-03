@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
+
 # 2026-05-18: hurd slice 3 libports + fsys server verification
 
 Follow-on to `2026-05-18-hurd-publish-auth-port.md` (slice 2 receipt).
