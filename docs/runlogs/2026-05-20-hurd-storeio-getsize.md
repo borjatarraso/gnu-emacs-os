@@ -1,12 +1,4 @@
 <!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
-<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
-<!-- -->
-<!-- Permission is granted to copy, distribute and/or modify this -->
-<!-- document under the terms of the GNU Free Documentation License, -->
-<!-- Version 1.3 or any later version published by the Free Software -->
-<!-- Foundation; with no Invariant Sections, no Front-Cover Texts, and -->
-<!-- no Back-Cover Texts.  A copy of the license is included in the -->
-<!-- file COPYING.DOC at the top of this distribution. -->
 
 # 2026-05-20: storeio device_get_status probe falsifies the cookbook, file_get_storage_info wins
 
@@ -256,3 +248,19 @@ VM state on exit:
 3. host port 2222 free.
 4. canonical `/home/overdrive/hurd-vm/work.img` mtime preserved at
    2026-05-18 13:34:31 +0300.
+
+## license
+
+This document is licensed under the GNU Free Documentation License,
+Version 1.3 or any later version published by the Free Software
+Foundation; with no Invariant Sections, no Front-Cover Texts, and no
+Back-Cover Texts.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the file `COPYING.DOC` at the top
+of this distribution.

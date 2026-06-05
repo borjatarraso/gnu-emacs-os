@@ -1,12 +1,4 @@
 <!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
-<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
-<!-- -->
-<!-- Permission is granted to copy, distribute and/or modify this -->
-<!-- document under the terms of the GNU Free Documentation License, -->
-<!-- Version 1.3 or any later version published by the Free Software -->
-<!-- Foundation; with no Invariant Sections, no Front-Cover Texts, and -->
-<!-- no Back-Cover Texts.  A copy of the license is included in the -->
-<!-- file COPYING.DOC at the top of this distribution. -->
 
 # 2026-05-18: v0.8 design-2.2 slice 5 end-to-end PASS on Debian Hurd VM
 
@@ -142,3 +134,19 @@ goes silently wedged the lookup is one grep.
   - `docs/HURD_PORT.md` matrix rows for `port->get_peer_cred` and
     `port->client_auth_handshake` keep their YES; this run confirms
     them on a live VM.
+
+## license
+
+This document is licensed under the GNU Free Documentation License,
+Version 1.3 or any later version published by the Free Software
+Foundation; with no Invariant Sections, no Front-Cover Texts, and no
+Back-Cover Texts.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the file `COPYING.DOC` at the top
+of this distribution.

@@ -1,12 +1,4 @@
 <!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
-<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
-<!-- -->
-<!-- Permission is granted to copy, distribute and/or modify this -->
-<!-- document under the terms of the GNU Free Documentation License, -->
-<!-- Version 1.3 or any later version published by the Free Software -->
-<!-- Foundation; with no Invariant Sections, no Front-Cover Texts, and -->
-<!-- no Back-Cover Texts.  A copy of the license is included in the -->
-<!-- file COPYING.DOC at the top of this distribution. -->
 
 # v0.9.10 EXWM-on-Xvfb-on-Hurd live verify
 
@@ -231,3 +223,19 @@ that Xvfb instance and behaves as the EWMH window manager for it.
 ## Files touched on the main branch
 - `docs/runlogs/2026-05-21-v0910-exwm-xvfb-hurd.md` (new file, this
   receipt, no code diff in this slice).
+
+## license
+
+This document is licensed under the GNU Free Documentation License,
+Version 1.3 or any later version published by the Free Software
+Foundation; with no Invariant Sections, no Front-Cover Texts, and no
+Back-Cover Texts.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the file `COPYING.DOC` at the top
+of this distribution.

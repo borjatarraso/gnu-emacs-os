@@ -1,12 +1,4 @@
 <!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
-<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
-<!-- -->
-<!-- Permission is granted to copy, distribute and/or modify this -->
-<!-- document under the terms of the GNU Free Documentation License, -->
-<!-- Version 1.3 or any later version published by the Free Software -->
-<!-- Foundation; with no Invariant Sections, no Front-Cover Texts, and -->
-<!-- no Back-Cover Texts.  A copy of the license is included in the -->
-<!-- file COPYING.DOC at the top of this distribution. -->
 
 # 2026-05-18: emacs spawned by pid1 on GNU/Hurd
 
@@ -115,3 +107,19 @@ finish line.  Both are tracked as concrete tasks.
   6. After ~30s, `screendump /tmp/hurd-screen.ppm` from QEMU
      monitor, convert to PNG.  Greeting line appears as
      above.
+
+## license
+
+This document is licensed under the GNU Free Documentation License,
+Version 1.3 or any later version published by the Free Software
+Foundation; with no Invariant Sections, no Front-Cover Texts, and no
+Back-Cover Texts.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the file `COPYING.DOC` at the top
+of this distribution.

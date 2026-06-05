@@ -1,12 +1,4 @@
 <!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
-<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
-<!-- -->
-<!-- Permission is granted to copy, distribute and/or modify this -->
-<!-- document under the terms of the GNU Free Documentation License, -->
-<!-- Version 1.3 or any later version published by the Free Software -->
-<!-- Foundation; with no Invariant Sections, no Front-Cover Texts, and -->
-<!-- no Back-Cover Texts.  A copy of the license is included in the -->
-<!-- file COPYING.DOC at the top of this distribution. -->
 
 <!-- 2026-05-23: STATIC=1 link investigation for pid1 on the Hurd branch -->
 
@@ -407,3 +399,19 @@ file_get_storage_info wrapper at hurd/c7222c5 already documents.
 guix-system/system-hurd.scm: the side-branch Hurd system record;
 unchanged here because the `pid1/` link line is a pure C-toolchain
 property, not a Guix gexp choice.
+
+## license
+
+This document is licensed under the GNU Free Documentation License,
+Version 1.3 or any later version published by the Free Software
+Foundation; with no Invariant Sections, no Front-Cover Texts, and no
+Back-Cover Texts.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the file `COPYING.DOC` at the top
+of this distribution.

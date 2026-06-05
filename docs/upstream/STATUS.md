@@ -1,13 +1,4 @@
 <!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
-<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
-<!-- -->
-<!-- Permission is granted to copy, distribute and/or modify this -->
-<!-- document under the terms of the GNU Free Documentation License, -->
-<!-- Version 1.3 or any later version published by the Free Software -->
-<!-- Foundation; with no Invariant Sections, no Front-Cover Texts, and -->
-<!-- no Back-Cover Texts.  A copy of the license is included in the -->
-<!-- file COPYING.DOC at the top of this distribution. -->
-<!-- voice: first person singular, lowercase, no em-dashes. -->
 
 # upstream filings: status
 
@@ -30,6 +21,32 @@ exchanges live in the public archives; I link them per thread
 below.  I do not reproduce email content (mine or anyone else's)
 in this file.  per-message detail with IDs and labels lives in
 operator notes outside the repo.
+
+## subdirectory licensing
+
+Per-file SPDX headers inside `emails/*.txt` and `patches/*.patch`
+would break their respective formats (an .eml-style file re-fed into
+a mail client; a unified-diff re-fed into `git am`).  The license for
+those files is therefore documented here, at the directory level,
+rather than per-file:
+
+  - `emails/*.txt` are drafts of messages I wrote and sent to the
+    upstream mailing lists named above (bug-hurd, debian-hurd,
+    bug-gnu-emacs).  I am the sole author.  They are licensed under
+    the GNU Free Documentation License, version 1.3 or later
+    (GFDL-1.3-or-later), with no Invariant Sections, no Front-Cover
+    Texts, and no Back-Cover Texts.  A copy of the license is in the
+    file `COPYING.DOC` at the top of this distribution.
+
+  - `patches/0001-emacsclient-suppress-ENOPROTOOPT-from-SO_RCVTIMEO.patch`
+    is a patch I authored against GNU Emacs.  The patch inherits the
+    license of the project it modifies; Emacs is licensed under the
+    GNU General Public License, version 3 or later, so this patch is
+    GPL-3.0-or-later.  A copy of the GPL is in the file `COPYING` at
+    the top of this distribution.
+
+The per-category breakdown for every file in this tarball lives in
+the top-level `AUTHORS`.
 
 ## per-thread
 
@@ -298,3 +315,19 @@ GEOS-side work (today: none).  keep it at this granularity; do
 not paste email bodies in here, mine or anyone else's.  the
 public archive links above are the source of truth for the
 exchanges themselves.
+
+## license
+
+This document is licensed under the GNU Free Documentation License,
+Version 1.3 or any later version published by the Free Software
+Foundation; with no Invariant Sections, no Front-Cover Texts, and no
+Back-Cover Texts.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the file `COPYING.DOC` at the top
+of this distribution.

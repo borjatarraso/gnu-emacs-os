@@ -39,20 +39,83 @@ Developer Certificate of Origin (DCO) by adding a Signed-off-by line
 to your commit.  See docs/CONTRIBUTING.md for the full process.
 
 ================================================================
-license
+license, per file category
 ================================================================
 
-GEOS source code is licensed under the GNU General Public License,
-version 3 or later.  See COPYING in the repository root for the full
-text.
+Every file in this tarball is authored by the maintainer and falls
+into one of the categories below.  Each category has a single,
+explicit license; that license applies to every file in the category.
 
-GEOS documentation (every .md file in this repository) is licensed
-under the GNU Free Documentation License, version 1.3 or later, with
-no Invariant Sections, no Front-Cover Texts, and no Back-Cover
-Texts.  See COPYING.DOC in the repository root for the full text.
+  (1) Source code: .el, .c, .h, .scm, .sh, .yml, .py, .conf, .mk, and
+      every file named "Makefile".  Licensed under the GNU General
+      Public License, version 3 or later (GPL-3.0-or-later).  Each
+      such file carries an SPDX-License-Identifier header AND the
+      complete GPL notice paragraph in the file's own comment style.
+      Canonical license text in COPYING at the repository root.
 
-Every source file carries both an SPDX-License-Identifier header
-(GPL-3.0-or-later for code, GFDL-1.3-or-later for documentation) and
-the corresponding full license notice in the file's own comment
-style.  Binary assets are inventoried with origin and license in
-docs/MEDIA.md.
+  (2) Documentation: every .md file in the tree (README, CHANGELOG,
+      docs/*.md, docs/runlogs/*.md, docs/upstream/*.md,
+      docs/savannah/*.md).  Licensed under the GNU Free Documentation
+      License, version 1.3 or later (GFDL-1.3-or-later), with no
+      Invariant Sections, no Front-Cover Texts, and no Back-Cover
+      Texts.  Each .md file carries a visible "## license" section at
+      the end with the canonical GFDL notice paragraph, and a
+      machine-readable SPDX comment at the top.  Canonical license
+      text in COPYING.DOC at the repository root.
+
+  (3) Upstream patches: docs/upstream/patches/*.patch.  These are
+      patches authored by the maintainer against upstream projects
+      (currently a single patch against GNU Emacs).  Each patch
+      inherits the license of the project it modifies; the Emacs
+      patch is therefore GPL-3.0-or-later.  The patch metadata
+      (From/Date/Subject headers) is part of the standard
+      git-format-patch envelope and is not separately licensed.
+
+  (4) Upstream-correspondence drafts: docs/upstream/emails/*.txt.
+      These are drafts of messages the maintainer wrote and sent to
+      upstream mailing lists (bug-hurd, debian-hurd, bug-gnu-emacs).
+      Licensed under the GNU Free Documentation License, version 1.3
+      or later (GFDL-1.3-or-later), with no Invariant Sections, no
+      Front-Cover Texts, and no Back-Cover Texts.  The license is
+      documented for the whole subdirectory in
+      docs/upstream/STATUS.md rather than per-file, because adding a
+      notice header inside an .eml-style file would break its email
+      format if the file is later re-fed into a mail client.
+
+  (5) Binary media: docs/img/*.png and docs/runlogs/*.png.
+      Inventoried per-file in docs/MEDIA.md with origin and license.
+      Maintainer-authored logos and serial-console screenshots are
+      licensed under GFDL-1.3-or-later, matching the documentation
+      license.
+
+  (6) License texts: COPYING (GPL 3.0 verbatim) and COPYING.DOC
+      (GFDL 1.3 verbatim).  These are the published license texts
+      from the Free Software Foundation; they are not separately
+      licensed.
+
+  (7) Project metadata: AUTHORS (this file).  Licensed under
+      GFDL-1.3-or-later, matching the documentation license.
+
+For the complete file-by-file inventory of categories (1) through
+(5), see "git ls-files" combined with docs/MEDIA.md (category 5) and
+docs/upstream/STATUS.md (categories 3 and 4).
+
+================================================================
+license, for redistributors
+================================================================
+
+A distributor wishing to repackage GEOS should:
+
+  - keep COPYING and COPYING.DOC at the root of the redistribution
+    (they are the license texts the per-file notices refer to);
+  - preserve the SPDX headers, full notice paragraphs, and
+    "## license" footers on the files that already carry them;
+  - preserve docs/MEDIA.md and docs/upstream/STATUS.md, which
+    document the legal status of files where a per-file notice would
+    be technically inappropriate (binary assets, email archives).
+
+The contribution policy in CONTRIBUTING.md requires an FSF copyright
+assignment for every contributor; until that paperwork is on file for
+a given contributor, their patches will not be merged.  The maintainer
+is the sole copyright holder of every commit in the repository to
+date.

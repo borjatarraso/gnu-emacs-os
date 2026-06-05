@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
 # 2026-05-17 hurd ifname normalization verified
 
 <!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
@@ -106,3 +107,19 @@ puts the kernel-specific knowledge in exactly one place.
 
   - hurd branch commit: `b031db5`
   - main docs update: `fc08c4d` (HURD_PORT.md matrix promotion)
+
+## license
+
+This document is licensed under the GNU Free Documentation License,
+Version 1.3 or any later version published by the Free Software
+Foundation; with no Invariant Sections, no Front-Cover Texts, and no
+Back-Cover Texts.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the file `COPYING.DOC` at the top
+of this distribution.

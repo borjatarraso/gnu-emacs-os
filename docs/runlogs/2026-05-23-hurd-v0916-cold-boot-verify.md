@@ -1,12 +1,4 @@
 <!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
-<!-- Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org> -->
-<!-- -->
-<!-- Permission is granted to copy, distribute and/or modify this -->
-<!-- document under the terms of the GNU Free Documentation License, -->
-<!-- Version 1.3 or any later version published by the Free Software -->
-<!-- Foundation; with no Invariant Sections, no Front-Cover Texts, and -->
-<!-- no Back-Cover Texts.  A copy of the license is included in the -->
-<!-- file COPYING.DOC at the top of this distribution. -->
 
 # 2026-05-23: v0.9.16 cold-boot verify (slice A reverted, slice B PASS, STATIC=1 PATH A Makefile)
 
@@ -365,3 +357,19 @@ the v0.9.17 starter.
 - emacs-init/services/hurd-essentials.el (-127, slice A revert at b375b94)
 - pid1/Makefile (STATIC=1 PATH A diff at 5a2acec: --start-group / --end-group wrap of Hurd subset, PORT_MODULE_LIBS unchanged, Linux path untouched, dynamic Hurd path inert)
 - docs/HURD_PORT.md (+row, STATIC=1 link cleanliness matrix row at 1ebf7f1, live status on hurd)
+
+## license
+
+This document is licensed under the GNU Free Documentation License,
+Version 1.3 or any later version published by the Free Software
+Foundation; with no Invariant Sections, no Front-Cover Texts, and no
+Back-Cover Texts.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the file `COPYING.DOC` at the top
+of this distribution.

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
 <!--
 SPDX-License-Identifier: GFDL-1.3-or-later
 Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
@@ -130,17 +131,35 @@ and produces a deterministic closure.
 ## License
 
 Choose: GNU General Public License v3.0 or later
+(plus GNU Free Documentation License v1.3 or later for manuals)
 
-The license file `COPYING` carries the full GPLv3 text.  Every
-source file carries an `SPDX-License-Identifier: GPL-3.0-or-later`
-header.  `AUTHORS` lists the maintainer and signing key
-fingerprint.
+  - Source code (every .el, .c, .h, .scm, .sh, .yml, .py, .conf, .mk
+    and every `Makefile`): GPL-3.0-or-later.  Full text in COPYING.
+    Each source file carries an `SPDX-License-Identifier` header
+    AND the complete GPL notice paragraph in its own comment style,
+    per the gnu.org/licenses/gpl-howto recommendation.
+
+  - Documentation (every .md file in the tree, plus AUTHORS):
+    GFDL-1.3-or-later, with no Invariant Sections, no Front-Cover
+    Texts, and no Back-Cover Texts.  Full text in COPYING.DOC.
+    Each .md file carries a visible `## license` section at the
+    end with the complete GFDL notice paragraph, per the
+    gnu.org/licenses/fdl-howto recommendation.
+
+`AUTHORS` lists the maintainer, the GPG signing key fingerprint, and
+the per-file-category breakdown of which license applies to which
+file.  `docs/upstream/STATUS.md` documents the directory-level
+license for `docs/upstream/emails/*.txt` and
+`docs/upstream/patches/*.patch` (where a per-file header would break
+the email or patch format).  `docs/MEDIA.md` inventories every
+binary asset with origin and license.
 
 ## Other Public Domain / GPL-Compatible Licenses
 
-None.  All in-tree code is GPL-3.0-or-later.  The vendored Emacs
-package pins are upstream packages under their own GPL-compatible
-licenses (use-package, etc.), not redistributed here.
+None.  All in-tree code is GPL-3.0-or-later; all in-tree
+documentation is GFDL-1.3-or-later.  The vendored Emacs package
+pins are upstream packages under their own GPL-compatible licenses
+(use-package, etc.), not redistributed here.
 
 ## Group Type
 
@@ -171,3 +190,19 @@ toward GNU project status if the GNU evaluation committee
 accepts the submission separately filed at
 `gnu-prospective-projects@gnu.org` (see
 `docs/savannah/GNU_EVALUATION_SUBMISSION.md`).
+
+## license
+
+This document is licensed under the GNU Free Documentation License,
+Version 1.3 or any later version published by the Free Software
+Foundation; with no Invariant Sections, no Front-Cover Texts, and no
+Back-Cover Texts.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3 or
+any later version published by the Free Software Foundation; with no
+Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
+copy of the license is included in the file `COPYING.DOC` at the top
+of this distribution.
