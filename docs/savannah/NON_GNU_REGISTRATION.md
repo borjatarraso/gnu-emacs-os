@@ -1,15 +1,5 @@
-<!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
+<!-- SPDX-License-Identifier: FSFAP -->
 <!--
-SPDX-License-Identifier: GFDL-1.3-or-later
-Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
-
-Permission is granted to copy, distribute and/or modify this
-document under the terms of the GNU Free Documentation License,
-Version 1.3 or any later version published by the Free Software
-Foundation; with no Invariant Sections, no Front-Cover Texts, and
-no Back-Cover Texts.  A copy of the license is included in the
-file COPYING.DOC at the top of this distribution.
-
 Paste-ready text for the Savannah non-GNU project registration
 form at https://savannah.nongnu.org/register/.  Each section
 header below maps to a labelled field on that page.  Submit at
@@ -131,35 +121,42 @@ and produces a deterministic closure.
 ## License
 
 Choose: GNU General Public License v3.0 or later
-(plus GNU Free Documentation License v1.3 or later for manuals)
+(plus GNU Free Documentation License v1.3 or later for the manuals)
 
-  - Source code (every .el, .c, .h, .scm, .sh, .yml, .py, .conf, .mk
-    and every `Makefile`): GPL-3.0-or-later.  Full text in COPYING.
-    Each source file carries an `SPDX-License-Identifier` header
-    AND the complete GPL notice paragraph in its own comment style,
-    per the gnu.org/licenses/gpl-howto recommendation.
+  - Source code (every .el, .c, .h, .scm, .sh, .yml, .py, .conf, .mk,
+    .gitignore, and every `Makefile`): GPL-3.0-or-later.  Full text
+    in COPYING.  Each source file carries an `SPDX-License-Identifier`
+    header AND the complete GPL notice paragraph in its own comment
+    style, per the gnu.org/licenses/gpl-howto recommendation.
 
-  - Documentation (every .md file in the tree, plus AUTHORS):
-    GFDL-1.3-or-later, with no Invariant Sections, no Front-Cover
-    Texts, and no Back-Cover Texts.  Full text in COPYING.DOC.
-    Each .md file carries a visible `## license` section at the
-    end with the complete GFDL notice paragraph, per the
-    gnu.org/licenses/fdl-howto recommendation.
+  - Manuals (USER_GUIDE, ARCHITECTURE, INTERNALS, INSTALL, HURD_PORT,
+    HURD_BOOT, MANIFESTO under docs/): GFDL-1.3-or-later, with no
+    Invariant Sections, no Front-Cover Texts, and no Back-Cover
+    Texts.  Each manual carries the unaltered FDL ADDENDUM notice and
+    embeds the complete FDL text in its section entitled "GNU Free
+    Documentation License"; the license also ships as COPYING.DOC.
+
+  - Other documentation (README, CHANGELOG, runlogs, development
+    plans, project notes, AUTHORS, the upstream-correspondence
+    drafts) and all binary media: the all-permissive license
+    (SPDX: FSFAP), per the GNU maintainers' guide section on small
+    supporting files and rough documentation.
 
 `AUTHORS` lists the maintainer, the GPG signing key fingerprint, and
 the per-file-category breakdown of which license applies to which
-file.  `docs/upstream/STATUS.md` documents the directory-level
-license for `docs/upstream/emails/*.txt` and
-`docs/upstream/patches/*.patch` (where a per-file header would break
-the email or patch format).  `docs/MEDIA.md` inventories every
-binary asset with origin and license.
+file.  `docs/upstream/STATUS.md` describes the trailing notices on
+`docs/upstream/emails/*.txt` and `docs/upstream/patches/*.patch`.
+`docs/MEDIA.md` inventories every binary asset with origin and
+license.
 
 ## Other Public Domain / GPL-Compatible Licenses
 
-None.  All in-tree code is GPL-3.0-or-later; all in-tree
-documentation is GFDL-1.3-or-later.  The vendored Emacs package
-pins are upstream packages under their own GPL-compatible licenses
-(use-package, etc.), not redistributed here.
+The all-permissive license (SPDX: FSFAP) on the small supporting
+files, rough documentation, and binary media described above.  It is
+GPL-compatible.  All in-tree code is GPL-3.0-or-later; the manuals
+are GFDL-1.3-or-later.  The vendored Emacs package pins are upstream
+packages under their own GPL-compatible licenses (use-package, etc.),
+not redistributed here.
 
 ## Group Type
 
@@ -193,16 +190,9 @@ accepts the submission separately filed at
 
 ## license
 
-This document is licensed under the GNU Free Documentation License,
-Version 1.3 or any later version published by the Free Software
-Foundation; with no Invariant Sections, no Front-Cover Texts, and no
-Back-Cover Texts.
-
 Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3 or
-any later version published by the Free Software Foundation; with no
-Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
-copy of the license is included in the file `COPYING.DOC` at the top
-of this distribution.
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.  This file is offered as-is,
+without any warranty.

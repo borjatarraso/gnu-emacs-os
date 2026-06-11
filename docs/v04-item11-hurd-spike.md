@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
+<!-- SPDX-License-Identifier: FSFAP -->
 
 # v0.4 item 11: Hurd kernel variant, spike report
 
@@ -116,7 +116,7 @@ extern const port_caps *port;
 ```
 
 Linux backend (`pid1/port_linux.c`) keeps the current behaviour
-verbatim — every `mount(2)` and ioctl from today's emacs-init.c
+verbatim: every `mount(2)` and ioctl from today's emacs-init.c
 moves under one of these function pointers. Hurd backend
 (`pid1/port_hurd.c`) implements the Mach/Hurd equivalents listed
 above, with `suspend` returning `ENOSYS` so the elisp layer can
@@ -136,10 +136,10 @@ data-source layer. Renderers are kernel-agnostic.
 
 Two operating-system records, sharing the bulk via `inherit`:
 
-  - `guix-system/system.scm` — today's Linux record. Renamed in
+  - `guix-system/system.scm`, today's Linux record. Renamed in
     spirit to `system-linux.scm`, but kept at the current path so
     `iso-build/dev-vm.sh` does not need to change.
-  - `guix-system/system-hurd.scm` (new) — `(use-modules (gnu system
+  - `guix-system/system-hurd.scm` (new), `(use-modules (gnu system
     hurd))`, kernel = `gnumach`, hurd = `hurd`, file-systems on
     `/dev/hd0s1`, drops xorg-server + emacs-exwm + dhcpcd from
     packages.
@@ -186,16 +186,9 @@ will do on the side branch.
 
 ## license
 
-This document is licensed under the GNU Free Documentation License,
-Version 1.3 or any later version published by the Free Software
-Foundation; with no Invariant Sections, no Front-Cover Texts, and no
-Back-Cover Texts.
-
 Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3 or
-any later version published by the Free Software Foundation; with no
-Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
-copy of the license is included in the file `COPYING.DOC` at the top
-of this distribution.
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.  This file is offered as-is,
+without any warranty.

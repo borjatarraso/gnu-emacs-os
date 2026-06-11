@@ -1,15 +1,5 @@
-<!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
+<!-- SPDX-License-Identifier: FSFAP -->
 <!--
-SPDX-License-Identifier: GFDL-1.3-or-later
-Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
-
-Permission is granted to copy, distribute and/or modify this
-document under the terms of the GNU Free Documentation License,
-Version 1.3 or any later version published by the Free Software
-Foundation; with no Invariant Sections, no Front-Cover Texts, and
-no Back-Cover Texts.  A copy of the license is included in the
-file COPYING.DOC at the top of this distribution.
-
 Paste-ready submission body for the GNU project evaluation
 process described at https://www.gnu.org/help/evaluation.html.
 
@@ -187,9 +177,12 @@ I commit to:
     `no-shell-check` enforces this; eshell is the only
     permitted shell surface for users.
   - Reproducible build from a pinned Guix channel.
-  - License: GPL-3.0-or-later, SPDX headers on every source
-    file, COPYING at top level, AUTHORS lists the maintainer
-    and signing key.
+  - License: GPL-3.0-or-later for code (SPDX headers on every
+    source file, COPYING at top level), GFDL-1.3-or-later for
+    the manuals (full FDL embedded in each, COPYING.DOC at top
+    level), the all-permissive license for supporting files and
+    media.  AUTHORS lists the maintainer, the signing key, and
+    the per-category breakdown.
 
 I am happy to amend, split, or otherwise restructure the
 submission per the evaluation committee's feedback.
@@ -199,16 +192,9 @@ Borja Tarraso
 
 ## license
 
-This document is licensed under the GNU Free Documentation License,
-Version 1.3 or any later version published by the Free Software
-Foundation; with no Invariant Sections, no Front-Cover Texts, and no
-Back-Cover Texts.
-
 Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3 or
-any later version published by the Free Software Foundation; with no
-Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
-copy of the license is included in the file `COPYING.DOC` at the top
-of this distribution.
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.  This file is offered as-is,
+without any warranty.

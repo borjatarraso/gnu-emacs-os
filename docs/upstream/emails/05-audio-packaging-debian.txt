@@ -55,3 +55,11 @@ Happy to help test once the live-image task picks this up.
 Thanks,
 Borja Tarraso
 borja.tarraso@member.fsf.org
+
+----------------------------------------------------------------
+Copyright (C) 2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.  This file is offered as-is,
+without any warranty.

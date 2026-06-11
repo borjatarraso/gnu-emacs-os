@@ -63,3 +63,11 @@ email body, which deliberately mentions no downstream project):
 the draft body has been deliberately stripped of every reference
 to the downstream project that motivated the report; do not paste
 anything from this operator-notes section into the outgoing mail.
+
+----------------------------------------------------------------
+Copyright (C) 2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.  This file is offered as-is,
+without any warranty.

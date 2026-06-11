@@ -1,8 +1,8 @@
 GNU/Emacs Operating System (GEOS)
-Copyright (C) 2025-2026  Borja Tarraso
 
-This file lists the maintainers of GEOS and the cryptographic
-identities used to sign releases, commits, and security advisories.
+This file lists the maintainer of GEOS, the cryptographic identity
+used to sign releases, commits, and security advisories, and the
+per-file-category licensing of everything in the distribution.
 
 ================================================================
 maintainer
@@ -24,15 +24,21 @@ keyservers (keys.openpgp.org, keyserver.ubuntu.com).  When in doubt,
 fetch by fingerprint, not by email.
 
 ================================================================
-attribution policy
+authorship and copyright
 ================================================================
 
-Every artifact in this repository, code, comments, commit messages,
-documentation, error strings, configuration files, is authored by the
-maintainer.  No file references generative tooling, vendor names
-behind such tooling, or any "generated", "co-authored", or "with help
-from" attribution phrasing.  The forbidden-token list is enforced by
-the repository's pre-commit attribution scan.
+With the exception of the verbatim license texts in category (6)
+below, which are published by the Free Software Foundation, every
+file in this distribution was written by the maintainer, who is also
+the sole copyright holder of every commit in the repository to date.
+The maintainer, the copyright holder, and the author are the same
+person here; the copyright notices in the files name the copyright
+holder.
+
+No file references generative tooling, vendor names behind such
+tooling, or any "generated", "co-authored", or "with help from"
+attribution phrasing.  The forbidden-token list is enforced by the
+repository's pre-commit attribution scan.
 
 If you contribute a patch, sign your work under the
 Developer Certificate of Origin (DCO) by adding a Signed-off-by line
@@ -42,63 +48,72 @@ to your commit.  See docs/CONTRIBUTING.md for the full process.
 license, per file category
 ================================================================
 
-Every file in this tarball is authored by the maintainer and falls
-into one of the categories below.  Each category has a single,
-explicit license; that license applies to every file in the category.
+Every file in this distribution falls into one of the categories
+below.  Each category has a single, explicit license; that license
+applies to every file in the category.
 
-  (1) Source code: .el, .c, .h, .scm, .sh, .yml, .py, .conf, .mk, and
-      every file named "Makefile".  Licensed under the GNU General
-      Public License, version 3 or later (GPL-3.0-or-later).  Each
-      such file carries an SPDX-License-Identifier header AND the
-      complete GPL notice paragraph in the file's own comment style.
-      Canonical license text in COPYING at the repository root.
+  (1) Source code: .el, .c, .h, .scm, .sh, .yml, .py, .conf, .mk,
+      .gitignore, and every file named "Makefile".  Licensed under
+      the GNU General Public License, version 3 or later
+      (GPL-3.0-or-later).  Each such file carries an
+      SPDX-License-Identifier header AND the complete GPL notice
+      paragraph in the file's own comment style.  Canonical license
+      text in COPYING at the repository root.
 
-  (2) Documentation: every .md file in the tree (README, CHANGELOG,
-      docs/*.md, docs/runlogs/*.md, docs/upstream/*.md,
-      docs/savannah/*.md).  Licensed under the GNU Free Documentation
-      License, version 1.3 or later (GFDL-1.3-or-later), with no
-      Invariant Sections, no Front-Cover Texts, and no Back-Cover
-      Texts.  Each .md file carries a visible "## license" section at
-      the end with the canonical GFDL notice paragraph, and a
-      machine-readable SPDX comment at the top.  Canonical license
-      text in COPYING.DOC at the repository root.
+  (2) Manuals: docs/USER_GUIDE.md, docs/ARCHITECTURE.md,
+      docs/INTERNALS.md, docs/INSTALL.md, docs/HURD_PORT.md,
+      docs/HURD_BOOT.md, docs/MANIFESTO.md.  Licensed under the GNU
+      Free Documentation License, version 1.3 or later
+      (GFDL-1.3-or-later), with no Invariant Sections, no Front-Cover
+      Texts, and no Back-Cover Texts.  Each manual carries the
+      unaltered license notice from the FDL's ADDENDUM in a visible
+      "license" section, and includes a complete copy of the FDL in
+      its section entitled "GNU Free Documentation License".  The
+      same license text also ships as COPYING.DOC at the repository
+      root.
 
-  (3) Upstream patches: docs/upstream/patches/*.patch.  These are
-      patches authored by the maintainer against upstream projects
-      (currently a single patch against GNU Emacs).  Each patch
-      inherits the license of the project it modifies; the Emacs
-      patch is therefore GPL-3.0-or-later.  The patch metadata
-      (From/Date/Subject headers) is part of the standard
-      git-format-patch envelope and is not separately licensed.
+  (3) Other documentation: every other .md file in the tree (README,
+      CHANGELOG, docs/runlogs/*.md, development plans, project
+      notes).  These are small supporting files and rough
+      documentation in the sense of the GNU maintainers' guide, and
+      are released under the all-permissive license (SPDX: FSFAP):
+      copying and distribution of these files, with or without
+      modification, are permitted in any medium without royalty
+      provided the copyright notice and the license notice are
+      preserved.  Each such file carries the notice in a visible
+      "license" section.
 
-  (4) Upstream-correspondence drafts: docs/upstream/emails/*.txt.
-      These are drafts of messages the maintainer wrote and sent to
-      upstream mailing lists (bug-hurd, debian-hurd, bug-gnu-emacs).
-      Licensed under the GNU Free Documentation License, version 1.3
-      or later (GFDL-1.3-or-later), with no Invariant Sections, no
-      Front-Cover Texts, and no Back-Cover Texts.  The license is
-      documented for the whole subdirectory in
-      docs/upstream/STATUS.md rather than per-file, because adding a
-      notice header inside an .eml-style file would break its email
-      format if the file is later re-fed into a mail client.
+  (4) Upstream patches: docs/upstream/patches/*.patch.  Patches
+      written by the maintainer against upstream projects (currently
+      a single patch against GNU Emacs).  Each patch carries its
+      copyright and GPL license notice appended at the end of the
+      file, after the diff, where it does not interfere with
+      "git am" or "git apply"; the Emacs patch is GPL-3.0-or-later,
+      the same license as the program it modifies.
 
-  (5) Binary media: docs/img/*.png and docs/runlogs/*.png.
+  (5) Upstream-correspondence drafts: docs/upstream/emails/*.txt.
+      Drafts of messages the maintainer wrote and sent to upstream
+      mailing lists (bug-hurd, debian-hurd, bug-gnu-emacs).  Released
+      under the all-permissive license (FSFAP), with the notice
+      appended at the end of each file.
+
+  (6) License texts: COPYING (GNU GPL version 3, verbatim) and
+      COPYING.DOC (GNU FDL version 1.3, verbatim), plus the copy of
+      the FDL embedded in each manual of category (2).  These texts
+      are published by the Free Software Foundation; they were not
+      written by the maintainer, and everyone is permitted to copy
+      and distribute verbatim copies of them, but changing them is
+      not allowed.
+
+  (7) Binary media: docs/img/*.png and docs/runlogs/*.png.
       Inventoried per-file in docs/MEDIA.md with origin and license.
-      Maintainer-authored logos and serial-console screenshots are
-      licensed under GFDL-1.3-or-later, matching the documentation
-      license.
+      All maintainer-made (logos and serial-console screenshots) and
+      released under the all-permissive license (FSFAP), as stated
+      in docs/MEDIA.md.
 
-  (6) License texts: COPYING (GPL 3.0 verbatim) and COPYING.DOC
-      (GFDL 1.3 verbatim).  These are the published license texts
-      from the Free Software Foundation; they are not separately
-      licensed.
-
-  (7) Project metadata: AUTHORS (this file).  Licensed under
-      GFDL-1.3-or-later, matching the documentation license.
-
-For the complete file-by-file inventory of categories (1) through
-(5), see "git ls-files" combined with docs/MEDIA.md (category 5) and
-docs/upstream/STATUS.md (categories 3 and 4).
+  (8) Project metadata: AUTHORS (this file).  Released under the
+      all-permissive license (FSFAP); see the notice at the end of
+      this file.
 
 ================================================================
 license, for redistributors
@@ -108,14 +123,23 @@ A distributor wishing to repackage GEOS should:
 
   - keep COPYING and COPYING.DOC at the root of the redistribution
     (they are the license texts the per-file notices refer to);
-  - preserve the SPDX headers, full notice paragraphs, and
-    "## license" footers on the files that already carry them;
-  - preserve docs/MEDIA.md and docs/upstream/STATUS.md, which
-    document the legal status of files where a per-file notice would
-    be technically inappropriate (binary assets, email archives).
+  - preserve the copyright notices, SPDX headers, full notice
+    paragraphs, and "license" sections on the files that carry them;
+  - preserve docs/MEDIA.md, which documents the legal status of the
+    binary assets, where a notice cannot be embedded in the file
+    itself.
 
 The contribution policy in CONTRIBUTING.md requires an FSF copyright
 assignment for every contributor; until that paperwork is on file for
-a given contributor, their patches will not be merged.  The maintainer
-is the sole copyright holder of every commit in the repository to
-date.
+a given contributor, their patches will not be merged.
+
+================================================================
+license, this file
+================================================================
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.  This file is offered as-is,
+without any warranty.

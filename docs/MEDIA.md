@@ -1,19 +1,24 @@
-<!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
+<!-- SPDX-License-Identifier: FSFAP -->
 
 # Media inventory and provenance
 
 Every binary asset under version control is listed here with its
 origin and license. The repository carries no third-party media; all
-images are original work by the maintainer and inherit the
-project-wide license unless noted otherwise.
+images are original work by the maintainer. Because a license notice
+cannot be embedded in a PNG, the license of each asset is stated here
+instead: all of them are released under the all-permissive license
+(SPDX: FSFAP), whose text is in the "license" section at the end of
+this file. Copying and distribution of these images, with or without
+modification, are permitted in any medium without royalty provided
+this inventory and its notices are preserved.
 
 ## Logos
 
 | File                    | Description                                          | Origin                                                                 | License            |
 | ---                     | ---                                                  | ---                                                                    | ---                |
-| `docs/img/logo.png`     | Primary project logo, "editor on silicon".           | Original work by Borja Tarraso, 2026. Created from scratch in GIMP.    | GPL-3.0-or-later   |
-| `docs/img/logo-256.png` | 256x256 variant of `logo.png` for the README header. | Scaled-down derivative of `logo.png` produced by `convert -resize`.    | GPL-3.0-or-later   |
-| `docs/img/logo-128.png` | 128x128 variant for embedded contexts and favicons.  | Scaled-down derivative of `logo.png` produced by `convert -resize`.    | GPL-3.0-or-later   |
+| `docs/img/logo.png`     | Primary project logo, "editor on silicon".           | Original work by Borja Tarraso, 2026. Created from scratch in GIMP.    | FSFAP              |
+| `docs/img/logo-256.png` | 256x256 variant of `logo.png` for the README header. | Scaled-down derivative of `logo.png` produced by `convert -resize`.    | FSFAP              |
+| `docs/img/logo-128.png` | 128x128 variant for embedded contexts and favicons.  | Scaled-down derivative of `logo.png` produced by `convert -resize`.    | FSFAP              |
 
 The logos contain no third-party trademarks, fonts, or stock-image
 elements. The wordmark "GEOS" and the visual motif are original.
@@ -30,10 +35,10 @@ third-party UI in any frame.
 
 | File                                                              | Description                                                                                                 | Origin                                                                | License            |
 | ---                                                               | ---                                                                                                         | ---                                                                   | ---                |
-| `docs/runlogs/2026-05-18-hurd-pid1-boot-screen.png`               | Serial-console capture of the v0.8 Hurd image booting `emacs-init` as PID 1.                                | Captured by Borja Tarraso from QEMU running an image he built.        | GPL-3.0-or-later   |
-| `docs/runlogs/2026-05-18-hurd-pid1-emacs-spawn-screen.png`        | Serial-console capture of the supervised Emacs spawn message on the same image.                             | Captured by Borja Tarraso from QEMU running an image he built.        | GPL-3.0-or-later   |
-| `docs/runlogs/2026-05-18-hurd-pid1-reboot-rpc-screen.png`         | Serial-console capture of the `host_reboot` Mach RPC path taking down the system.                           | Captured by Borja Tarraso from QEMU running an image he built.        | GPL-3.0-or-later   |
-| `docs/runlogs/2026-05-18-hurd-pid1-reboot-aftertype-screen.png`   | Serial-console capture of the post-reboot console output during the same verification cycle.                | Captured by Borja Tarraso from QEMU running an image he built.        | GPL-3.0-or-later   |
+| `docs/runlogs/2026-05-18-hurd-pid1-boot-screen.png`               | Serial-console capture of the v0.8 Hurd image booting `emacs-init` as PID 1.                                | Captured by Borja Tarraso from QEMU running an image he built.        | FSFAP              |
+| `docs/runlogs/2026-05-18-hurd-pid1-emacs-spawn-screen.png`        | Serial-console capture of the supervised Emacs spawn message on the same image.                             | Captured by Borja Tarraso from QEMU running an image he built.        | FSFAP              |
+| `docs/runlogs/2026-05-18-hurd-pid1-reboot-rpc-screen.png`         | Serial-console capture of the `host_reboot` Mach RPC path taking down the system.                           | Captured by Borja Tarraso from QEMU running an image he built.        | FSFAP              |
+| `docs/runlogs/2026-05-18-hurd-pid1-reboot-aftertype-screen.png`   | Serial-console capture of the post-reboot console output during the same verification cycle.                | Captured by Borja Tarraso from QEMU running an image he built.        | FSFAP              |
 
 The screenshots include text emitted by gnumach and the Hurd
 servers under the FSF's copyright; that text is reproduced under
@@ -53,16 +58,9 @@ The pre-publication check is: every entry in `git ls-files | grep
 
 ## license
 
-This document is licensed under the GNU Free Documentation License,
-Version 1.3 or any later version published by the Free Software
-Foundation; with no Invariant Sections, no Front-Cover Texts, and no
-Back-Cover Texts.
-
 Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
 
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3 or
-any later version published by the Free Software Foundation; with no
-Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.  A
-copy of the license is included in the file `COPYING.DOC` at the top
-of this distribution.
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.  This file is offered as-is,
+without any warranty.
