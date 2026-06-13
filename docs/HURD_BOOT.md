@@ -2,6 +2,17 @@
 
 # Booting GEOS on GNU/Hurd
 
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Written and maintained by Borja Tarraso <borja.tarraso@member.fsf.org>.
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3
+or any later version published by the Free Software Foundation;
+with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
+A copy of the license is included in the section entitled "GNU
+Free Documentation License".
+
 GEOS runs on canonical Debian GNU/Hurd 0.9 as of v1.0.0.  Emacs is
 PID 1, the full supervisor tree comes up, the multi-user EXWM
 session lands, end-to-end SSH works (`v0.9.12`), and the install
@@ -407,17 +418,6 @@ For routine re-verification:
   - per-milestone receipts live under `docs/runlogs/`; the
     convention is one file per verified slice with the raw
     serial / VM transcripts that prove the slice landed.
-
-## license
-
-Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
-
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3
-or any later version published by the Free Software Foundation;
-with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
-A copy of the license is included in the section entitled "GNU
-Free Documentation License".
 
 # GNU Free Documentation License
 

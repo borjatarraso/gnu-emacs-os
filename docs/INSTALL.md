@@ -2,7 +2,16 @@
 
 # installing GNU/Emacs Operating System (GEOS)
 
-Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Written and maintained by Borja Tarraso <borja.tarraso@member.fsf.org>.
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3
+or any later version published by the Free Software Foundation;
+with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
+A copy of the license is included in the section entitled "GNU
+Free Documentation License".
 
 This document covers the v1.0.0 release.  GEOS runs on a Linux host
 via a Guix-built qcow2, and on canonical Debian GNU/Hurd 0.9 via
@@ -354,17 +363,6 @@ keeps the OS interactive.
 `/freeze-test` output, `*panic*` buffer contents, the exact ISO store
 hash, and the QEMU invocation that reproduced it. I cannot do anything
 useful without all four.
-
-## license
-
-Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
-
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3
-or any later version published by the Free Software Foundation;
-with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
-A copy of the license is included in the section entitled "GNU
-Free Documentation License".
 
 # GNU Free Documentation License
 

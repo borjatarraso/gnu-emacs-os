@@ -2,11 +2,20 @@
 
 # GEOS user guide
 
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Written and maintained by Borja Tarraso <borja.tarraso@member.fsf.org>.
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3
+or any later version published by the Free Software Foundation;
+with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
+A copy of the license is included in the section entitled "GNU
+Free Documentation License".
+
 Day to day use of GNU/Emacs Operating System (GEOS). Assumes you have
 already booted the image (see `docs/INSTALL.md` for that). The point of
 this document is to answer "I am at the EXWM splash, now what".
-
-Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ## the model in two sentences
 
@@ -410,17 +419,6 @@ C-h i                     the Info browser. emacs's manual is here.
 For GEOS-specific things, the source under `emacs-init/` is the
 documentation. Every file starts with a one-line description and
 inline comments explain the why.
-
-## license
-
-Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
-
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3
-or any later version published by the Free Software Foundation;
-with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
-A copy of the license is included in the section entitled "GNU
-Free Documentation License".
 
 # GNU Free Documentation License
 

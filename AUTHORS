@@ -65,12 +65,15 @@ applies to every file in the category.
       docs/HURD_BOOT.md, docs/MANIFESTO.md.  Licensed under the GNU
       Free Documentation License, version 1.3 or later
       (GFDL-1.3-or-later), with no Invariant Sections, no Front-Cover
-      Texts, and no Back-Cover Texts.  Each manual carries the
-      unaltered license notice from the FDL's ADDENDUM in a visible
-      "license" section, and includes a complete copy of the FDL in
-      its section entitled "GNU Free Documentation License".  The
-      same license text also ships as COPYING.DOC at the repository
-      root.
+      Texts, and no Back-Cover Texts.  Each manual states its title,
+      author, and copyright on its title page (just after the title,
+      where the FDL ADDENDUM says the notices belong) and carries the
+      unaltered license notice from the FDL's ADDENDUM there, so a
+      manual copied out of the tree alone still names its author and
+      its license.  Each manual also includes a complete copy of the
+      FDL in its section entitled "GNU Free Documentation License".
+      The same license text also ships as COPYING.DOC at the
+      repository root.
 
   (3) Other documentation: every other .md file in the tree (README,
       CHANGELOG, docs/runlogs/*.md, development plans, project

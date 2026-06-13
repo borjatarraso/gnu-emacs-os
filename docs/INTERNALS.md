@@ -2,12 +2,21 @@
 
 # GEOS internals
 
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Written and maintained by Borja Tarraso <borja.tarraso@member.fsf.org>.
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3
+or any later version published by the Free Software Foundation;
+with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
+A copy of the license is included in the section entitled "GNU
+Free Documentation License".
+
 A contributor-oriented walkthrough of how GNU/Emacs Operating System
 (GEOS) actually boots, runs, and shuts down. If you are reading this,
 you probably want to fix something or add something. This document is
 the map.
-
-Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
 
 ## reading order
 
@@ -517,17 +526,6 @@ describe what you want to change. Patches that touch `pid1/` or
 `/no-shell-check`, and `/attribution-scan` all pass before merge.
 
 Welcome.
-
-## license
-
-Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
-
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3
-or any later version published by the Free Software Foundation;
-with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
-A copy of the license is included in the section entitled "GNU
-Free Documentation License".
 
 # GNU Free Documentation License
 

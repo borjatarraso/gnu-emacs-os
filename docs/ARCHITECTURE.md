@@ -1,14 +1,23 @@
 <!-- SPDX-License-Identifier: GFDL-1.3-or-later -->
 # GEOS architecture
 
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Written and maintained by Borja Tarraso <borja.tarraso@member.fsf.org>.
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3
+or any later version published by the Free Software Foundation;
+with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
+A copy of the license is included in the section entitled "GNU
+Free Documentation License".
+
 <!-- voice: first person singular, lowercase, no em-dashes. -->
 
 A bird's-eye look at how GNU/Emacs Operating System (GEOS) is laid
 out. Three zoom levels: the whole system, the major subsystems, and
 the dual-kernel detail that lets the same userland run on Linux today
 and on the GNU Hurd next.
-
-Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
 
 If you have not read it yet, `MANIFESTO.md` says why this exists.
 `INTERNALS.md` is the contributor-oriented walkthrough. This file is
@@ -347,17 +356,6 @@ the VM and is gated on the boot-as-PID-1 milestone.
   - `STATE_LAYOUT.md`: the persistence contract.
   - `ROADMAP.md`: what is unfinished and why.
   - `runlogs/`: dated verification receipts per milestone.
-
-## license
-
-Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
-
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3
-or any later version published by the Free Software Foundation;
-with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
-A copy of the license is included in the section entitled "GNU
-Free Documentation License".
 
 # GNU Free Documentation License
 

@@ -2,7 +2,16 @@
 
 # GNU/Emacs Operating System (GEOS)
 
-Maintainer: Borja Tarraso <borja.tarraso@member.fsf.org>
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Written and maintained by Borja Tarraso <borja.tarraso@member.fsf.org>.
+
+Permission is granted to copy, distribute and/or modify this document
+under the terms of the GNU Free Documentation License, Version 1.3
+or any later version published by the Free Software Foundation;
+with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
+A copy of the license is included in the section entitled "GNU
+Free Documentation License".
 
 I have been using Emacs since 2006. Most of what I do on a computer
 already happens inside it: code, mail, IRC, news, git, shell, PDFs,
@@ -187,17 +196,6 @@ It is GNU/Emacs Operating System, GEOS for short. The slash in
 GNU/Emacs is mandatory. I am not making the joke you think I am
 making. I am making a different joke that happens to land in the
 same place.
-
-## license
-
-Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
-
-Permission is granted to copy, distribute and/or modify this document
-under the terms of the GNU Free Documentation License, Version 1.3
-or any later version published by the Free Software Foundation;
-with no Invariant Sections, no Front-Cover Texts, and no Back-Cover Texts.
-A copy of the license is included in the section entitled "GNU
-Free Documentation License".
 
 # GNU Free Documentation License
 
