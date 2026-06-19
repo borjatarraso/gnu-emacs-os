@@ -2,15 +2,21 @@
 
 # Media inventory and provenance
 
-Every binary asset under version control is listed here with its
+Every binary media file under version control is listed here with its
 origin and license. The repository carries no third-party media; all
-images are original work by the maintainer. Because a license notice
-cannot be embedded in a PNG, the license of each asset is stated here
-instead: all of them are released under the all-permissive license
-(SPDX: FSFAP), whose text is in the "license" section at the end of
-this file. Copying and distribution of these images, with or without
-modification, are permitted in any medium without royalty provided
-this inventory and its notices are preserved.
+images are original work by the maintainer.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+covers every image listed below. A license notice cannot be embedded
+in a PNG, so the copyright and license of each image are stated here,
+and again in a README in the same directory as the file
+(`docs/img/README.md` for the logos, `docs/runlogs/README.md` for the
+screenshots), so an image copied out of the tree alone still carries
+its notice. All of the images are released under the all-permissive
+license (SPDX: FSFAP): copying and distribution of these images, with
+or without modification, are permitted in any medium without royalty
+provided the copyright notice and this notice are preserved. The same
+notice text is in the "license" section at the end of this file.
 
 ## Logos
 
@@ -47,11 +53,12 @@ does not constitute redistribution of any covered work.
 
 ## Policy for new media
 
-Any new binary asset must be added to the table above in the same
-commit that introduces the file. If a contribution carries third-
-party media, the upstream license must be listed and a copy of the
-license text must be added under `docs/licenses/<asset>/` before the
-asset can be merged.
+Any new binary media file must be added to the table above in the same
+commit that introduces the file, and its copyright and license notice
+added to the README in the directory where the file lives. If a
+contribution carries third-party media, the upstream license must be
+listed and a copy of the license text must be added under
+`docs/licenses/<media-file>/` before the file can be merged.
 
 The pre-publication check is: every entry in `git ls-files | grep
 -Ei '\.(png|jpg|jpeg|gif|svg|webp)$'` must appear in a row above.

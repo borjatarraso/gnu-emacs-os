@@ -22,6 +22,30 @@ If a future commit reverses or invalidates a runlog claim, add a
 new runlog dated to the day of the regression instead of editing
 the historical one.  the runlogs are append-only.
 
+## images in this directory
+
+This directory also holds serial-console screenshots captured from
+QEMU sessions of GEOS itself.  A PNG cannot carry a license notice
+inside the file, so the copyright and license for these images are
+stated here, in the same directory as the files, and again in the
+inventory at `docs/MEDIA.md`.
+
+  - `2026-05-18-hurd-pid1-boot-screen.png`
+  - `2026-05-18-hurd-pid1-emacs-spawn-screen.png`
+  - `2026-05-18-hurd-pid1-reboot-rpc-screen.png`
+  - `2026-05-18-hurd-pid1-reboot-aftertype-screen.png`
+
+I captured every one of them from QEMU running an image I built;
+every pixel originates from that image or from the GRUB and Hurd
+boot output it displays.
+
+Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+
+Copying and distribution of these images, with or without
+modification, are permitted in any medium without royalty provided
+the copyright notice and this notice are preserved.  These images
+are offered as-is, without any warranty.
+
 ## license
 
 Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>

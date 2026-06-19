@@ -146,7 +146,7 @@ Choose: GNU General Public License v3.0 or later
 the per-file-category breakdown of which license applies to which
 file.  `docs/upstream/STATUS.md` describes the trailing notices on
 `docs/upstream/emails/*.txt` and `docs/upstream/patches/*.patch`.
-`docs/MEDIA.md` inventories every binary asset with origin and
+`docs/MEDIA.md` inventories every binary media file with origin and
 license.
 
 ## Other Public Domain / GPL-Compatible Licenses

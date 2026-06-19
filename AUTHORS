@@ -109,10 +109,13 @@ applies to every file in the category.
       not allowed.
 
   (7) Binary media: docs/img/*.png and docs/runlogs/*.png.
-      Inventoried per-file in docs/MEDIA.md with origin and license.
-      All maintainer-made (logos and serial-console screenshots) and
-      released under the all-permissive license (FSFAP), as stated
-      in docs/MEDIA.md.
+      Inventoried per-file in docs/MEDIA.md with origin and license,
+      with the copyright and license notices repeated in a README in
+      each directory that holds images (docs/img/README.md and
+      docs/runlogs/README.md), so an image copied out of the tree
+      alone keeps its notice. All maintainer-made (logos and serial-
+      console screenshots), copyright (C) 2025-2026 Borja Tarraso, and
+      released under the all-permissive license (FSFAP).
 
   (8) Project metadata: AUTHORS (this file).  Released under the
       all-permissive license (FSFAP); see the notice at the end of
@@ -128,9 +131,9 @@ A distributor wishing to repackage GEOS should:
     (they are the license texts the per-file notices refer to);
   - preserve the copyright notices, SPDX headers, full notice
     paragraphs, and "license" sections on the files that carry them;
-  - preserve docs/MEDIA.md, which documents the legal status of the
-    binary assets, where a notice cannot be embedded in the file
-    itself.
+  - preserve docs/MEDIA.md and the per-directory image READMEs, which
+    carry the copyright and license notices for the image files, where
+    a notice cannot be embedded in the file itself.
 
 The contribution policy in CONTRIBUTING.md asks every contributor to
 sign off under the Developer Certificate of Origin (a Signed-off-by
