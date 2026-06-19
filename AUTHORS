@@ -132,9 +132,11 @@ A distributor wishing to repackage GEOS should:
     binary assets, where a notice cannot be embedded in the file
     itself.
 
-The contribution policy in CONTRIBUTING.md requires an FSF copyright
-assignment for every contributor; until that paperwork is on file for
-a given contributor, their patches will not be merged.
+The contribution policy in CONTRIBUTING.md asks every contributor to
+sign off under the Developer Certificate of Origin (a Signed-off-by
+trailer on each commit); patches without a sign-off will not be merged.
+The maintainer holds the copyright and does not require copyright
+assignment to the FSF.
 
 ================================================================
 license, this file
