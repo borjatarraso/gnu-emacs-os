@@ -1,191 +1,213 @@
 <!-- SPDX-License-Identifier: FSFAP -->
 <!--
-Paste-ready submission body for the GNU project evaluation
-process described at https://www.gnu.org/help/evaluation.html.
+Paste-ready submission for the GNU package evaluation described at
+https://www.gnu.org/help/evaluation.html.
 
-Send to: gnu-prospective-projects@gnu.org
+Send to: gnueval@gnu.org  (plain text, per that page)
 Subject: Evaluation request: GNU/Emacs Operating System (GEOS)
 
-The evaluation committee asks for a structured form.  The
-section headers below correspond to the items listed in the
-"Submitting your package" section of that page.  Expect
-multi-week to multi-month turnaround; possible outcomes are
-acceptance, conditional acceptance with requested changes,
-or rejection.
+The body below follows the official questionnaire from that page
+(the "Questionnaire for offering software to GNU" section), field for
+field.  Send it as plain text and attach the signed release tarball.
 
-Before sending, confirm:
+Status before sending:
 
-  1. FSF copyright assignment paperwork is signed and on file
-     for every contributor (currently just the maintainer).
-     If not yet on file, request and sign before submission:
-     https://www.gnu.org/licenses/why-assign.html
-  2. The Savannah non-GNU registration is approved and the
-     git repository is live; the evaluation committee will
-     ask for a URL.
+  1. Contributor licensing is settled.  GEOS keeps copyright with the
+     maintainer (and contributors over their own work) and takes
+     contributions under the Developer Certificate of Origin, not FSF
+     copyright assignment.  The evaluation page confirms this is
+     allowed: "For a program to be GNU software does not require
+     transferring copyright to the FSF."
+  2. The Savannah project is approved (task #16779, 2026-06-22) and the
+     repository is live.
+  3. The granted Savannah unix name is `geos`; every URL below already
+     matches it.
 -->
 
-# GNU project evaluation submission, GEOS
+# GNU package evaluation submission, GEOS
 
-## Maintainer
+## General Information
 
-Borja Tarraso <borja.tarraso@member.fsf.org>
+### Do you agree to follow GNU policies?
 
-FSF associate member.  Signing key
-`4491 8A01 3087 BBF8 4D41 C229 4FD9 DE40 1BD9 C40C` (rsa4096).
+Yes.  I have read the Information for Maintainers of GNU Software and
+the GNU Coding Standards and I agree to follow them as maintainer of
+GEOS, including the terminology policy (GNU/Linux, free software) and
+the documentation-format policy discussed below.
 
-## Package name and version
+### Package name and version
 
-GNU/Emacs Operating System (GEOS), v1.0.0 released
-2026-06-01, tag `v1.0.0`.
+GNU/Emacs Operating System (GEOS), v1.0.1, tag `v1.0.1`, released
+2026-06-28, signed with the maintainer key.  v1.0.1 is v1.0.0 plus the
+complete per-file copyright and license notices added during the
+Savannah review; no code changed between the two.
 
-## Where to download
+### Author Full Name <Email>
 
-Public source repository (after Savannah approval):
+Borja Tarraso <borja.tarraso@member.fsf.org>.  FSF associate member.
+Signing key `4491 8A01 3087 BBF8 4D41 C229 4FD9 DE40 1BD9 C40C`
+(rsa4096).
 
-  https://git.savannah.nongnu.org/cgit/geos.git
-  (read-only mirror at https://github.com/borjatarraso/gnu-emacs-os)
+### URL to package home page (if any)
 
-Release tarballs are signed by the maintainer key above.
+https://savannah.nongnu.org/projects/geos (read-only mirror at
+https://github.com/borjatarraso/gnu-emacs-os).  If GEOS is accepted,
+the home page would move to https://www.gnu.org/software/geos.
 
-## What it does
+### URL to source tarball
 
-GEOS is an operating system in which GNU Emacs is the userland
-and GNU Emacs is PID 1.  The kernel (Linux or GNU/Hurd 0.9)
-provides hardware abstraction; everything above the kernel is
-Emacs and Elisp.
+A signed release tarball is attached to this message.  The same
+sources are at https://git.savannah.nongnu.org/cgit/geos.git, tag
+`v1.0.1`.
 
-The PID 1 binary is also an Emacs dynamic module, so the
-supervision code lives in the Emacs process itself.  There is
-no shell other than eshell; `/bin/sh` is a 50-line C stub that
-forwards `sh -c` into eshell via `emacsclient`.  Shepherd is
-removed entirely; service supervision is Elisp running inside
-the supervisor.  Every user-facing system concept is a buffer
-with a major mode and a refresh timer (`*processes*`,
-`*network*`, `*journal*`, `*services*`, `*disks*`,
+### Brief description of the package
+
+GEOS is an operating system in which GNU Emacs is the userland and GNU
+Emacs is PID 1.  The kernel (Linux or GNU/Hurd 0.9) provides hardware
+abstraction; everything above it is Emacs and Elisp.  The PID 1 binary
+is also an Emacs dynamic module, so the supervision code runs inside
+the Emacs process.  There is no shell other than eshell; `/bin/sh` is a
+50-line C stub that forwards `sh -c` into eshell via `emacsclient`.
+Shepherd is replaced; service supervision is Elisp.  Every user-facing
+system concept is a buffer with a major mode and a refresh timer
+(`*processes*`, `*network*`, `*journal*`, `*services*`, `*disks*`,
 `*packages*`, `*users*`, `*audio*`, `*install*`).
 
-GEOS runs end-to-end on both kernels:
+It runs end to end on both kernels.  On GNU/Linux: a Guix-built image
+with EXWM, a multi-user login flow, persistent `/var/emacs` on ext4,
+and supervised user sessions with workspace isolation.  On GNU/Hurd
+0.9: the same Emacs userland on canonical Debian GNU/Hurd, multi-user,
+with end-to-end SSH, the supervisor's Linux-only syscalls routed
+through Hurd backends (Mach RPC for reboot, pfinet for the `*network*`
+buffer, libports translators for peer credentials).
 
-  - Linux: Guix-built image, EXWM, multi-user login flow,
-    persistent `/var/emacs/` on ext4, supervised user
-    sessions with workspace isolation.
-  - GNU/Hurd 0.9: same Emacs userland on canonical Debian
-    GNU/Hurd 0.9, multi-user, end-to-end SSH, with the
-    supervisor's Linux-only syscalls routed through Hurd
-    backends (Mach RPC for reboot, pfinet ioctls for the
-    `*network*` buffer, etc.).
+## Code
 
-## Why it should be a GNU package
+### Dependencies
 
-GEOS is the first project that runs GNU Emacs as PID 1 on
-GNU/Hurd, end-to-end through a multi-user X session.  That puts
-it directly on the Free Software Foundation's longest-running
-research vector: the Hurd.  It also exercises every GNU Emacs
-extension surface (dynamic modules, EXWM, eshell, Tramp, native
-compilation, native threads where present) as a real userland
-rather than a development environment.
-
-The thesis (Emacs as the OS, not an editor on the OS) extends
-the existing Emacs-as-environment tradition that has been part
-of GNU since 1985.  No part of the design depends on
-proprietary software.  Build is reproducible from a pinned
-Guix channel.  License is GPL-3.0-or-later, with SPDX headers
-on every source file.
-
-The relationship to existing GNU packages:
-
-  - Emacs: the userland.  GEOS does not fork Emacs; it loads
-    Emacs as a dynamic module and runs the upstream Emacs
-    binary unmodified.
-  - Hurd: a first-class supported kernel.  The port seam in
-    `pid1/port_layer.h` has Hurd backends that exercise
-    real Mach RPC paths (`auth_server_authenticate`,
-    `get_privileged_ports`, `host_reboot`, pfinet ioctls,
-    libports translators for peer-cred).  Several upstream
-    Hurd bugs found during the port have draft patches in
-    `docs/upstream/` ready to be filed against the
-    bug-hurd / debbugs queues.
-  - Guix: the build orchestrator.  GEOS is a Guix-system
-    expression with a pinned channel.
-  - Shepherd: replaced.  This is a deliberate choice argued
-    in `docs/MANIFESTO.md`; it is the one place where GEOS
-    intentionally diverges from a sibling GNU project.  The
-    rationale (single-process supervision, no PID-1 fork
-    bombs from misconfigured service definitions, Elisp as
-    the configuration language) is documented openly and is
-    discussable.
-
-## Dependencies
-
-  - GNU Emacs 30.2 (lucid build, dynamic-module support, native
-    compilation).
+  - GNU Emacs 30.2 (lucid build, dynamic modules, native compilation).
   - GNU Make, GCC, glibc (build).
-  - GNU Hurd 0.9 with Mach (Hurd target).
-  - Linux 5.x+ (Linux target).
+  - GNU Hurd 0.9 with GNU Mach (Hurd target); Linux 5.x or later
+    (Linux target).
   - Xorg, EXWM 0.33, xelb 0.20.
-  - Guix (build orchestrator with a pinned channel; produces a
-    deterministic closure).
+  - Guix (build orchestrator with a pinned channel; deterministic
+    closure).
 
-All dependencies are free software.  The Hurd-side runtime adds
-no non-free components; the v1.x apt-image flavor uses Debian
-GNU/Hurd's main archive, which is free-software-only.
+All dependencies are free software.  The Hurd-side runtime adds no
+non-free components; the v1.x apt-image flavor uses Debian GNU/Hurd's
+main archive, which is free-software-only.
 
-## Documentation
+### Configuration, building, installation
 
-  - `README.md` (project entry point, mirrors this submission).
-  - `docs/MANIFESTO.md` (the why).
-  - `docs/ARCHITECTURE.md` (three zoom levels: process layout,
-    port seam, dual-kernel diagram).
-  - `docs/INSTALL.md` (Linux side).
-  - `docs/HURD_BOOT.md` (Hurd side, including the apt-image
-    flavor).
-  - `docs/HURD_PORT.md` (port matrix: every elisp-side feature
-    times every backend, with a status cell).
-  - `docs/CONTRIBUTING.md` (commit format, attribution-scan and
-    no-shell-check gates, freeze-test before phase done).
-  - Per-milestone receipts under `docs/runlogs/`.
-  - Upstream-draft material under `docs/upstream/`.
+The C components (the PID 1 binary in `pid1/` and the `/bin/sh` stub in
+`shstub/`) build with GNU Make and follow the GNU Makefile conventions:
+standard targets and DESTDIR-style staging.  The bootable system image
+is produced by a pinned Guix channel (a Guix operating-system
+expression), which is the project's reproducible build path rather than
+Autoconf.  I have read the GNU standards for configuration and Makefile
+conventions and will add a top-level configure-and-make wrapper that
+maps onto the standard targets and directory variables if the
+evaluators want the package to present the conventional
+`./configure && make && make install` surface in addition to the Guix
+path.
 
-## Internationalization
+### Documentation
 
-User-facing strings are English-only for now.  i18n is on the
-roadmap but not v1.0.  The `input.el` userland supports `quail`
-input methods (Pinyin, Anthy, Hangul tested), so non-Latin text
-entry works in any buffer.
+The manuals (architecture, install, internals, Hurd boot, Hurd port,
+user guide, manifesto) are written today in Markdown and licensed under
+the GNU FDL 1.3 or later, with the full FDL embedded in each.  I
+understand the GNU standard documentation format is Texinfo, and I will
+provide the manuals in Texinfo, with reference and tutorial material in
+one manual, as part of joining GNU.  The content exists today; the
+remaining work is the format conversion.
 
-## Maintainer commitment
+### Internationalization
 
-I commit to:
+User-visible strings are English-only today.  I will make them
+translatable with GNU Gettext as part of the i18n work already on the
+roadmap.  Text entry already works for non-Latin scripts: the
+`input.el` userland drives quail input methods (Pinyin, Anthy, Hangul
+tested) in any buffer.
 
-  - Continuing as maintainer indefinitely.
-  - Filing upstream patches against Hurd / Emacs / Guix as the
-    port surface uncovers bugs (current queue: 7 drafts under
+### Accessibility
+
+Every system surface is an ordinary Emacs buffer of text, so the whole
+UI is reachable through Emacs's existing accessibility paths:
+keyboard-only operation, large fonts via the HiDPI path in `fonts.el`,
+and screen readers or speech through Emacspeak, which operates on the
+same buffers.  There is no custom widget toolkit that would bypass
+those paths.  I treat accessibility regressions as release blockers
+alongside the Hurd matrix.
+
+### Security
+
+  - Authentication: the multi-user login verifies credentials and, on
+    GNU/Hurd, binds sessions to kernel-verified peer credentials over a
+    libports translator (the `auth_server_authenticate` path).
+  - Hardening: the login flow has audit logging, per-account throttle
+    and lockout on repeated failure, and a last-login footer.
+  - Privilege: PID 1 runs as root by necessity.  It checks every
+    syscall and reports errno to `/dev/console`, does no malloc in hot
+    paths, and the RPC supervisor channel
+    (AF_UNIX `/run/geos/super.sock`) verifies the peer before honoring
+    privileged verbs such as reboot and poweroff.
+  - Attack surface: no shell-out from supervisor code, enforced by the
+    `no-shell-check` pre-commit gate; eshell is the only shell surface,
+    and that is for users.
+  - No cryptographic algorithms are implemented in-tree; release
+    integrity relies on detached GPG signatures over tags and tarballs.
+
+## Licensing
+
+Code is under the GNU GPL version 3 or later (SPDX headers on every
+source file, COPYING at top level).  Manuals are under the GNU FDL 1.3
+or later (the full FDL is embedded in each manual, COPYING.DOC at top
+level).  Supporting files and media use the all-permissive license
+(FSFAP).  All dependencies listed above are free software; none requires
+a license that is not on gnu.org/philosophy/license-list.html.
+
+Copyright is held by the maintainer, and by future contributors over
+their own work.  Contributions are taken under the Developer
+Certificate of Origin (a `Signed-off-by` trailer); `docs/CONTRIBUTING.md`
+documents the flow.  Per the evaluation page, keeping the copyright is
+allowed; enforcement of the GPL is then mine rather than the FSF's.
+
+## Similar free software projects
+
+I searched the Free Software Directory and the wider free-software
+landscape:
+
+  - GNU Guix System uses GNU Shepherd as PID 1 and a Scheme
+    operating-system definition.  GEOS deliberately replaces Shepherd
+    with in-Emacs Elisp supervision; that is the one place GEOS
+    overlaps a sibling GNU project, and the rationale (single-process
+    supervision, Elisp as the configuration language, no separate init
+    daemon) is argued openly in `docs/MANIFESTO.md` and is open to
+    discussion.  GEOS is not a fork of the GNU system or its libraries;
+    it is a userland thesis layered on an unmodified Emacs.
+  - Emacs-as-environment tools (EXWM as a window manager, eshell,
+    Tramp, dired as a file manager) exist as separate packages, but
+    none runs Emacs as PID 1 or supervises system services from inside
+    Emacs.  GEOS is the integration of those into a bootable system.
+  - To my knowledge GEOS is the first project to run GNU Emacs as PID 1
+    on GNU/Hurd end to end through a multi-user X session.  That is
+    what motivated me to write it: it puts the Emacs userland directly
+    on the FSF's longest-running kernel research vector.
+
+## Any other information, comments, or questions
+
+  - Maintainer commitment: I will continue as maintainer indefinitely,
+    cut signed point releases on a roughly monthly cadence until v1.x
+    stabilizes, keep the Hurd port matrix (`docs/HURD_PORT.md`) green as
+    a release gate, and file upstream patches against Hurd, Emacs, and
+    Guix as the port uncovers bugs (seven drafts are queued under
     `docs/upstream/`).
-  - Cutting signed point releases on a roughly-monthly cadence
-    until v1.x stabilizes.
-  - Keeping the Hurd matrix green; a regression in any cell of
-    `docs/HURD_PORT.md` blocks the next release.
-  - Holding to the FSF copyright assignment policy for every
-    contributor.
-
-## Free-software hygiene
-
-  - No mentions of any proprietary tooling in the codebase or
-    history.  The pre-commit gate `attribution-scan` enforces
-    this and is mirrored in the `checks.yml` GitHub Action.
-  - No shell-out from supervisor code.  The pre-commit gate
-    `no-shell-check` enforces this; eshell is the only
-    permitted shell surface for users.
-  - Reproducible build from a pinned Guix channel.
-  - License: GPL-3.0-or-later for code (SPDX headers on every
-    source file, COPYING at top level), GFDL-1.3-or-later for
-    the manuals (full FDL embedded in each, COPYING.DOC at top
-    level), the all-permissive license for supporting files and
-    media.  AUTHORS lists the maintainer, the signing key, and
-    the per-category breakdown.
-
-I am happy to amend, split, or otherwise restructure the
-submission per the evaluation committee's feedback.
+  - Free-software hygiene: reproducible build from a pinned Guix
+    channel; no recommendation of any non-free program or
+    documentation; a pre-commit gate that keeps the tree and history
+    free of references to proprietary tooling, mirrored in CI.
+  - I am happy to amend, split, or restructure anything per the
+    evaluators' feedback.
 
 Sincerely,
 Borja Tarraso
