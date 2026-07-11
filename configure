@@ -1,0 +1,304 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+#
+# This file is part of GEOS.
+#
+# GEOS is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# GEOS is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with GEOS.  If not, see <https://www.gnu.org/licenses/>.
+#
+# hand-written configure, no autoconf.  it follows the GNU Coding
+# Standards configuration interface (the standard directory variables,
+# CC/CFLAGS from the environment, --help, --version) and writes a
+# config.mk that the top-level Makefile includes.  the standards permit
+# a hand-written configure as long as it honours the standard options;
+# i went that way instead of generating one because everything in this
+# tree is written by hand and i would rather own this file than vendor a
+# generated blob i cannot read at 1am.
+#
+# this is a real POSIX shell script and it is meant to be run by a real
+# POSIX shell.  eshell is the interactive shell in GEOS; it is not the
+# thing that runs configure.  that distinction is the whole point of the
+# build-shell policy documented in docs/MANIFESTO.md.
+
+set -eu
+
+PACKAGE=geos
+VERSION=1.0.2
+
+# preserve the original argument list so config.status --recheck can
+# replay it.  each argument is single-quoted so spaces and globs survive.
+configure_args=
+for a in "$@"; do
+    esc=$(printf '%s' "$a" | sed "s/'/'\\\\''/g")
+    configure_args="$configure_args '$esc'"
+done
+
+# directory variables.  defaults per the GNU Makefile Conventions.  the
+# ones expressed as make references (exec_prefix, bindir, ...) stay as
+# references so `make prefix=/foo install` still cascades; a variable is
+# only frozen to a literal path when the user passes its specific flag.
+prefix=/usr/local
+exec_prefix='$(prefix)'
+bindir='$(exec_prefix)/bin'
+sbindir='$(exec_prefix)/sbin'
+libexecdir='$(exec_prefix)/libexec'
+datarootdir='$(prefix)/share'
+datadir='$(datarootdir)'
+sysconfdir='$(prefix)/etc'
+localstatedir='$(prefix)/var'
+runstatedir='$(localstatedir)/run'
+includedir='$(prefix)/include'
+mandir='$(datarootdir)/man'
+infodir='$(datarootdir)/info'
+docdir='$(datarootdir)/doc/$(PACKAGE)'
+
+# build knobs.  static linking is on by default because PID 1 and
+# /bin/sh must not depend on a shared library that may not be mounted
+# yet; --disable-static is here for compile-checks on hosts without a
+# static libc.
+enable_static=yes
+
+# user build variables.  empty means "let the component Makefiles use
+# their own hardened defaults"; a value set on the command line or in
+# the environment overrides them.  CFLAGS is user-owned: if left unset i
+# do NOT clobber the per-component CFLAGS, which carry -Werror and the
+# FORTIFY/stack-protector pair.
+: "${CC:=}"
+: "${CFLAGS:=}"
+: "${CPPFLAGS:=}"
+: "${LDFLAGS:=}"
+user_set_cflags=no
+user_set_cppflags=no
+user_set_ldflags=no
+[ -n "$CFLAGS" ] && user_set_cflags=yes
+[ -n "$CPPFLAGS" ] && user_set_cppflags=yes
+[ -n "$LDFLAGS" ] && user_set_ldflags=yes
+
+# where the sources live.  a proper VPATH build (configure run from a
+# separate directory) is not wired through the component Makefiles yet,
+# so for now configure must be run from the top of the source tree.
+srcdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+usage () {
+    cat <<EOF
+'configure' prepares GEOS $VERSION for building on your system.
+
+Usage: ./configure [OPTION]... [VAR=VALUE]...
+
+To assign environment variables (e.g. CC, CFLAGS), set them as
+VAR=VALUE arguments or export them before running configure.
+
+Options:
+  -h, --help              display this help and exit
+  -V, --version           display version information and exit
+  --enable-static         link the binaries statically (default)
+  --disable-static        do not link statically (for compile-checks)
+
+Installation directories:
+  --prefix=DIR            install architecture-independent files in DIR
+                          [/usr/local]
+  --exec-prefix=DIR       install architecture-dependent files in DIR
+                          [PREFIX]
+
+Fine tuning of the installation directories:
+  --bindir=DIR            user executables [EPREFIX/bin]
+  --sbindir=DIR           system admin executables [EPREFIX/sbin]
+  --libexecdir=DIR        program executables [EPREFIX/libexec]
+  --sysconfdir=DIR        read-only single-machine data [PREFIX/etc]
+  --localstatedir=DIR     modifiable single-machine data [PREFIX/var]
+  --runstatedir=DIR       modifiable per-process data [LOCALSTATEDIR/run]
+  --datarootdir=DIR       read-only arch-independent data root
+                          [PREFIX/share]
+  --datadir=DIR           read-only arch-independent data [DATAROOTDIR]
+  --includedir=DIR        C header files [PREFIX/include]
+  --mandir=DIR            man documentation [DATAROOTDIR/man]
+  --infodir=DIR           info documentation [DATAROOTDIR/info]
+  --docdir=DIR            documentation root [DATAROOTDIR/doc/geos]
+
+Some influential environment variables:
+  CC          C compiler command
+  CFLAGS      C compiler flags (overrides the hardened per-component
+              defaults if you set it)
+  CPPFLAGS    C preprocessor flags
+  LDFLAGS     linker flags
+
+Report bugs to <borja.tarraso@member.fsf.org>.
+EOF
+}
+
+# --opt=value returns value in optarg; cross-compile triplet flags and
+# the autoconf pass-through flags are accepted and ignored (the tree
+# only builds native today).
+while [ $# -gt 0 ]; do
+    opt=$1
+    case $opt in
+        *=*) optarg=${opt#*=} ;;
+        *)   optarg= ;;
+    esac
+    case $opt in
+        -h|--help)            usage; exit 0 ;;
+        -V|--version)         echo "$PACKAGE configure $VERSION"; exit 0 ;;
+        --prefix=*)           prefix=$optarg ;;
+        --exec-prefix=*)      exec_prefix=$optarg ;;
+        --bindir=*)           bindir=$optarg ;;
+        --sbindir=*)          sbindir=$optarg ;;
+        --libexecdir=*)       libexecdir=$optarg ;;
+        --sysconfdir=*)       sysconfdir=$optarg ;;
+        --localstatedir=*)    localstatedir=$optarg ;;
+        --runstatedir=*)      runstatedir=$optarg ;;
+        --datarootdir=*)      datarootdir=$optarg ;;
+        --datadir=*)          datadir=$optarg ;;
+        --includedir=*)       includedir=$optarg ;;
+        --mandir=*)           mandir=$optarg ;;
+        --infodir=*)          infodir=$optarg ;;
+        --docdir=*)           docdir=$optarg ;;
+        --enable-static)      enable_static=yes ;;
+        --disable-static)     enable_static=no ;;
+        --enable-static=*)    enable_static=$optarg ;;
+        --build=*|--host=*|--target=*) : ;;
+        --program-prefix=*|--program-suffix=*|--program-transform-name=*) : ;;
+        --cache-file=*|--config-cache|-C|--no-create|-n|--quiet|-q|--silent) : ;;
+        --srcdir=*)           srcdir=$optarg ;;
+        CC=*)                 CC=$optarg ;;
+        CFLAGS=*)             CFLAGS=$optarg; user_set_cflags=yes ;;
+        CPPFLAGS=*)           CPPFLAGS=$optarg; user_set_cppflags=yes ;;
+        LDFLAGS=*)            LDFLAGS=$optarg; user_set_ldflags=yes ;;
+        [A-Za-z_]*=*)         echo "configure: warning: ignoring unrecognized variable: $opt" >&2 ;;
+        -*)                   echo "configure: warning: unrecognized option: $opt" >&2 ;;
+        *)                    echo "configure: warning: unrecognized argument: $opt" >&2 ;;
+    esac
+    shift
+done
+
+case $enable_static in
+    yes) static_val=1 ;;
+    no)  static_val=0 ;;
+    *)   echo "configure: error: --enable-static takes yes or no, got: $enable_static" >&2; exit 1 ;;
+esac
+
+if [ "$srcdir" != "$(pwd)" ]; then
+    echo "configure: error: separate build directories are not supported yet;" >&2
+    echo "configure: run ./configure from the top of the source tree." >&2
+    exit 1
+fi
+
+# find a C compiler.  honour $CC if set, else try the usual names.  the
+# component Makefiles default CC to gcc, but resolving it here means
+# `make` picks up whatever actually exists on this host.
+find_cc () {
+    if [ -n "$CC" ]; then
+        command -v "$CC" >/dev/null 2>&1 && { echo "$CC"; return 0; }
+        return 1
+    fi
+    for c in cc gcc clang; do
+        command -v "$c" >/dev/null 2>&1 && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
+printf 'checking for a C compiler... '
+if CC=$(find_cc); then
+    echo "$CC"
+else
+    echo "no"
+    echo "configure: error: no C compiler found; set CC= or install gcc." >&2
+    exit 1
+fi
+
+# make sure it actually compiles and links a trivial program in the
+# requested static/non-static mode, so a broken toolchain fails now
+# rather than three targets deep into make.
+printf 'checking whether the C compiler works... '
+conftest_c=$(mktemp conftestXXXXXX.c)
+conftest_x=${conftest_c%.c}
+trap 'rm -f "$conftest_c" "$conftest_x"' EXIT INT TERM
+printf 'int main(void){return 0;}\n' > "$conftest_c"
+static_link_flag=
+[ "$static_val" = 1 ] && static_link_flag=-static
+if $CC $CFLAGS $CPPFLAGS $static_link_flag $LDFLAGS -o "$conftest_x" "$conftest_c" >/dev/null 2>&1; then
+    echo "yes"
+elif [ "$static_val" = 1 ] && $CC $CFLAGS $CPPFLAGS $LDFLAGS -o "$conftest_x" "$conftest_c" >/dev/null 2>&1; then
+    echo "no"
+    echo "configure: error: --enable-static requested but the toolchain" >&2
+    echo "configure: cannot link -static here (no libc.a?).  install the" >&2
+    echo "configure: static libc, or pass --disable-static for a" >&2
+    echo "configure: non-static compile-check build." >&2
+    exit 1
+else
+    echo "no"
+    echo "configure: error: the C compiler cannot create executables." >&2
+    exit 1
+fi
+rm -f "$conftest_c" "$conftest_x"
+trap - EXIT INT TERM
+
+# emit config.mk.  the values that are still make references arrive
+# literal because they were single-quoted at assignment; the shell here
+# only substitutes the ones the user pinned to a real path.
+{
+    cat <<EOF
+# produced by ./configure -- do not edit.  edit configure and re-run
+# it, or run 'make distclean' to remove this file.
+PACKAGE = $PACKAGE
+VERSION = $VERSION
+
+CC = $CC
+STATIC = $static_val
+
+prefix = $prefix
+exec_prefix = $exec_prefix
+bindir = $bindir
+sbindir = $sbindir
+libexecdir = $libexecdir
+datarootdir = $datarootdir
+datadir = $datadir
+sysconfdir = $sysconfdir
+localstatedir = $localstatedir
+runstatedir = $runstatedir
+includedir = $includedir
+mandir = $mandir
+infodir = $infodir
+docdir = $docdir
+EOF
+    # only forward user build variables that were actually set, so an
+    # unset CFLAGS leaves the per-component hardened flags in charge.
+    [ "$user_set_cflags" = yes ]   && echo "CFLAGS = $CFLAGS"
+    [ "$user_set_cppflags" = yes ] && echo "CPPFLAGS = $CPPFLAGS"
+    [ "$user_set_ldflags" = yes ]  && echo "LDFLAGS = $LDFLAGS"
+    :
+} > config.mk
+
+# config.status: the GNU standards expect './config.status --recheck' to
+# regenerate config.mk from the same arguments.  a small wrapper is
+# enough for a hand-written configure.
+cat > config.status <<EOF
+#!/bin/sh
+# regenerated build configuration.  run with --recheck to re-run
+# configure with the arguments that produced this file.
+case \${1:-} in
+    --recheck) exec "$srcdir/configure"$configure_args ;;
+    *) echo "config.status: GEOS $VERSION configured; run './config.status --recheck' to reconfigure." ; exit 0 ;;
+esac
+EOF
+chmod +x config.status
+
+echo
+echo "GEOS $VERSION configured:"
+echo "  CC        = $CC"
+echo "  static    = $enable_static"
+echo "  prefix    = $prefix"
+echo "  sbindir   = $sbindir  (emacs-init lands here)"
+echo "  bindir    = $bindir  (the /bin/sh stub lands here)"
+echo
+echo "Now run 'make' then 'make install' (use DESTDIR= for staged installs)."

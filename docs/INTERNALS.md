@@ -348,11 +348,12 @@ Opens an eshell buffer. Type `uname -a`. The flow:
      stays accurate. Only the `sysname` is overridden. The original
      `Linux` shows in parens at the end so nothing is hidden.
 
-`/bin/sh` is the shstub from `shstub/sh.c`. It does not exec a real
-shell; it forwards `sh -c "<cmd>"` to `emacsclient` which evaluates
-the command in an eshell buffer. Anything in the system that
-shells-out (Guix package post-install, magit's `pre-receive` hook,
-etc.) goes through this.
+`/bin/sh` is a real POSIX shell, so `./configure`, `make`, and stock
+GNU package builds run the normal way; eshell is the interactive shell,
+not the build shell. Earlier releases pointed `/bin/sh` at the
+`shstub/sh.c` stub, which forwarded `sh -c "<cmd>"` into an eshell
+buffer via `emacsclient`. That broke stock builds (make runs its
+recipes through `/bin/sh`) and it is being retired.
 
 ### the system-concept buffers
 
@@ -510,7 +511,9 @@ event. Without these, there is no way to shut down: there is no
 ## what NOT to do
 
   - Do not add a Shepherd service. Service supervision is Elisp.
-  - Do not add a shell. Eshell is the only shell.
+  - Do not route `/bin/sh` back through eshell. Eshell is the
+    interactive shell; `/bin/sh` must stay a real POSIX shell so stock
+    builds work.
   - Do not call `error` from a hot path; use `panic-handle`.
   - Do not add a feature without a `:comment` justification on its
     `use-package` block.

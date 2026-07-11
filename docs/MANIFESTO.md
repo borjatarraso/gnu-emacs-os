@@ -60,22 +60,36 @@ is there anything outside of Emacs at all".
 Because Stallman sketched something like this years ago, in a footnote,
 and I wanted to see if it was actually possible. Turns out it almost is.
 
-## the hard rule about the shell
+## the shell, and where i changed my mind
 
-There is no shell other than eshell. `/bin/sh` exists, but it is a 50
-line C stub that turns `sh -c "<cmd>"` into a call to `emacsclient`
-that runs `<cmd>` inside an eshell. No bash. No dash. No busybox.
+Eshell is the interactive shell. It is the login shell, it is what
+`M-x` reaches for, it is what you type into. It has lambdas and hash
+tables and a debugger and structured data, and it is the same thing I
+get everywhere else in Emacs. That part of the thesis is not moving.
 
-This breaks things. Some Guix package post-install scripts depend on
-heredocs or `$(())` or other POSIX shell features eshell does not have
-the same mouth shape for. When that happens I document the package in
-`guix-system/exceptions.scm` and route around it. The list is short and
-keeps shrinking.
+The part that moved: for a long time `/bin/sh` here was a 50 line C
+stub that turned `sh -c "<cmd>"` into an `emacsclient` call routed
+through eshell, and I told myself that was the point, that I did not
+want a POSIX shell on my system at all. That was wrong, and building
+GNU software is what showed me it was wrong. `./configure` is a POSIX
+shell script. `make` runs its recipes through `/bin/sh`. If `/bin/sh`
+is not a real POSIX shell then GNU Hello does not build, autoconf does
+not run, and the "operating system" cannot do the most ordinary job a
+GNU system has, which is compile a GNU package from source. An OS that
+cannot build its own software is a demo, not an OS.
 
-I think this is the right call. The shell is not a programming language
-I want on my system any more. Eshell is. It has lambdas and hash tables
-and a debugger and structured data, and it is the same thing I get when
-I `M-x shell` everywhere else.
+So `/bin/sh` is a real POSIX shell now. Eshell stays exactly where it
+was, as the shell I live in; the POSIX shell sits underneath for
+scripts and builds, the way it does on any other system. The
+distinction I actually care about was never "no POSIX shell exists", it
+was "the interactive and administrative surface is Emacs". That
+distinction survives intact. I just stopped pretending the build
+toolchain could run inside eshell.
+
+The old exceptions list in `guix-system/exceptions.scm` (packages whose
+post-install scripts wanted heredocs or `$(())` the stub could not give
+them) exists to be deleted now. A real `/bin/sh` has the right mouth
+shape for all of it.
 
 ## the failure mode I accept
 
@@ -111,7 +125,10 @@ to not use this OS.
     inside the Emacs process.
   - The panic buffer catches every uncaught Elisp error and refuses to
     let Emacs exit. The freeze-test suite abuses it on every release.
-  - eshell is the only shell. `/bin/sh` is the stub. `uname -a` reads
+  - eshell is the interactive shell. `/bin/sh` is a POSIX shell so
+    stock `./configure` and `make` builds work; the earlier
+    eshell-forwarding stub is being retired (see "the shell, and where
+    i changed my mind" above). `uname -a` reads
     `GEOS lambda <release> ... GNU/Emacs (Linux)` on Linux and
     `GNU/Emacs (Hurd)` on canonical Debian GNU/Hurd 0.9.
   - EXWM with the modesetting Xorg driver. Real keyboard and mouse in

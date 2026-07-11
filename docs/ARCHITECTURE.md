@@ -63,9 +63,9 @@ into Elisp.
 |    loop:    waitpid; respawn emacs; respawn Xorg (capped)    |
 +----------------------------+---------------------------------+
                              |   |
-            port_caps        |   |   /bin/sh -> shstub
-        (function-ptr table) |   |   (50-line C stub that
-                             |   |    forwards to emacsclient)
+            port_caps        |   |   /bin/sh is a real POSIX shell
+        (function-ptr table) |   |   (so ./configure and make run;
+                             |   |    the old eshell stub is retired)
                              v   v
 +--------------------------------------------------------------+
 |  the kernel (Linux today, GNU Hurd next)                     |
@@ -74,7 +74,8 @@ into Elisp.
 
 What every box does, in two lines or less:
 
-  - **the user**: types `M-x`, sees buffers. The shell is eshell.
+  - **the user**: types `M-x`, sees buffers. The interactive shell is
+    eshell.
   - **system-concept buffers**: every concept a Unix user would
     reach a CLI for (top, ip a, dmesg, df, apt) is a buffer.
   - **EXWM**: turns X11 windows into Emacs buffers.
@@ -88,8 +89,9 @@ What every box does, in two lines or less:
   - **pid1 binary**: PID 1. The supervisor of Emacs.
   - **port_caps**: the function-pointer struct that lets the same
     pid1 source run on two kernels.
-  - **shstub**: `/bin/sh` is a tiny stub that forwards `sh -c`
-    into eshell via `emacsclient`. No bash, no dash, no busybox.
+  - **shstub**: the `shstub/` C program. `/bin/sh` is a real POSIX
+    shell now, so `./configure` and `make` build stock packages; the
+    old `sh -c` into eshell forwarding stub is being retired.
 
 ## Level 2, the major subsystems
 

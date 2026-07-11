@@ -29,7 +29,7 @@ the same data, and `M-x` your way there.
 ## the very first things to learn
 
 ```
-M-x eshell                open an eshell. there is no other shell.
+M-x eshell                open an eshell (the interactive shell).
 M-x processes             *processes* buffer (top-equivalent).
 M-x network               *network* buffer (ip-equivalent).
 M-x journal               *journal* buffer (dmesg follower).
@@ -62,9 +62,12 @@ manager. If you want a side-by-side layout, use Emacs windows
 
 ## the shell question
 
-The shell is eshell. There is no bash, no dash, no zsh; `/bin/sh` is a
-50 line C stub that forwards `sh -c "<cmd>"` to an eshell evaluation
-via `emacsclient`. This is by design and it is not changing.
+The interactive shell is eshell. It is what you type into and it is the
+login shell. A real POSIX shell also lives on the system as `/bin/sh`,
+so `./configure`, `make`, and stock GNU packages build the normal way;
+eshell is the shell you use, the POSIX shell is what build scripts run
+under. (Earlier releases pointed `/bin/sh` at an eshell-forwarding
+stub. That broke stock builds and it is being retired.)
 
 What you can do in eshell that you cannot in bash:
 
@@ -73,15 +76,16 @@ What you can do in eshell that you cannot in bash:
   - `*foo*`-style buffer-redirection: `ls > #<buffer foo>`.
   - `M-x` from the prompt: just type `find-file` and hit enter.
 
-What you cannot do that you might miss:
+What eshell does not do (reach for `/bin/sh` when you need these):
 
   - heredocs. eshell does not have them.
   - `$(())` arithmetic. use `(+ ...)`.
   - process substitution (`<(cmd)`). use a temp buffer.
 
-If a Guix package post-install script depends on a real POSIX shell
-feature, the workaround lives in `guix-system/exceptions.scm`; the
-list is short.
+If you actually need a POSIX shell feature, `/bin/sh` is a POSIX shell,
+so run it there. The old `guix-system/exceptions.scm` list (packages
+whose post-install scripts the eshell stub could not run) exists to be
+emptied now that `/bin/sh` is real.
 
 ## the system-concept buffers
 

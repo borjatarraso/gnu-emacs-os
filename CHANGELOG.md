@@ -7,6 +7,33 @@ the tagged commit. The signed tag for each release carries the
 full per-slice commit list; this file is the short version. The
 matching GitHub release page mirrors each entry.
 
+## v1.0.2 (2026-07-11)
+
+Build surface and shell policy, from the GNU evaluation review.
+
+  - **conventional build**: a hand-written top-level `configure` and
+    `Makefile` following the GNU configuration and Makefile
+    conventions: standard directory variables, `DESTDIR` staging, and
+    the standard target set (`all`, `install`, `install-strip`,
+    `uninstall`, `installdirs`, `clean`, `distclean`, `mostlyclean`,
+    `maintainer-clean`, `check`, `installcheck`, `dist`, `TAGS`, and
+    the documentation-format targets).  it recurses into `pid1/` and
+    `shstub/`.  this is the conventional
+    `./configure && make && make install` surface alongside the Guix
+    image path.
+  - **shell policy**: `/bin/sh` is a real POSIX shell so `./configure`
+    and `make` build stock GNU packages; eshell stays the interactive
+    and login shell.  the old sh-to-emacsclient stub is retired.  the
+    manifesto, README, user guide, architecture, and internals docs
+    are reworded to match.
+  - no change to the `pid1/` or `shstub/` C or the elisp userland;
+    this release adds the build surface and corrects the docs.
+
+## v1.0.1 (2026-06-28)
+
+v1.0.0 plus the complete per-file copyright and license notices added
+during the Savannah review.  No code change from v1.0.0.
+
 ## v1.0.0 (2026-06-01)
 
 State declaration.  Emacs as PID 1 on both Linux and canonical

@@ -29,15 +29,15 @@ If `geos` is already taken on Savannah, fall back in this order:
 
 ## Project Description (Short, one paragraph)
 
-GEOS is an operating system where GNU Emacs is the userland and
-GNU Emacs is PID 1.  The first userspace process the kernel
-starts is a small C program that immediately becomes Emacs and
-then loads itself back into that Emacs as a dynamic module, so
-the supervisor lives inside the supervised process.  There is
-no shell other than eshell; `/bin/sh` is a 50-line C stub that
-forwards to eshell via emacsclient.  Shepherd is removed
-entirely; service supervision is Elisp.  Every system concept
-(`top`, `ip a`, `journalctl`, `df`, `apt`) is a buffer with a
+GEOS is an operating system where GNU Emacs is PID 1 and GNU
+Emacs is the interactive userland.  The first userspace process
+the kernel starts is a small C program that immediately becomes
+Emacs and then loads itself back into that Emacs as a dynamic
+module, so the supervisor lives inside the supervised process.
+The interactive shell is eshell, and `/bin/sh` is a real POSIX
+shell so `./configure` and `make` build stock packages.  Shepherd
+is removed entirely; service supervision is Elisp.  Every system
+concept (`top`, `ip a`, `journalctl`, `df`, `apt`) is a buffer with a
 major mode.  GEOS runs end-to-end as PID 1 on both Linux and
 canonical Debian GNU/Hurd 0.9, multi-user, with EXWM.
 
@@ -72,8 +72,8 @@ this struct.  A `STATIC=1` build inlines the supervisor
 primitives into a statically linked `emacs-init` binary
 (verified at v0.9.17: ~1.5 MiB, zero dynamic deps).
 
-A 50-line `/bin/sh` stub forwards `sh -c` into eshell via
-`emacsclient`; no other shell exists in the image.  EXWM brings
+`/bin/sh` is a real POSIX shell so stock `./configure` and `make`
+builds run; eshell is the interactive shell.  EXWM brings
 up real Xorg against virtio_gpu's KMS device.  The supervisor
 exposes an `AF_UNIX` RPC channel at `/run/geos/super.sock` with
 `SO_PEERCRED` gating on Linux and `auth_server_authenticate` on

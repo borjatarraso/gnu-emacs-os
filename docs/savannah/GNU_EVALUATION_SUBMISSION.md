@@ -37,10 +37,12 @@ the documentation-format policy discussed below.
 
 ### Package name and version
 
-GNU/Emacs Operating System (GEOS), v1.0.1, tag `v1.0.1`, released
-2026-06-28, signed with the maintainer key.  v1.0.1 is v1.0.0 plus the
-complete per-file copyright and license notices added during the
-Savannah review; no code changed between the two.
+GNU/Emacs Operating System (GEOS), v1.0.2, tag `v1.0.2`, released
+2026-07-11, signed with the maintainer key.  v1.0.2 is v1.0.1 plus the
+conventional configure-and-make build surface and the shell-policy
+correction described below; v1.0.1 was v1.0.0 plus the complete
+per-file copyright and license notices added during the Savannah
+review.
 
 ### Author Full Name <Email>
 
@@ -58,22 +60,31 @@ the home page would move to https://www.gnu.org/software/geos.
 
 A signed release tarball is attached to this message.  The same
 sources are at https://git.savannah.nongnu.org/cgit/geos.git, tag
-`v1.0.1`.
+`v1.0.2`.
 
 ### Brief description of the package
 
-GEOS is an operating system in which GNU Emacs is the userland and GNU
-Emacs is PID 1.  The kernel (Linux or GNU/Hurd 0.9) provides hardware
-abstraction; everything above it is Emacs and Elisp.  The PID 1 binary
-is also an Emacs dynamic module, so the supervision code runs inside
-the Emacs process.  There is no shell other than eshell; `/bin/sh` is a
-50-line C stub that forwards `sh -c` into eshell via `emacsclient`.
-Shepherd is replaced; service supervision is Elisp.  Every user-facing
-system concept is a buffer with a major mode and a refresh timer
-(`*processes*`, `*network*`, `*journal*`, `*services*`, `*disks*`,
-`*packages*`, `*users*`, `*audio*`, `*install*`).
+GEOS is an operating system in which GNU Emacs is PID 1 and GNU Emacs
+is the interactive userland.  The kernel (Linux or GNU/Hurd 0.9)
+provides hardware abstraction.  The whole interactive and
+administrative surface above it is Emacs and Elisp: the login shell is
+eshell, the window manager is EXWM, the file manager is dired, and
+every system concept a user would reach for is an Emacs buffer with a
+major mode and a refresh timer (`*processes*`, `*network*`, `*journal*`,
+`*services*`, `*disks*`, `*packages*`, `*users*`, `*audio*`,
+`*install*`).  Ordinary command-line programs (GNU coreutils,
+findutils and the rest) are present as on any GNU system, and eshell
+runs them the way any shell runs external commands; the "Emacs is the
+userland" claim is about the interactive surface, not a claim that
+Emacs is the only executable on the system.  The PID 1 binary is also
+an Emacs dynamic module, so the supervision code runs inside the Emacs
+process, and Shepherd is not used: service supervision is Elisp.  A
+real POSIX shell is provided as `/bin/sh` so standard packages build
+(`./configure`, `make`); eshell is the interactive shell, not the
+build shell.
 
-It runs end to end on both kernels.  On GNU/Linux: a Guix-built image
+GEOS has two targets, one per kernel, and it runs end to end on both.
+On GNU/Linux: a Guix-built image
 with EXWM, a multi-user login flow, persistent `/var/emacs` on ext4,
 and supervised user sessions with workspace isolation.  On GNU/Hurd
 0.9: the same Emacs userland on canonical Debian GNU/Hurd, multi-user,
@@ -99,17 +110,30 @@ main archive, which is free-software-only.
 
 ### Configuration, building, installation
 
-The C components (the PID 1 binary in `pid1/` and the `/bin/sh` stub in
-`shstub/`) build with GNU Make and follow the GNU Makefile conventions:
-standard targets and DESTDIR-style staging.  The bootable system image
-is produced by a pinned Guix channel (a Guix operating-system
-expression), which is the project's reproducible build path rather than
-Autoconf.  I have read the GNU standards for configuration and Makefile
-conventions and will add a top-level configure-and-make wrapper that
-maps onto the standard targets and directory variables if the
-evaluators want the package to present the conventional
-`./configure && make && make install` surface in addition to the Guix
-path.
+The package builds with the conventional
+`./configure && make && make install`.  The top-level `configure` is a
+hand-written POSIX shell script following the GNU configuration
+interface: the standard directory variables, `CC`/`CFLAGS` from the
+environment, `--prefix` and the per-directory flags, `--help`,
+`--version`, and `config.status --recheck`.  It writes `config.mk`,
+which the top-level Makefile includes.  The Makefile follows the GNU
+Makefile Conventions: the standard directory variables, `DESTDIR`
+staging, and the standard target set (`all`, `install`,
+`install-strip`, `uninstall`, `installdirs`, `clean`, `distclean`,
+`mostlyclean`, `maintainer-clean`, `check`, `installcheck`, `dist`,
+`TAGS`, and the documentation-format targets).  It recurses into the
+two C components, the PID 1 binary in `pid1/` and the `/bin/sh` program
+in `shstub/`.
+
+This sits alongside the reproducible image path, which is a pinned Guix
+channel (a Guix operating-system expression) on GNU/Linux and
+`iso-build/hurd-image-reroll.sh` on GNU/Hurd; that path remains the way
+the full bootable system is produced.  Two limitations I would rather
+state than have you find: `configure` is hand-written rather than
+produced by Autoconf (I can migrate it if you prefer Autoconf), and
+separate build directories (VPATH) are not yet wired through the
+component Makefiles, so the tree builds in place for now.  Both are
+noted in the source.
 
 ### Documentation
 
@@ -152,8 +176,10 @@ alongside the Hurd matrix.
     (AF_UNIX `/run/geos/super.sock`) verifies the peer before honoring
     privileged verbs such as reboot and poweroff.
   - Attack surface: no shell-out from supervisor code, enforced by the
-    `no-shell-check` pre-commit gate; eshell is the only shell surface,
-    and that is for users.
+    `no-shell-check` pre-commit gate; the supervisor never invokes a
+    shell.  eshell is the interactive shell for users and `/bin/sh` is
+    a POSIX shell for scripts and builds; neither sits on a supervisor
+    code path.
   - No cryptographic algorithms are implemented in-tree; release
     integrity relies on detached GPG signatures over tags and tarballs.
 

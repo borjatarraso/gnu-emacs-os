@@ -12,7 +12,7 @@ An operating system where Emacs is the userland and Emacs is PID 1.
 Short name is GEOS, full name is GNU/Emacs Operating System; the rest
 of this document uses GEOS.
 
-There is no shell other than eshell. There is no Shepherd. There is no
+The interactive shell is eshell. There is no Shepherd. There is no
 systemd. The first userspace process the kernel starts is a small C
 program that becomes Emacs and then loads itself back as an Emacs
 dynamic module, so the supervisor lives inside the supervised process.
@@ -62,8 +62,9 @@ For Hurd: on a fresh Debian GNU/Hurd 0.9 image, run
     via a dynamic module.
   - The panic buffer catches every uncaught error and refuses to let
     Emacs die.
-  - `/bin/sh` is a 50-line C stub that forwards into eshell. No bash,
-    no dash, no busybox.
+  - `/bin/sh` is a real POSIX shell so stock `./configure` and `make`
+    builds work; eshell is the interactive shell. The earlier
+    eshell-forwarding stub is being retired.
   - EXWM brings up real Xorg with the modesetting driver against
     virtio_gpu's KMS device. Keyboard and mouse work in QEMU. X11
     windows are buffers.
