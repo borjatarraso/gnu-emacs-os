@@ -2,12 +2,12 @@
 ep_version: 1
 project: emacs-os
 title: GNU/Emacs Operating System (GEOS)
-status: PAUSED
-last_touched: 2026-07-11
-last_touched_text: 11 July 2026
+status: IDLE
+last_touched: 2026-08-15
+last_touched_text: 15 August 2026
 section: top
 category: tech
-generated: 2026-08-15
+generated: 2026-09-08
 ep_locked: false   # set true and this file is never regenerated
 ---
 
@@ -15,7 +15,7 @@ ep_locked: false   # set true and this file is never regenerated
 
 > The Operating System based on GNU/Emacs
 
-🟠 **PAUSED** · last touched **11 July 2026** (last commit)
+🟡 **IDLE** · last touched **15 August 2026** (last commit)
 
 ---
 
@@ -85,4 +85,4 @@ make                                  # Makefile default target
 Part of the LINCE company · © All rights reserved
 
 
-<sub>Standard entry-point card (`index.ep.md`, format v1) — generated 2026-08-15 by Lynx Factory. Regenerating overwrites this file unless `ep_locked: true`.</sub>
+<sub>Standard entry-point card (`index.ep.md`, format v1) — generated 2026-09-08 by Lynx Factory. Regenerating overwrites this file unless `ep_locked: true`.</sub>
