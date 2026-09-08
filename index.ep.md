@@ -2,9 +2,9 @@
 ep_version: 1
 project: emacs-os
 title: GNU/Emacs Operating System (GEOS)
-status: IDLE
-last_touched: 2026-08-15
-last_touched_text: 15 August 2026
+status: PAUSED
+last_touched: 2026-07-11
+last_touched_text: 11 July 2026
 section: top
 category: tech
 generated: 2026-09-08
@@ -15,7 +15,7 @@ ep_locked: false   # set true and this file is never regenerated
 
 > The Operating System based on GNU/Emacs
 
-🟡 **IDLE** · last touched **15 August 2026** (last commit)
+🟠 **PAUSED** · last touched **11 July 2026** (last commit to project files)
 
 ---
 

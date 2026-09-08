@@ -476,7 +476,7 @@ without any warranty.
 
 New here, or coming back after a while? Read [`index.ep.md`](index.ep.md) (or open [`index.ep.html`](index.ep.html) in a browser) — the standard card that answers what this is, where to look first, and how to run it, in the same shape for every project.
 
-🟡 **IDLE** · last touched **15 August 2026**
+🟠 **PAUSED** · last touched **11 July 2026**
 
 ## Ownership
 
