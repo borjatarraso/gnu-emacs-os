@@ -50,3 +50,10 @@ boot-*.log
 /console.txt
 /quick_console.txt
 /quick_console_fish.txt
+
+# >>> lynx-factory local metadata — never commit (see INDEX.md)
+/INDEX.md
+/DESCRIPTION.md
+/USERGUIDE.md
+/BACKLOG.md
+# <<< lynx-factory local metadata
