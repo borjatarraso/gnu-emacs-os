@@ -45,7 +45,7 @@ For Hurd: on a fresh Debian GNU/Hurd 0.9 image, run `install/hurd-bootstrap.sh` 
 ## Run it
 
 ```bash
-cd ~/claude/emacs-os
+cd ~/devel/emacs-os
 make                                  # Makefile default target
 ```
 
