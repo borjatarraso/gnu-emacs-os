@@ -1,6 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+# Copyright (C) 2026  Adrian Yanes <ayanes@gnu.org>
 #
 # This file is part of GEOS.
 #
@@ -31,22 +32,19 @@
 #
 # the invocation tracks v0.2's xorg pipeline:
 #   - 2GB RAM (less and emacs starts swapping during exwm-enable)
-#   - kvm acceleration (boot is unbearable without it)
-#   - -vga virtio + -display gtk: matches xorg-modesetting.conf, which
-#     binds the modesetting driver against /dev/dri/card0 from
-#     virtio_gpu. -vga std gives a black screen because there is no
-#     DRM device for modesetting to attach to.
-#   - usb-tablet on an xhci bus: absolute pointer, no pointer-grab
-#     dance. lands on /dev/input/event4 where xorg-modesetting.conf
-#     is configured to find it. without this the X session has a
-#     keyboard but no mouse.
-#   - serial mon:stdio (so pid1's /dev/console writes hit the tty)
+#   - host-appropriate accel via qemu-accel.sh (kvm on linux, tcg elsewhere)
+#   - -vga virtio + display from qemu-accel.sh (gtk on linux, cocoa on macOS)
+#   - usb-tablet on an xhci bus: absolute pointer; xorg reads
+#     /run/geos/input-ptr (stable symlink from pid1, not a fixed eventN)
+#   - serial from qemu-accel.sh (stdio on linux/kvm, file on macOS)
 #   - boot d (cdrom first), -cdrom path (the ISO)
 #
 # the exact command is echo'd before exec so a developer can copy it
 # out of the log and tweak by hand without grepping this script.
 
 set -eu
+
+SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 
 if [ $# -lt 1 ]; then
     echo "usage: $0 <iso-path> [extra qemu args...]" >&2
@@ -63,16 +61,19 @@ fi
 
 QEMU=qemu-system-x86_64
 
+# shellcheck disable=SC1091
+eval "$("$SELF_DIR/qemu-accel.sh" 2>/dev/null)"
+
+# shellcheck disable=SC2086
 set -- \
-    -enable-kvm \
+    $QEMU_ACCEL \
     -m 2048 \
-    -cpu host \
     -smp 2 \
     -vga virtio \
-    -display gtk \
+    $QEMU_DISPLAY \
+    $QEMU_SERIAL \
     -device qemu-xhci,id=xhci \
     -device usb-tablet,bus=xhci.0 \
-    -serial mon:stdio \
     -boot d \
     -cdrom "$ISO" \
     "$@"

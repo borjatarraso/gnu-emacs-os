@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+ * Copyright (C) 2026  Adrian Yanes <ayanes@gnu.org>
  *
  * This file is part of GEOS.
  *
@@ -1558,6 +1559,163 @@ dump_file_to_console(const char *path, const char *tag, size_t max)
     }
 }
 
+/* extract /dev/input/eventN from an "H: Handlers=..." line. returns 0
+ * on success, -1 if no event node is present. */
+static int
+handlers_event_path(const char *handlers, char *path, size_t pathlen)
+{
+    const char *ev;
+    char *end;
+    unsigned long n;
+
+    if (!handlers || !path || pathlen < 20)
+        return -1;
+    ev = strstr(handlers, "event");
+    if (!ev)
+        return -1;
+    ev += 5;
+    n = strtoul(ev, &end, 10);
+    if (end == ev || n > 1024)
+        return -1;
+    if (snprintf(path, pathlen, "/dev/input/event%lu", n) >= (int)pathlen)
+        return -1;
+    return 0;
+}
+
+/* parse /proc/bus/input/devices and publish stable symlinks for Xorg:
+ *   /run/geos/input-kbd -> the kbd handler device
+ *   /run/geos/input-ptr -> the QEMU usb-tablet (absolute pointer)
+ * eventN numbering shifts across qemu hosts; these names do not. */
+static void
+setup_input_symlinks(void)
+{
+    static const char *kbd_link = "/run/geos/input-kbd";
+    static const char *ptr_link = "/run/geos/input-ptr";
+    FILE *f;
+    char line[512];
+    char name[256];
+    char handlers[256];
+    char kbd_tgt[PATH_MAX];
+    char ptr_tgt[PATH_MAX];
+    int have_kbd = 0;
+    int have_ptr = 0;
+
+    kbd_tgt[0] = '\0';
+    ptr_tgt[0] = '\0';
+    name[0] = '\0';
+    handlers[0] = '\0';
+
+    f = fopen("/proc/bus/input/devices", "r");
+    if (!f) {
+        console("pid1: setup_input_symlinks: cannot open "
+                "/proc/bus/input/devices");
+        return;
+    }
+
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '\n' || line[0] == '\0') {
+            if (name[0] && handlers[0]) {
+                char evpath[PATH_MAX];
+                if (!have_kbd && strstr(handlers, "kbd")
+                    && handlers_event_path(handlers, evpath, sizeof evpath) == 0
+                    && strstr(name, "keyboard")) {
+                    size_t n = strlen(evpath);
+                    if (n >= sizeof kbd_tgt)
+                        n = sizeof kbd_tgt - 1;
+                    memcpy(kbd_tgt, evpath, n);
+                    kbd_tgt[n] = '\0';
+                    have_kbd = 1;
+                }
+                if (!have_ptr && strstr(name, "USB Tablet")
+                    && handlers_event_path(handlers, evpath, sizeof evpath) == 0) {
+                    size_t n = strlen(evpath);
+                    if (n >= sizeof ptr_tgt)
+                        n = sizeof ptr_tgt - 1;
+                    memcpy(ptr_tgt, evpath, n);
+                    ptr_tgt[n] = '\0';
+                    have_ptr = 1;
+                }
+            }
+            name[0] = '\0';
+            handlers[0] = '\0';
+            continue;
+        }
+        if (strncmp(line, "N: Name=", 8) == 0) {
+            const char *p = line + 8;
+            size_t n = strcspn(p, "\n");
+            if (n >= sizeof name)
+                n = sizeof name - 1;
+            memcpy(name, p, n);
+            name[n] = '\0';
+            continue;
+        }
+        if (strncmp(line, "H: Handlers=", 12) == 0) {
+            const char *p = line + 12;
+            size_t n = strcspn(p, "\n");
+            if (n >= sizeof handlers)
+                n = sizeof handlers - 1;
+            memcpy(handlers, p, n);
+            handlers[n] = '\0';
+        }
+    }
+    fclose(f);
+
+    /* last block if file does not end with a blank line */
+    if (name[0] && handlers[0]) {
+        char evpath[PATH_MAX];
+        if (!have_kbd && strstr(handlers, "kbd")
+            && handlers_event_path(handlers, evpath, sizeof evpath) == 0
+            && strstr(name, "keyboard")) {
+            size_t n = strlen(evpath);
+            if (n >= sizeof kbd_tgt)
+                n = sizeof kbd_tgt - 1;
+            memcpy(kbd_tgt, evpath, n);
+            kbd_tgt[n] = '\0';
+            have_kbd = 1;
+        }
+        if (!have_ptr && strstr(name, "USB Tablet")
+            && handlers_event_path(handlers, evpath, sizeof evpath) == 0) {
+            size_t n = strlen(evpath);
+            if (n >= sizeof ptr_tgt)
+                n = sizeof ptr_tgt - 1;
+            memcpy(ptr_tgt, evpath, n);
+            ptr_tgt[n] = '\0';
+            have_ptr = 1;
+        }
+    }
+
+    if (mkdir("/run/geos", 0755) < 0 && errno != EEXIST) {
+        console("pid1: mkdir /run/geos failed for input symlinks");
+        return;
+    }
+
+    if (have_kbd) {
+        char msg[PATH_MAX + 64];
+        unlink(kbd_link);
+        if (symlink(kbd_tgt, kbd_link) == 0) {
+            snprintf(msg, sizeof msg, "pid1: input-kbd -> %s", kbd_tgt);
+            console(msg);
+        } else {
+            console("pid1: symlink input-kbd failed");
+        }
+    } else {
+        console("pid1: input-kbd not found in /proc/bus/input/devices");
+    }
+
+    if (have_ptr) {
+        char msg[PATH_MAX + 64];
+        unlink(ptr_link);
+        if (symlink(ptr_tgt, ptr_link) == 0) {
+            snprintf(msg, sizeof msg, "pid1: input-ptr -> %s", ptr_tgt);
+            console(msg);
+        } else {
+            console("pid1: symlink input-ptr failed");
+        }
+    } else {
+        console("pid1: input-ptr (usb-tablet) not found");
+    }
+}
+
 /* dump /proc/bus/input/devices to /dev/console, prefixed "input:".
  * called once before xorg_bring_up to verify the kernel created
  * /dev/input/eventN nodes the xorg.conf references, and again after
@@ -2022,8 +2180,10 @@ main(int argc, char **argv)
      * is in xorg_bring_up() so the supervisor can re-call it on Xorg
      * death without duplicating the boot path. */
     if (xorg_path) {
-        /* pre-Xorg diagnostic: kernel input device list. */
+        /* pre-Xorg diagnostic: kernel input device list + stable symlinks
+         * for xorg-modesetting.conf (/run/geos/input-{kbd,ptr}). */
         dump_input_devices();
+        setup_input_symlinks();
         if (xorg_bring_up() < 0) {
             console("pid1: continuing without DISPLAY");
         } else {

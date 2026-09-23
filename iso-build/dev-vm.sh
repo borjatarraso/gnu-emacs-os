@@ -1,6 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+# Copyright (C) 2026  Adrian Yanes <ayanes@gnu.org>
 #
 # This file is part of GEOS.
 #
@@ -19,6 +20,11 @@
 # Author: Borja Tarraso <borja.tarraso@member.fsf.org>
 #
 # dev-vm.sh, build a qcow2 dev image of GEOS and boot it under qemu.
+#
+# host support:
+#   linux + guix + kvm:  native build and boot (this script, default path)
+#   macOS (no guix):     auto-delegates to dev-vm-macos.sh (docker build + tcg)
+#   either platform:     dev-vm.sh --boot <qcow2> once a qcow2 exists
 #
 # v0.3-track. qcow2 over iso9660 because the dev loop wants:
 #   - writable root (so init.el edits survive a reboot)
@@ -46,6 +52,23 @@ set -eu
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SELF_DIR/.." && pwd)
+
+# macOS without Guix: delegate build/default flows to dev-vm-macos.sh.
+# --boot skips delegation: booting an existing qcow2 needs only qemu.
+GEOS_WANT_BOOT_ONLY=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --boot) GEOS_WANT_BOOT_ONLY=1 ;;
+    esac
+done
+
+if [ "$GEOS_WANT_BOOT_ONLY" = 0 ] && ! command -v guix >/dev/null 2>&1; then
+    case "$(uname -s)" in
+        Darwin)
+            exec "$SELF_DIR/dev-vm-macos.sh" "$@"
+            ;;
+    esac
+fi
 
 cd "$REPO_ROOT"
 
@@ -102,7 +125,20 @@ if [ "$BUILD" = 1 ]; then
     # `guix shell --pure` with gcc-toolchain + libxcrypt + emacs.  the
     # LIBXCRYPT_STOREPATH var is passed in because pure shell strips
     # `guix` itself, so the Makefile cannot shell out to find it.
-    make -C pid1 emacs-init >&2
+    #
+    # when the host lacks libc.a (common in minimal guix containers and
+    # on macOS), fall back to `guix shell glibc:static` so PID 1 stays
+    # statically linked. a dynamic emacs-init dies at boot with
+    # "libgcc_s.so.1: cannot open shared object file" before userland.
+    if ! make -C pid1 emacs-init >&2; then
+        if command -v guix >/dev/null 2>&1; then
+            guix shell gcc-toolchain glibc:static make -- \
+                env CC=gcc make -C "$REPO_ROOT/pid1" emacs-init >&2
+        else
+            echo "dev-vm.sh: pid1 build failed and guix is unavailable" >&2
+            exit 1
+        fi
+    fi
     LIBXCRYPT_STOREPATH=$(guix build libxcrypt 2>/dev/null)
     guix shell --pure coreutils bash gcc-toolchain libxcrypt \
         emacs-no-x-toolkit make -- \
@@ -130,6 +166,7 @@ else
         echo "dev-vm.sh: --boot path not found: $QCOW" >&2
         exit 1
     fi
+    QCOW=$(cd "$(dirname "$QCOW")" && pwd)/$(basename "$QCOW")
 fi
 
 if [ "$BOOT" = 0 ]; then
@@ -149,18 +186,19 @@ if [ ! -f "$OVERLAY" ] || [ "$QCOW" -nt "$OVERLAY" ]; then
 fi
 
 QEMU=qemu-system-x86_64
+# shellcheck disable=SC1091
+eval "$("$SELF_DIR/qemu-accel.sh")"
 echo "dev-vm.sh: booting $OVERLAY (overlay over $QCOW)"
 
 # shellcheck disable=SC2086
 exec "$QEMU" \
-    -enable-kvm \
+    $QEMU_ACCEL \
     -m 2048 \
-    -cpu host \
     -smp 2 \
     -vga virtio \
-    -display gtk \
+    $QEMU_DISPLAY \
+    $QEMU_SERIAL \
     -device qemu-xhci,id=xhci \
     -device usb-tablet,bus=xhci.0 \
-    -serial mon:stdio \
     -drive "file=$OVERLAY,format=qcow2,if=virtio" \
     $QEMU_EXTRA

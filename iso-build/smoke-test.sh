@@ -1,6 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025-2026  Borja Tarraso <borja.tarraso@member.fsf.org>
+# Copyright (C) 2026  Adrian Yanes <ayanes@gnu.org>
 #
 # This file is part of GEOS.
 #
@@ -120,16 +121,19 @@ trap cleanup EXIT INT TERM HUP QUIT
 
 echo "smoke-test: booting $QCOW (timeout ${TIMEOUT}s, log $LOG)"
 
-# -display none      no graphical window
+# shellcheck disable=SC1091
+eval "$("$SELF_DIR/qemu-accel.sh" 2>/dev/null)"
+
+# -display none      no graphical window (overrides qemu-accel display)
 # -monitor none      do not steal stdio for the qemu monitor
 # -serial file:LOG   serial console straight to log file
 # -snapshot          all writes to scratch, qcow2 untouched
 # -no-reboot         if anything calls reboot(2), exit qemu instead of
 #                    looping (catches kernel-panic paths fast)
+# shellcheck disable=SC2086
 qemu-system-x86_64 \
-    -enable-kvm \
+    $QEMU_ACCEL \
     -m 2048 \
-    -cpu host \
     -smp 2 \
     -vga virtio \
     -display none \
