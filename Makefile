@@ -73,7 +73,7 @@ endif
 
 distdir = $(PACKAGE)-$(VERSION)
 
-.PHONY: all build-pid1 build-shstub install installdirs install-strip \
+.PHONY: all deps run build-pid1 build-shstub install installdirs install-strip \
         uninstall clean mostlyclean distclean maintainer-clean \
         check installcheck dist TAGS info dvi ps pdf html \
         install-info install-html install-dvi install-ps install-pdf
@@ -82,7 +82,26 @@ distdir = $(PACKAGE)-$(VERSION)
 
 # ---- build ----------------------------------------------------------
 
-all: build-pid1 build-shstub
+# deps verifies the toolchain (checked, never auto-installed: no sudo here).
+# guix is only needed for the bootable image path (iso-build/), so its
+# absence is a note, not an error.
+all: deps build-pid1 build-shstub
+	@chmod +x ./run 2>/dev/null || true
+
+deps:
+	@command -v $(CC) >/dev/null 2>&1 || { echo 'deps: no C compiler found — install gcc or clang (or re-run ./configure with CC=<compiler>).' >&2; exit 1; }
+	@if [ "$(STATIC)" = 1 ]; then \
+	  if ! printf 'int main(void){return 0;}\n' | $(CC) -static -x c - -o /dev/null >/dev/null 2>&1; then \
+	    echo 'deps: no static libc (libc.a) — the default STATIC=1 build cannot link.' >&2; \
+	    echo 'deps:   fix 1  install the static C library (Fedora: glibc-static, Debian: libc6-dev)' >&2; \
+	    echo 'deps:   fix 2  run ./configure --disable-static for a dynamic build' >&2; \
+	    exit 1; \
+	  fi; \
+	fi
+	@command -v guix >/dev/null 2>&1 || echo 'deps: guix not found — only needed to build/boot the system image (see iso-build/ and docs/INSTALL.md).'
+
+run: ## build, then print the ways to boot GEOS (same as ./run)
+	@./run
 
 build-pid1:
 	$(MAKE) -C pid1 emacs-init $(FORWARD)
