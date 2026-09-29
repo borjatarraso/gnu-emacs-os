@@ -50,6 +50,13 @@ document I would actually rather you read first. The picture is
 in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (three zoom
 levels, including the dual-kernel Linux + Hurd seam).
 
+## Quick install
+
+```
+make    # verify the toolchain and build the host-side C parts (pid1, shstub)
+./run   # start with the defaults: build, then print the boot options
+```
+
 For Hurd: on a fresh Debian GNU/Hurd 0.9 image, run
 `install/hurd-bootstrap.sh` as root and reboot. The full recipe
 (apt prereqs, build, rollback path, init.args format) is in

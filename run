@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# ./run: build the host-side C parts and report how to boot GEOS.
+#
+#   ./run               build pid1/ + shstub/ (make -s all) and print the
+#                       boot options; exits 0
+#   ./run --vm          boot the development VM via iso-build/dev-vm.sh
+#                       (needs Guix + QEMU/KVM, checked, with hints)
+#   ./run --smoke       headless boot smoke test via iso-build/smoke-test.sh
+#   ./run --help        this help
+#
+# emacs-init is PID 1 and shstub/sh forwards into a running emacs, so
+# neither runs standalone on a build host.  The real "run" is booting the
+# system image, which is what --vm and --smoke hand you.
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")"
+
+case "${1:-}" in
+    help|-h|--help) grep '^#' "$0" | sed -E '1d; s/^# ?//'; exit 0 ;;
+esac
+
+if [ "${1:-}" = "--vm" ] || [ "${1:-}" = "--smoke" ]; then
+    script=iso-build/dev-vm.sh
+    [ "$1" = "--smoke" ] && script=iso-build/smoke-test.sh
+    command -v guix >/dev/null 2>&1 || {
+        echo "guix not found: the image build needs Guix (https://guix.gnu.org/en/install/), see docs/INSTALL.md" >&2
+        exit 1
+    }
+    command -v qemu-system-x86_64 >/dev/null 2>&1 || {
+        echo "qemu-system-x86_64 not found: install QEMU/KVM, see docs/INSTALL.md" >&2
+        exit 1
+    }
+    exec bash "$script"
+fi
+
+if [ $# -gt 0 ]; then
+    echo "unknown option: $1 (try ./run --help)" >&2
+    exit 2
+fi
+
+make -s all
+echo "build OK: pid1/emacs-init + shstub/sh"
+echo "  boot it:   ./run --vm      (dev VM; needs Guix + QEMU/KVM)"
+echo "  headless:  ./run --smoke   (boot smoke test)"
